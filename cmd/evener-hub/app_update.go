@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"primeradiant.com/evener/appwire"
@@ -24,20 +26,43 @@ var (
 // result to start its health poll.
 const hubRestartDelay = 500 * time.Millisecond
 
+// hubUpdateMu serializes evener/update/apply: copyExecutable in
+// internal/selfupdate writes a fixed dst+".tmp" path, so a second apply
+// racing the first would corrupt the binary a restart is about to exec.
+// It is deliberately left locked after a successful upgrade schedules a
+// restart -- the process is about to be replaced, so a second apply
+// afterward must also be refused, not merely serialized.
+var hubUpdateMu sync.Mutex
+
 // isDevBuild reports whether this hub was built without a release channel
 // (a worktree build). Such a hub is never self-updated: replacing it with a
 // release binary would silently discard whatever the developer is running.
 func isDevBuild() bool { return buildinfo.BuildChannel() == "dev" }
 
-func updateChannel(requested string) string {
-	return envvars.FirstNonEmpty(requested, buildinfo.UpgradeChannel())
+// validateUpdateChannel resolves requested (defaulting to the build's own
+// upgrade channel) and rejects anything but "release" or "snapshot" --
+// unlike selfupdate.Upgrade's ResolveTarget, which also accepts "current",
+// "latest", and arbitrary "v*" tags. Applying an arbitrary release tag would
+// let evener/update/apply install and exec whatever the caller names.
+func validateUpdateChannel(requested string) (string, error) {
+	ch := envvars.FirstNonEmpty(requested, buildinfo.UpgradeChannel())
+	switch ch {
+	case "release", "snapshot":
+		return ch, nil
+	default:
+		return "", fmt.Errorf("unknown update channel %q", ch)
+	}
 }
 
 // hubUpdateCheck answers evener/update/check: compare the running build to
 // the channel's current commit. Dev builds answer locally.
 func hubUpdateCheck(ctx context.Context, params appwire.UpdateCheckParams) (appwire.UpdateCheckResponse, error) {
+	channel, err := validateUpdateChannel(params.Channel)
+	if err != nil {
+		return appwire.UpdateCheckResponse{}, err
+	}
 	resp := appwire.UpdateCheckResponse{
-		Channel:        updateChannel(params.Channel),
+		Channel:        channel,
 		BuildChannel:   buildinfo.BuildChannel(),
 		CurrentVersion: buildinfo.Version(),
 		CurrentCommit:  buildinfo.GitSHA,
@@ -65,7 +90,20 @@ func hubUpdateApply(ctx context.Context, params appwire.UpdateApplyParams) (appw
 	if isDevBuild() {
 		return appwire.UpdateApplyResponse{}, errors.New("this hub is a dev build; rebuild with make build-hub instead of self-updating")
 	}
-	channel := updateChannel(params.Channel)
+	channel, err := validateUpdateChannel(params.Channel)
+	if err != nil {
+		return appwire.UpdateApplyResponse{}, err
+	}
+	if !hubUpdateMu.TryLock() {
+		return appwire.UpdateApplyResponse{}, errors.New("a hub update is already in progress")
+	}
+	unlockOnReturn := true
+	defer func() {
+		if unlockOnReturn {
+			hubUpdateMu.Unlock()
+		}
+	}()
+
 	result, err := runHubSelfUpgrade(ctx, selfupdate.Options{
 		Requested:      channel,
 		CurrentChannel: buildinfo.UpgradeChannel(),
@@ -73,16 +111,32 @@ func hubUpdateApply(ctx context.Context, params appwire.UpdateApplyParams) (appw
 	if err != nil {
 		return appwire.UpdateApplyResponse{}, err
 	}
-	if len(result.Installed) == 0 {
-		return appwire.UpdateApplyResponse{}, fmt.Errorf("upgrade to %s installed no binaries", channel)
+	binary, err := evenerBinaryFrom(channel, result.Installed)
+	if err != nil {
+		return appwire.UpdateApplyResponse{}, err
 	}
-	scheduleHubRestart(result.Installed[0], hubProcessArgs()[1:])
+	// The process is about to be replaced: leave hubUpdateMu held so a
+	// second apply after this one is also refused.
+	unlockOnReturn = false
+	scheduleHubRestart(binary, hubProcessArgs()[1:])
 	return appwire.UpdateApplyResponse{
 		Release:    result.Release,
 		Channel:    result.Channel,
 		Installed:  result.Installed,
 		Restarting: true,
 	}, nil
+}
+
+// evenerBinaryFrom picks the installed "evener" binary out of an upgrade
+// result. installExtractedBinaries also installs "evener-dev" alongside it,
+// so the entry to exec into can't be assumed to be Installed[0].
+func evenerBinaryFrom(channel string, installed []string) (string, error) {
+	for _, path := range installed {
+		if filepath.Base(path) == "evener" {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("upgrade to %s installed no evener binary", channel)
 }
 
 // scheduleHubRestartAfterResponse execs binary with the hub's own arguments

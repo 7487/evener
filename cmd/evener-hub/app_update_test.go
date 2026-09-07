@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"primeradiant.com/evener/appwire"
@@ -16,6 +17,9 @@ func setBuild(t *testing.T, sha, channel string) {
 	prevSHA, prevChannel := buildinfo.GitSHA, buildinfo.Channel
 	buildinfo.GitSHA, buildinfo.Channel = sha, channel
 	t.Cleanup(func() { buildinfo.GitSHA, buildinfo.Channel = prevSHA, prevChannel })
+	// hubUpdateApply deliberately leaves hubUpdateMu locked after a
+	// successful apply; reset it so tests stay independent of run order.
+	hubUpdateMu = sync.Mutex{}
 }
 
 func stubUpdateCheck(t *testing.T, fn func(context.Context, selfupdate.CheckOptions) (selfupdate.CheckResult, error)) *int {
@@ -220,5 +224,124 @@ func TestHubUpdateApplyRejectsResultWithoutInstalledBinary(t *testing.T) {
 	}
 	if len(*restarts) != 0 {
 		t.Fatalf("restart scheduled: %v", *restarts)
+	}
+}
+
+func TestHubUpdateApplyPicksEvenerFromInstalled(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	previousArgs := hubProcessArgs
+	hubProcessArgs = func() []string { return []string{"/old/evener", "hub"} }
+	t.Cleanup(func() { hubProcessArgs = previousArgs })
+	stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		return selfupdate.Result{
+			Release: "snapshot", Channel: "snapshot",
+			// evener-dev listed before evener: picking Installed[0] would be wrong.
+			Installed: []string{"/x/evener-dev", "/x/evener"},
+		}, nil
+	})
+	restarts := stubScheduleRestart(t)
+	if _, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{}); err != nil {
+		t.Fatalf("hubUpdateApply: %v", err)
+	}
+	if len(*restarts) != 1 || (*restarts)[0].binary != "/x/evener" {
+		t.Fatalf("restarts = %v", *restarts)
+	}
+}
+
+func TestHubUpdateApplyErrorsWhenInstalledHasNoEvener(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		return selfupdate.Result{Release: "snapshot", Channel: "snapshot", Installed: []string{"/x/evener-dev"}}, nil
+	})
+	restarts := stubScheduleRestart(t)
+	_, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{})
+	if err == nil || !strings.Contains(err.Error(), "evener") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(*restarts) != 0 {
+		t.Fatalf("restart scheduled: %v", *restarts)
+	}
+}
+
+func TestHubUpdateApplyRejectsUnknownChannel(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	upgrades := stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		t.Fatal("unknown channel must not reach the upgrade seam")
+		return selfupdate.Result{}, nil
+	})
+	restarts := stubScheduleRestart(t)
+	_, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{Channel: "v0.0.1"})
+	if err == nil || !strings.Contains(err.Error(), `unknown update channel "v0.0.1"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if *upgrades != 0 || len(*restarts) != 0 {
+		t.Fatalf("upgrades=%d restarts=%d", *upgrades, len(*restarts))
+	}
+}
+
+func TestHubUpdateApplyRejectsNightlyChannel(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	upgrades := stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		t.Fatal("unknown channel must not reach the upgrade seam")
+		return selfupdate.Result{}, nil
+	})
+	_, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{Channel: "nightly"})
+	if err == nil || !strings.Contains(err.Error(), `unknown update channel "nightly"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if *upgrades != 0 {
+		t.Fatalf("upgrades=%d", *upgrades)
+	}
+}
+
+func TestHubUpdateCheckRejectsUnknownChannel(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	calls := stubUpdateCheck(t, func(context.Context, selfupdate.CheckOptions) (selfupdate.CheckResult, error) {
+		t.Fatal("unknown channel must not reach the check seam")
+		return selfupdate.CheckResult{}, nil
+	})
+	_, err := hubUpdateCheck(context.Background(), appwire.UpdateCheckParams{Channel: "v0.0.1"})
+	if err == nil || !strings.Contains(err.Error(), `unknown update channel "v0.0.1"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if *calls != 0 {
+		t.Fatalf("Check called %d times", *calls)
+	}
+}
+
+func TestHubUpdateApplySerializesConcurrentCalls(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	block := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		entered <- struct{}{}
+		<-block
+		return selfupdate.Result{}, errors.New("boom")
+	})
+	stubScheduleRestart(t)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{})
+		done <- err
+	}()
+	<-entered
+
+	_, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{})
+	if err == nil || !strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("second apply err = %v", err)
+	}
+
+	close(block)
+	if firstErr := <-done; firstErr == nil || !strings.Contains(firstErr.Error(), "boom") {
+		t.Fatalf("first apply err = %v", firstErr)
+	}
+
+	// After a failed upgrade the lock must be released so a later apply proceeds.
+	stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		return selfupdate.Result{Release: "snapshot", Channel: "snapshot", Installed: []string{"/x/evener"}}, nil
+	})
+	if _, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{}); err != nil {
+		t.Fatalf("apply after failure: %v", err)
 	}
 }
