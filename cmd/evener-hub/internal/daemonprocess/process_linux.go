@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -95,7 +97,11 @@ func (p *linuxProcess) inspect(t Target) (identity, error) {
 	}
 	// The end of the kernel's reported clock tick is a conservative upper bound
 	// on process start. Do not accept a reused PID within that tick.
-	started := time.Unix(wall.Sec, wall.Nsec).Add(-time.Duration(boot.Nano())).Add(time.Duration((ticks + 1) * uint64(time.Second) / hz))
+	offset, err := linuxStartOffset(ticks, hz)
+	if err != nil {
+		return identity{}, err
+	}
+	started := time.Unix(wall.Sec, wall.Nsec).Add(-time.Duration(boot.Nano())).Add(offset)
 	argv, err := os.ReadFile(filepath.Join(root, "cmdline"))
 	if err != nil {
 		return identity{}, p.inspectionError(err)
@@ -202,4 +208,21 @@ func linuxClockTicks(data []byte, word int) (uint64, error) {
 		data = data[word*2:]
 	}
 	return 0, errors.New("process clock frequency unavailable")
+}
+
+func linuxStartOffset(ticks, hz uint64) (time.Duration, error) {
+	if hz == 0 || ticks == math.MaxUint64 {
+		return 0, errors.New("invalid process start ticks or clock frequency")
+	}
+	// Keep the full product until division: even valid durations exceed a
+	// uint64 nanosecond intermediate on long-running hosts at ordinary HZ.
+	high, low := bits.Mul64(ticks+1, uint64(time.Second))
+	if high >= hz {
+		return 0, errors.New("process start offset exceeds duration range")
+	}
+	nanos, _ := bits.Div64(high, low, hz)
+	if nanos > math.MaxInt64 {
+		return 0, errors.New("process start offset exceeds duration range")
+	}
+	return time.Duration(nanos), nil
 }

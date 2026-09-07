@@ -60,3 +60,54 @@ func fixtureRendezvousTime(t *testing.T, target Target) time.Time {
 	}
 	return time.Now()
 }
+
+func TestLinuxStartOffsetLargeTicks(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ticks, hz uint64
+		want      time.Duration
+		wantError bool
+	}{
+		{name: "before multiplication overflow", ticks: 18_446_744_072, hz: 100, want: 184_467_440_730_000_000},
+		{name: "after multiplication overflow", ticks: 18_446_744_073, hz: 100, want: 184_467_440_740_000_000},
+		{name: "long lived host", ticks: 20_000_000_000, hz: 100, want: 200_000_000_010_000_000},
+		{name: "maximum duration", ticks: 1<<63 - 2, hz: 1_000_000_000, want: 1<<63 - 1},
+		{name: "duration overflow", ticks: 1<<63 - 1, hz: 1_000_000_000, wantError: true},
+		{name: "tick overflow", ticks: 1<<64 - 1, hz: 100, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := linuxStartOffset(tc.ticks, tc.hz)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("accepted overflowing offset %d", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("offset=%d err=%v; want %d", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLinuxLargeStartTicksRefuseNewerProcess(t *testing.T) {
+	offset, err := linuxStartOffset(20_000_000_000, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The rendezvous predates the actual start by one second; a wrapped offset
+	// would instead place the same verified session owner years before it.
+	target := validTarget()
+	target.StartedAt = time.Unix(199_999_999, 0)
+	facts := validIdentity()
+	facts.startedAt = time.Unix(0, 0).Add(offset)
+	k := &kernelProcess{facts: facts}
+	p, err := testController(k).Open(target)
+	if err == nil {
+		_ = p.Close()
+		t.Fatal("accepted a process newer than its rendezvous after tick overflow")
+	}
+	if k.signals != 0 {
+		t.Fatal("signaled a newer process")
+	}
+}
