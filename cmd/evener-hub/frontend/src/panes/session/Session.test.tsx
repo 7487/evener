@@ -2165,6 +2165,55 @@ test.each(["success", "refused"])(
   },
 );
 
+test.each(["success", "refused"])("hydrated restart recovery works without navigation: %s", async (outcome) => {
+  const fake = connectFakeClient();
+  const ref = "local:incompatible-root";
+  let status = "restartRequired";
+  fake.on("thread/read", () => readResponse(ref, { status: { type: status } }));
+  fake.on("evener/thread/forceStop", () => {
+    if (outcome === "refused") throw new Error("no direct daemon ownership claim");
+    status = "notLoaded";
+    return {};
+  });
+  fake.on("thread/resume", () => {
+    status = "idle";
+    return readResponse(ref, { status: { type: status } });
+  });
+  render(
+    <ClientProvider client={fake}>
+      <Session params={{ ref }} paneId="p1" focused={true} />
+    </ClientProvider>,
+  );
+  await screen.findByRole("button", { name: "Refresh session" });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Force stop…" }));
+  expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+  expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+  await user.click(screen.getByRole("button", { name: "Force stop…" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+  expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toEqual([
+    { method: "evener/thread/forceStop", params: { ref } },
+  ]);
+  expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+  if (outcome === "refused") {
+    expect(await screen.findByText("no direct daemon ownership claim")).toBeTruthy();
+    expect(
+      (within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("restartRequired");
+  } else {
+    const resume = await screen.findByRole("button", { name: "Resume session" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("notLoaded");
+    await user.click(resume);
+    await waitFor(() => expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("idle"));
+    expect(fake.calls.filter((call) => call.method === "thread/resume")).toEqual([
+      { method: "thread/resume", params: { ref } },
+    ]);
+  }
+});
+
 test("confirmed force stop refreshes the session and exposes explicit Resume", async ({ onTestFinished }) => {
   onTestFinished(stubSessionSlots);
   vi.mocked(SessionChromeModule.SessionChrome).mockRestore();

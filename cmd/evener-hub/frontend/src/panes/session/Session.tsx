@@ -138,12 +138,13 @@ function RestartRequiredNotice({
       <Button disabled={refreshing} onClick={() => void refresh()}>
         {resumeRequired ? "Resume session" : "Refresh session"}
       </Button>
+      {!resumeRequired && sessionRef.startsWith("local:") && <SessionForceStopRecovery sessionRef={sessionRef} />}
       {error && <span>{error}</span>}
     </div>
   );
 }
 
-function LoadingSessionRecovery({ sessionRef }: { sessionRef: string }) {
+function SessionForceStopRecovery({ sessionRef }: { sessionRef: string }) {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const stop = async () => {
@@ -370,7 +371,7 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
               ? "If the session is unresponsive, you can stop its process to recover it."
               : undefined
           }
-          action={ref.startsWith("local:") ? <LoadingSessionRecovery sessionRef={ref} /> : undefined}
+          action={ref.startsWith("local:") ? <SessionForceStopRecovery sessionRef={ref} /> : undefined}
         />
       </PaneScaffold>
     );
