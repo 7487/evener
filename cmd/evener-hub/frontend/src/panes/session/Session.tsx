@@ -38,7 +38,7 @@ import { VisuallyHidden } from "../../widgets/internal/VisuallyHidden";
 import { ColdStartSkeleton, useColdStartSkeleton } from "./coldStart";
 import { AskDock, AskDockAnnouncements, useAskDockActivationEpoch, useAskDockPending } from "./composer/askDock";
 import { Composer } from "./composer/Composer";
-import { useBlockedMutationEntries } from "./composer/queue/pendingTurnsStore";
+import { useBlockedMutationEntries, usePendingTurnEntries } from "./composer/queue/pendingTurnsStore";
 import { requestQuoteInsert } from "./composer/quoteInsert";
 import { cadenceStateForStatus, NOW_TICK_MS, SessionNowContext, useNowTick } from "./liveness";
 import { PendingChips } from "./pending/PendingChips";
@@ -109,11 +109,13 @@ function RestartRequiredNotice({
   sessionRef,
   resumeRequired = false,
   unloaded,
+  pendingSend,
   ownerRef,
 }: {
   sessionRef: string;
   resumeRequired?: boolean;
   unloaded: boolean;
+  pendingSend: boolean;
   ownerRef?: string;
 }) {
   const [refreshing, setRefreshing] = useState(false);
@@ -147,7 +149,7 @@ function RestartRequiredNotice({
       </Button>
       {!ownerRef &&
         sessionRef.startsWith("local:") &&
-        (!resumeRequired || (unloaded && (refreshing || error !== null))) && (
+        (!resumeRequired || (unloaded && (pendingSend || refreshing || error !== null))) && (
           <SessionForceStopRecovery sessionRef={sessionRef} />
         )}
       {error && <span>{error}</span>}
@@ -186,6 +188,7 @@ function SessionForceStopRecovery({ sessionRef }: { sessionRef: string }) {
 export default function Session({ params, paneId, focused: paneFocused }: PaneProps<SessionPaneParams>) {
   const { ref } = params;
   const blockedMutations = useBlockedMutationEntries(ref);
+  const pendingSends = usePendingTurnEntries(ref, "send");
 
   // One ensureThread(ref) claim on mount, one matching releaseThread(ref) on
   // unmount. AppShell mounts DockHost (and therefore this pane)
@@ -396,6 +399,12 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
       ? model.parentRef
       : undefined;
 
+  const showRestartNotice =
+    model.status.type === "restartRequired" ||
+    restartPending ||
+    (blockedMutations.length > 0 && (model.status.type === "notLoaded" || !mutationStateAuthoritative));
+  const unloadedSendPending = model.status.type === "notLoaded" && pendingSends.length > 0;
+
   const cadence = <Cadence state={cadenceStateForStatus(model.status.type)} frameTimes={frameTimes} now={now} />;
 
   const transcriptContent = (
@@ -482,21 +491,21 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
               retry={model.modelRetry}
               primaryModel={model.model}
             />
-            {(model.status.type === "restartRequired" ||
-              restartPending ||
-              (blockedMutations.length > 0 && (model.status.type === "notLoaded" || !mutationStateAuthoritative))) && (
+            {showRestartNotice && (
               <RestartRequiredNotice
                 sessionRef={ref}
                 ownerRef={recoveryOwnerRef}
                 resumeRequired={model.status.type !== "restartRequired" && !recoveryOwnerRef}
                 unloaded={model.status.type === "notLoaded"}
+                pendingSend={pendingSends.length > 0}
               />
             )}
             {ref.startsWith("local:") &&
               !recoveryOwnerRef &&
-              !navigationSummaryFor(ref, navigation) &&
+              (unloadedSendPending
+                ? !showRestartNotice
+                : !navigationSummaryFor(ref, navigation) && model.status.type !== "notLoaded") &&
               model.status.type !== "restartRequired" &&
-              model.status.type !== "notLoaded" &&
               model.status.type !== "closed" && <SessionForceStopRecovery sessionRef={ref} />}
             {reconciliationFailed && (
               <div role="alert">Message recovery has not completed. Sending will resume after recovery succeeds.</div>

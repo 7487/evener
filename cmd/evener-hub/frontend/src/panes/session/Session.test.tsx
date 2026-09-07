@@ -2578,3 +2578,79 @@ test("recovery rejection blocks durable dispatch and refreshes the Resume contro
     vi.useRealTimers();
   }
 });
+
+test.each(["pending", "failed"])(
+  "saved Send exposes confirmed recovery when automatic resume is %s",
+  async (outcome) => {
+    const fake = connectFakeClient();
+    const ref = "local:saved-auto-resume";
+    let daemonStarted = false;
+    let stopped = false;
+    let mutationId = "";
+    let rejectRead: (error: Error) => void = () => {};
+    const resumedRead = new Promise<never>((_, reject) => {
+      rejectRead = reject;
+    });
+    const blocked = () =>
+      new WireError("resumed daemon read unavailable", -32014, {
+        evenerErrorInfo: "mutationOutcomeUnknown",
+        clientMutationId: mutationId,
+        mutationOutcome: "unknown",
+        retryDisposition: "blocked",
+      });
+    fake.on("thread/read", () => {
+      const response = readResponse(ref, { status: { type: "notLoaded" } });
+      response.thread.evener.instanceId = "saved-instance";
+      response.thread.evener.mutationStateAuthoritative = false;
+      response.thread.evener.resumeRequired = stopped;
+      return response;
+    });
+    fake.on("turn/start", (params) => {
+      mutationId = params.clientMutationId;
+      daemonStarted = true;
+      return resumedRead;
+    });
+    fake.on("evener/thread/forceStop", () => {
+      expect(daemonStarted).toBe(true);
+      stopped = true;
+      rejectRead(blocked());
+      return {};
+    });
+    try {
+      render(
+        <ClientProvider client={fake}>
+          <Session params={{ ref }} paneId="p1" focused={true} />
+        </ClientProvider>,
+      );
+      await waitFor(() => expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("notLoaded"));
+      await act(async () => {
+        await threadsStore.getState().refreshThread(ref);
+      });
+      expect(threadsStore.getState().restartBlockingObligations.has(ref)).toBe(false);
+      expect(screen.queryByRole("button", { name: "Force stop…" })).toBeNull();
+      await act(async () => {
+        await threadsStore.getState().send(ref, "continue the saved conversation");
+      });
+      await waitFor(() => expect(daemonStarted).toBe(true));
+      if (outcome === "failed") {
+        await act(async () => rejectRead(blocked()));
+        await waitFor(async () => expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown"));
+      }
+      expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("notLoaded");
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("button", { name: "Force stop…" }));
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+      await waitFor(() => expect(stopped).toBe(true));
+      expect(await screen.findByRole("button", { name: "Resume session" })).toBeTruthy();
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toEqual([
+        { method: "evener/thread/forceStop", params: { ref } },
+      ]);
+      expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+      expect((await mutationStorage.getOutbox(mutationId))?.composerText).toBe("continue the saved conversation");
+    } finally {
+      await act(async () => rejectRead(blocked()));
+    }
+  },
+);
