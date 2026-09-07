@@ -108,9 +108,11 @@ function EmptyTranscript({ active, restartRequired }: { active: boolean; restart
 function RestartRequiredNotice({
   sessionRef,
   resumeRequired = false,
+  unloaded,
 }: {
   sessionRef: string;
   resumeRequired?: boolean;
+  unloaded: boolean;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -138,7 +140,9 @@ function RestartRequiredNotice({
       <Button disabled={refreshing} onClick={() => void refresh()}>
         {resumeRequired ? "Resume session" : "Refresh session"}
       </Button>
-      {!resumeRequired && sessionRef.startsWith("local:") && <SessionForceStopRecovery sessionRef={sessionRef} />}
+      {sessionRef.startsWith("local:") && (!resumeRequired || (unloaded && (refreshing || error !== null))) && (
+        <SessionForceStopRecovery sessionRef={sessionRef} />
+      )}
       {error && <span>{error}</span>}
     </div>
   );
@@ -466,7 +470,11 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
             {(model.status.type === "restartRequired" ||
               restartPending ||
               (blockedMutations.length > 0 && (model.status.type === "notLoaded" || !mutationStateAuthoritative))) && (
-              <RestartRequiredNotice sessionRef={ref} resumeRequired={model.status.type !== "restartRequired"} />
+              <RestartRequiredNotice
+                sessionRef={ref}
+                resumeRequired={model.status.type !== "restartRequired"}
+                unloaded={model.status.type === "notLoaded"}
+              />
             )}
             {ref.startsWith("local:") &&
               !navigationSummaryFor(ref, navigation) &&

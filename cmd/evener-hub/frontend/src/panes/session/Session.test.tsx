@@ -2457,3 +2457,58 @@ test("a fresh client offers explicit Resume for a server-fenced stopped session"
   ]);
   expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
 });
+
+test.each(["pending", "failed"])(
+  "saved session retains confirmed recovery when resumed daemon read is %s",
+  async (outcome) => {
+    const fake = connectFakeClient();
+    const ref = "local:saved-resume-stall";
+    let daemonStarted = false;
+    let rejectRead: (error: Error) => void = () => {};
+    const resumedRead = new Promise<ReturnType<typeof readResponse>>((_, reject) => {
+      rejectRead = reject;
+    });
+    fake.on("thread/read", () => {
+      const response = readResponse(ref, { status: { type: "notLoaded" } });
+      response.thread.evener.resumeRequired = true;
+      return response;
+    });
+    fake.on("thread/resume", () => {
+      daemonStarted = true;
+      return resumedRead;
+    });
+    fake.on("evener/thread/forceStop", () => {
+      expect(daemonStarted).toBe(true);
+      rejectRead(new Error("resumed daemon read canceled"));
+      return {};
+    });
+    try {
+      render(
+        <ClientProvider client={fake}>
+          <Session params={{ ref }} paneId="p1" focused={true} />
+        </ClientProvider>,
+      );
+      const user = userEvent.setup();
+      const resume = await screen.findByRole("button", { name: "Resume session" });
+      expect(screen.queryByRole("button", { name: "Force stop…" })).toBeNull();
+      await user.click(resume);
+      expect(daemonStarted).toBe(true);
+      if (outcome === "failed") {
+        act(() => rejectRead(new Error("resumed daemon read failed")));
+        await screen.findByText("resumed daemon read failed");
+      } else expect((resume as HTMLButtonElement).disabled).toBe(true);
+      expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("notLoaded");
+      await user.click(await screen.findByRole("button", { name: "Force stop…" }));
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+      await waitFor(() =>
+        expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toEqual([
+          { method: "evener/thread/forceStop", params: { ref } },
+        ]),
+      );
+      expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+    } finally {
+      await act(async () => rejectRead(new Error("fixture cleanup")));
+    }
+  },
+);
