@@ -29,9 +29,9 @@ type CheckOptions struct {
 // running build (CurrentSHA) differs from it.
 type CheckResult struct {
 	Channel         string `json:"channel"`
-	LatestTag       string `json:"latestTag"`
-	LatestCommit    string `json:"latestCommit"`
-	UpdateAvailable bool   `json:"updateAvailable"`
+	LatestTag       string `json:"latest_tag"`
+	LatestCommit    string `json:"latest_commit"`
+	UpdateAvailable bool   `json:"update_available"`
 }
 
 // Check resolves the channel's tag to a commit through the GitHub REST API
