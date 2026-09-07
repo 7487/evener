@@ -1098,7 +1098,13 @@ test("queuing a message end to end: queue -> strip renders -> edit restores text
   const user = userEvent.setup();
   const fake = await mountComposer("ref_a", {
     status: { type: "active" },
-    evener: { ref: "ref_a", capabilities: FULL_CAPABILITIES, queue: { revision: 0 }, activeTurnId: "turn_1" },
+    evener: {
+      ref: "ref_a",
+      mutationStateAuthoritative: true,
+      capabilities: FULL_CAPABILITIES,
+      queue: { revision: 0 },
+      activeTurnId: "turn_1",
+    },
   });
   fake.on("turn/queue", (params) => ({
     receipt: {
