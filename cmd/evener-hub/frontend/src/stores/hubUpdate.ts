@@ -46,6 +46,11 @@ interface Deps {
 
 let deps: Deps = { fetchImpl: (...args) => fetch(...args), reload: () => window.location.reload() };
 
+// checkSequence orders overlapping runCheck calls: only the newest request
+// may write its result, so a slow earlier check cannot clobber a later one.
+// setChannel bumps it too, which retires any check still in flight.
+let checkSequence = 0;
+
 function requireClient(): AppwireClientLike {
   const client = connectionStore.getState().client;
   if (!client) {
@@ -96,19 +101,20 @@ export const hubUpdateStore = createStore<HubUpdateStoreState>((set, get) => ({
   ...INITIAL,
 
   setChannel(channel) {
+    checkSequence++;
     set({ channel, check: null, checking: false, checkError: null, applyError: null, restartTimedOut: false });
   },
 
   async runCheck() {
     set({ checking: true, checkError: null, restartTimedOut: false });
-    const channel = get().channel;
+    const seq = ++checkSequence;
     try {
-      const check = await requireClient().request("evener/update/check", { channel: channel ?? "" });
-      if (get().channel === channel) {
+      const check = await requireClient().request("evener/update/check", { channel: get().channel ?? "" });
+      if (seq === checkSequence) {
         set({ check, checking: false });
       }
     } catch (err) {
-      if (get().channel === channel) {
+      if (seq === checkSequence) {
         set({ check: null, checking: false, checkError: friendlyErrorMessage(err) });
       }
     }
@@ -154,5 +160,6 @@ export function resetHubUpdateStoreForTests(overrides: Partial<Deps> = {}): void
     fetchImpl: overrides.fetchImpl ?? ((...args) => fetch(...args)),
     reload: overrides.reload ?? (() => window.location.reload()),
   };
+  checkSequence = 0;
   hubUpdateStore.setState({ ...INITIAL });
 }

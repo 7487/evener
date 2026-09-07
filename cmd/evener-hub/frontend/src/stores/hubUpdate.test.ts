@@ -34,6 +34,31 @@ function healthFetch(versions: string[]): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+interface CheckSettler {
+  resolve: (value: UpdateCheckResponse) => void;
+  reject: (err: unknown) => void;
+}
+
+// scriptedChecks holds every evener/update/check in flight so a test can
+// settle them in whatever order it wants.
+function scriptedChecks(fake: FakeClient): CheckSettler[] {
+  const settlers: CheckSettler[] = [];
+  fake.on(
+    "evener/update/check",
+    () =>
+      new Promise<UpdateCheckResponse>((resolve, reject) => {
+        settlers.push({ resolve, reject });
+      }),
+  );
+  return settlers;
+}
+
+function settler(settlers: CheckSettler[], index: number): CheckSettler {
+  const found = settlers[index];
+  if (!found) throw new Error(`no check in flight at index ${index}`);
+  return found;
+}
+
 beforeEach(() => {
   connectionStore.setState({ state: "idle", serverInfo: undefined, client: null });
   resetThreadsStoreForTests();
@@ -152,6 +177,71 @@ describe("runCheck", () => {
 
     const state = hubUpdateStore.getState();
     expect(state.check).toBeNull();
+    expect(state.checkError).toBeNull();
+  });
+
+  test("keeps the newest result when two checks on the same channel finish out of order", async () => {
+    vi.useFakeTimers();
+    const fake = connectFakeClient();
+    const settlers = scriptedChecks(fake);
+    hubUpdateStore.getState().setChannel("snapshot");
+
+    act(() => {
+      void hubUpdateStore.getState().runCheck();
+      void hubUpdateStore.getState().runCheck();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const newest = { ...UP_TO_DATE, updateAvailable: true, latestCommit: "3b1c5f8aaaa" };
+    act(() => {
+      settler(settlers, 1).resolve(newest);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    act(() => {
+      settler(settlers, 0).resolve(UP_TO_DATE);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const state = hubUpdateStore.getState();
+    expect(state.check).toEqual(newest);
+    expect(state.checking).toBe(false);
+  });
+
+  test("ignores a late failure from a superseded check on the same channel", async () => {
+    vi.useFakeTimers();
+    const fake = connectFakeClient();
+    const settlers = scriptedChecks(fake);
+    hubUpdateStore.getState().setChannel("snapshot");
+
+    act(() => {
+      void hubUpdateStore.getState().runCheck();
+      void hubUpdateStore.getState().runCheck();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    act(() => {
+      settler(settlers, 1).resolve(UP_TO_DATE);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    act(() => {
+      settler(settlers, 0).reject(new WireError("GET x: 403 Forbidden: API rate limit exceeded", -1));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const state = hubUpdateStore.getState();
+    expect(state.check).toEqual(UP_TO_DATE);
     expect(state.checkError).toBeNull();
   });
 });
