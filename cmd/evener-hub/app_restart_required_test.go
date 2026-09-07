@@ -368,8 +368,8 @@ func TestNavigationCrashRecordCannotEnableRenameForIncompatibleReplacement(t *te
 	const workspaceID = "02wMz5Txv1C3Hut0M8GCeB"
 	const currentID = "02wMz5Txv1C3Hut0M8GCeC"
 	roster := hubcore.NewRosterWithEntries(
-		hubcore.LiveEntry{Entry: rendezvous.Entry{PID: 2, StartedAt: time.Unix(2, 0), WorkspaceRef: "local:" + workspaceID}, SessionID: currentID, Status: appwire.ThreadStatusRestartRequired},
-		hubcore.LiveEntry{Entry: rendezvous.Entry{PID: 1, StartedAt: time.Unix(1, 0), WorkspaceRef: "local:" + workspaceID}, SessionID: "02wMz5Txv1C3Hut0M8GCeD", Status: "errored", Crashed: true},
+		hubcore.LiveEntry{PID: 2, StartedAt: time.Unix(2, 0), WorkspaceRef: "local:" + workspaceID, SessionID: currentID, Status: appwire.ThreadStatusRestartRequired},
+		hubcore.LiveEntry{PID: 1, StartedAt: time.Unix(1, 0), WorkspaceRef: "local:" + workspaceID, SessionID: "02wMz5Txv1C3Hut0M8GCeD", Status: "errored", Crashed: true},
 	)
 	tree := hubcore.Tree{Live: []hubcore.TreeNode{{ID: workspaceID, State: appwire.ThreadStatusRestartRequired}}}
 	inputs := navigationBuildInputsFromTreeSnapshot("generation", 1, tree, nil, hubapi.AttentionSummary{}, roster.List(), nil, nil, nil, nil)
