@@ -395,13 +395,13 @@ func TestForceStopSerializesResumeAndDeletionEntryPoints(t *testing.T) {
 					}
 				}
 				started, finished := make(chan struct{}), make(chan struct{})
+				resumeResult := make(chan error, 1)
 				go func() {
 					defer close(finished)
 					close(started)
 					if operation == "resume" {
-						if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:" + sessionID}); err == nil {
-							t.Error("fixture spawn error lost")
-						}
+						_, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:" + sessionID})
+						resumeResult <- err
 					} else {
 						response, err := web.sessionDelete(t.Context(), appwire.SessionDeleteParams{Ref: "local:" + sessionID})
 						if err != nil || len(response.Deleted) != 1 {
@@ -427,10 +427,26 @@ func TestForceStopSerializesResumeAndDeletionEntryPoints(t *testing.T) {
 				}
 				<-finished
 				if operation == "resume" {
+					// The overlapping resume can observe active recovery between
+					// ownership unlock and completion of the recovery fence.
+					wantOverlap := appwire.ErrorActionUnavailable
+					select {
+					case <-spawned:
+						wantOverlap = appwire.ErrorHubLaunch
+					default:
+					}
+					overlapErr := <-resumeResult
+					if overlapErr == nil || evenerErrorInfoFromData(appserver.WireError(overlapErr).Data) != string(wantOverlap) {
+						t.Fatalf("overlapping resume error=%v want=%s", overlapErr, wantOverlap)
+					}
+					_, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:" + sessionID})
+					if err == nil || evenerErrorInfoFromData(appserver.WireError(err).Data) != string(appwire.ErrorHubLaunch) {
+						t.Fatalf("fresh resume did not return fixture spawn error: %v", err)
+					}
 					select {
 					case <-spawned:
 					default:
-						t.Error("resume never reached spawner after exit")
+						t.Error("fresh resume never reached spawner after force stop returned")
 					}
 				} else if _, err := os.Stat(filepath.Join(stateDir, "sessions", sessionID+".transcript.jsonl")); !os.IsNotExist(err) {
 					t.Fatalf("delete did not remove saved data: %v", err)
