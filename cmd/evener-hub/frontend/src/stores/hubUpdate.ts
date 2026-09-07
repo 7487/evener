@@ -56,7 +56,7 @@ function requireClient(): AppwireClientLike {
 
 async function healthVersion(): Promise<string | null> {
   try {
-    const response = await deps.fetchImpl("/api/health", { credentials: "same-origin" });
+    const response = await deps.fetchImpl("/api/health", { credentials: "same-origin", cache: "no-store" });
     if (!response.ok) return null;
     const body = (await response.json()) as { version?: string };
     return typeof body.version === "string" ? body.version : null;

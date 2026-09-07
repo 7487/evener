@@ -178,6 +178,8 @@ describe("apply", () => {
 
     expect(reload).toHaveBeenCalledTimes(1);
     expect(hubUpdateStore.getState().restartTimedOut).toBe(false);
+    // The poll has to see the NEW hub, so it must never be answered from a cache.
+    expect(fetchImpl).toHaveBeenCalledWith("/api/health", { credentials: "same-origin", cache: "no-store" });
   });
 
   test("gives up after RESTART_TIMEOUT_MS when the version never changes", async () => {
