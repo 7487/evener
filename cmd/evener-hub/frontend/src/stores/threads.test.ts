@@ -8586,6 +8586,59 @@ test.each([true, false])(
   },
 );
 
+test.each(["accepted", "absent", "unavailable"])(
+  "manual retry refreshes authority after another tab blocks a send: %s",
+  async (outcome) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const storage = new MutationOutboxIndexedDB({ createMutationId: () => "manual-other-tab" });
+    const otherTab = new MutationOutboxIndexedDB();
+    const fresh = deferred<ThreadReadResponse>();
+    try {
+      setMutationStorageForTests(storage);
+      const fake = connectFakeClient("connecting");
+      let reads = 0;
+      fake.on("thread/read", () =>
+        ++reads === 1 ? readResponse("ref_a", { status: { type: "idle" } }) : fresh.promise,
+      );
+      let sends = 0;
+      fake.on("turn/queue", (params) => {
+        if (++sends === 1) throw new RequestTimeoutError("response lost");
+        return { receipt: mutationReceipt(params.clientMutationId) };
+      });
+      fake.emitReady();
+      await threadsStore.getState().ensureThread("ref_a");
+      await threadsStore.getState().queue("ref_a", "sentinel");
+      await flushIndexedDBUntil(() => sends === 1);
+      await settleCallerContinuations();
+      await otherTab.markUnknown("manual-other-tab", "blockedUnknown");
+      otherTab.close();
+      expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(true);
+      const retry = retryBlockedMutation("manual-other-tab");
+      await flushIndexedDBUntil(() => reads === 2);
+      expect(reads).toBe(2);
+      expect((await storage.getOutbox("manual-other-tab"))?.state).toBe("blockedUnknown");
+      expect(sends).toBe(1);
+      expect(await retryBlockedMutation("manual-other-tab")).toBe(false);
+      const response = readResponse("ref_a", {
+        status: { type: outcome === "unavailable" ? "restartRequired" : "idle" },
+      });
+      if (outcome === "accepted")
+        response.thread.evener.queue = { revision: 1, clientMutationIds: ["manual-other-tab"] };
+      if (outcome === "unavailable") response.thread.evener.mutationStateAuthoritative = false;
+      fresh.resolve(response);
+      expect(await retry).toBe(outcome !== "unavailable");
+      if (outcome === "absent") await flushIndexedDBUntil(() => sends === 2);
+      expect(sends).toBe(outcome === "absent" ? 2 : 1);
+      if (outcome === "unavailable")
+        expect((await storage.getOutbox("manual-other-tab"))?.state).toBe("blockedUnknown");
+    } finally {
+      fresh.resolve(readResponse("ref_a", { status: { type: "restartRequired" } }));
+      otherTab.close();
+      vi.useRealTimers();
+    }
+  },
+);
+
 test("persistent journal failures wait for periodic recovery between attempts", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {

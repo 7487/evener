@@ -833,14 +833,21 @@ export async function retryBlockedMutation(clientMutationId: string): Promise<bo
   if (!status || status === "restartRequired" || status === "notLoaded") return false;
   if (
     pendingMutationReconciliations.has(record.targetRef) ||
+    pendingThreadHydrations.has(record.targetRef) ||
     threadsStore.getState().restartBlockingObligations.has(record.targetRef) ||
     threadsStore.getState().mutationReconciliationFailures.has(record.targetRef)
   )
     return false;
-  await runtime.storage.markUnknown(clientMutationId, "submitting");
-  notifyMutationPersistence([record.targetRef]);
-  handleDiscoveredMutations(runtime, [record.targetRef]);
-  return true;
+  const client = currentDispatchClient();
+  if (!client) return false;
+  const epoch = dispatchReadyEpoch;
+  // Shared storage can become blocked after this tab's authoritative snapshot.
+  // Only fresh reconciliation may settle it or restore it for dispatch.
+  await handleReady(client, epoch, record.targetRef);
+  if (!isCurrentMutationRuntime(runtime) || currentDispatchClient() !== client || dispatchReadyEpoch !== epoch)
+    return false;
+  const current = await runtime.storage.getOutbox(clientMutationId);
+  return current?.state !== "blockedUnknown";
 }
 
 export async function updateRecoveryMutation(
