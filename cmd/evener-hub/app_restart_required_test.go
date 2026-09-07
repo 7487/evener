@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
 	"primeradiant.com/evener/hubapi"
+	"primeradiant.com/evener/internal/appserver"
 	"primeradiant.com/evener/rendezvous"
 )
 
@@ -1254,5 +1256,41 @@ func TestDaemonRejectionSurvivesDiscoveryFailure(t *testing.T) {
 				t.Fatalf("rejection data=%+v", wire.Data)
 			}
 		})
+	}
+}
+
+func TestHubRejectsMutationForPreviousPIDIdentity(t *testing.T) {
+	daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
+	var mutations atomic.Int32
+	appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(context.Context, appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+		return appwire.ThreadReadResponse{Thread: appwire.Thread{ID: "before", SessionID: "before", Evener: appwire.EvenerThread{Ref: "local:before", Capabilities: appwire.ThreadCapabilities{Compact: true}}}}, nil
+	})
+	appserver.HandleTyped(daemon.Router(), appwire.MethodThreadCompactStart, func(context.Context, appwire.ThreadCompactStartParams) (appwire.EmptyResponse, error) {
+		mutations.Add(1)
+		return appwire.EmptyResponse{}, nil
+	})
+	peer := httptest.NewServer(http.HandlerFunc(daemon.ServeWebSocket))
+	defer peer.Close()
+	runDir := t.TempDir()
+	entry := rendezvous.Entry{PID: os.Getpid(), SessionID: "before", ThreadID: "before", Protocol: appwire.ProtocolVersion, Endpoint: "ws" + strings.TrimPrefix(peer.URL, "http"), SourceID: "local"}
+	writeRendezvous(t, runDir, entry)
+	prober := &changedOwnershipProber{sessionID: "before"}
+	roster := hubcore.NewRoster(runDir, prober)
+	roster.Refresh()
+	entry.SessionID, entry.ThreadID = "after", "after"
+	writeRendezvous(t, runDir, entry)
+	prober.fail = true
+	roster.Refresh()
+	hub := newHubRPCTestServer(t, hubcore.WebConfig{Roster: roster, StateDir: t.TempDir()})
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	var response appwire.EmptyResponse
+	err := client.Request(t.Context(), appwire.MethodThreadCompactStart, appwire.ThreadCompactStartParams{Ref: "local:before"}, &response)
+	if err == nil || mutations.Load() != 0 {
+		t.Fatalf("previous identity mutation error=%v, deliveries=%d", err, mutations.Load())
 	}
 }
