@@ -212,6 +212,7 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
   // transcript…" forever.
   const deletedRef = useThreadsStore((s) => !model && s.deletedRefs.has(ref));
   const restartPending = useThreadsStore((s) => s.restartBlockingObligations.has(ref));
+  const mutationStateAuthoritative = useThreadsStore((s) => s.mutationAuthorityRefs.has(ref));
   const reconciliationFailed = useThreadsStore((s) => s.mutationReconciliationFailures.has(ref));
   const navigation = useNavigationStore();
 
@@ -426,7 +427,7 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
             />
             {(model.status.type === "restartRequired" ||
               restartPending ||
-              (model.status.type === "notLoaded" && blockedMutations.length > 0)) && (
+              (blockedMutations.length > 0 && (model.status.type === "notLoaded" || !mutationStateAuthoritative))) && (
               <RestartRequiredNotice sessionRef={ref} resumeRequired={model.status.type !== "restartRequired"} />
             )}
             {reconciliationFailed && (

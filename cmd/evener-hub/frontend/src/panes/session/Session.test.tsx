@@ -2213,3 +2213,45 @@ test("keeps storage recovery failure visible on a compatible session until recon
   act(() => threadsStore.setState({ mutationReconciliationFailures: new Set() }));
   expect(screen.queryByText(/Message recovery is waiting for browser storage/)).toBeNull();
 });
+
+test.each(["active", "idle"])(
+  "reload of a %s delegate offers recovery for a persisted uncertain send",
+  async (status) => {
+    const mutationId = await seedPendingSend();
+    await mutationStorage.markUnknown(mutationId, "blockedUnknown");
+    const fake = connectFakeClient();
+    let resumed = false;
+    fake.on("thread/read", () =>
+      readResponse("ref_a", {
+        status: { type: status },
+        evener: {
+          ref: "ref_a",
+          capabilities: CAPABILITIES,
+          kind: "subagent",
+          mutationStateAuthoritative: resumed,
+          queue: { revision: 1, clientMutationIds: resumed ? [mutationId] : [] },
+        },
+      }),
+    );
+    fake.on("thread/resume", () => {
+      resumed = true;
+      return readResponse("ref_a", { status: { type: status } });
+    });
+    render(
+      <ClientProvider client={fake}>
+        <Session params={{ ref: "ref_a" }} paneId="p1" focused={true} />
+      </ClientProvider>,
+    );
+    const resume = await screen.findByRole("button", { name: "Resume session" });
+    expect(threadsStore.getState().restartBlockingObligations.size).toBe(0);
+    expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(false);
+    expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown");
+    expect(fake.calls.filter((call) => call.method === "thread/resume" || call.method === "turn/start")).toHaveLength(
+      0,
+    );
+    fireEvent.click(resume);
+    await waitFor(async () => expect(await mutationStorage.getOutbox(mutationId)).toBeUndefined());
+    expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
+  },
+);
