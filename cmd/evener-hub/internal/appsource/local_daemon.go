@@ -763,13 +763,22 @@ func localDaemonMutationEntryError(clientMutationID string, err error) error {
 	return wire
 }
 
+// DaemonInitializeError identifies failures before a daemon accepts session RPCs.
+// Its underlying wire error remains available for protocol error reporting.
+type DaemonInitializeError struct {
+	Err error
+}
+
+func (e DaemonInitializeError) Error() string { return e.Err.Error() }
+func (e DaemonInitializeError) Unwrap() error { return e.Err }
+
 func localDaemonInitializeError(err error) error {
 	mapped := localDaemonCallError(err)
 	var wire appwire.WireError
 	if errors.As(mapped, &wire) && wire.Code != appwire.CodeInternalError {
-		return mapped
+		return DaemonInitializeError{Err: mapped}
 	}
-	return localDaemonDialError(mapped)
+	return DaemonInitializeError{Err: localDaemonDialError(mapped)}
 }
 
 func localDaemonSubscribeReadError(err error) error {

@@ -77,10 +77,9 @@ func withSessionActionOwnership[R any](ctx context.Context, cfg hubcore.WebConfi
 }
 
 func daemonOwnershipMayHaveChanged(err error) bool {
-	var wire appwire.WireError
+	var initialization appsource.DaemonInitializeError
 	var mismatch appwire.ProtocolVersionMismatchError
-	return isSessionUnavailableError(err) || errors.As(err, &mismatch) ||
-		(errors.As(err, &wire) && wire.Code == appwire.CodeInvalidRequest)
+	return isSessionUnavailableError(err) || errors.As(err, &mismatch) || errors.As(err, &initialization)
 }
 
 func lockDeletionTarget(cfg hubcore.WebConfig, ref, threadID string) func() {

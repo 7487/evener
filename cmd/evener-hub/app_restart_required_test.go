@@ -1187,3 +1187,40 @@ func TestHubRPCListDeduplicatesIncompatibleWorkspaceAlias(t *testing.T) {
 		t.Fatalf("search=%+v", search.Data)
 	}
 }
+
+func TestDaemonRejectionSurvivesDiscoveryFailure(t *testing.T) {
+	for _, mutationID := range []string{"", "rejected-message"} {
+		t.Run("mutation="+mutationID, func(t *testing.T) {
+			runDir := filepath.Join(t.TempDir(), "run")
+			if err := os.Mkdir(runDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := hubcore.WebConfig{Roster: hubcore.NewRoster(runDir, &hubcore.StatusProber{})}
+			cfg.Roster.Refresh()
+			rejection := appwire.WireError{Code: appwire.CodeInvalidRequest, Message: "mutation ID already used for another payload", Data: appwire.ErrorData{ClientMutationID: mutationID, MutationOutcome: appwire.MutationOutcomeNotAccepted, RetryDisposition: appwire.RetryDispositionNone}}
+			action := func() (struct{}, error) {
+				if err := os.Remove(runDir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(runDir, []byte("unreadable roster"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return struct{}{}, rejection
+			}
+			var err error
+			if mutationID == "" {
+				_, err = withSessionActionOwnership(t.Context(), cfg, localAppRef(webTestSessionID), "", action)
+			} else {
+				_, err = withDeletionTargetOwnership(t.Context(), cfg, localAppRef(webTestSessionID), "", mutationID, action)
+			}
+			var wire appwire.WireError
+			if !errors.As(err, &wire) || wire.Code != rejection.Code || wire.Message != rejection.Message {
+				t.Fatalf("rejection changed: %v", err)
+			}
+			data, ok := wire.Data.(appwire.ErrorData)
+			if !ok || data.MutationOutcome != appwire.MutationOutcomeNotAccepted || data.ClientMutationID != mutationID {
+				t.Fatalf("rejection data=%+v", wire.Data)
+			}
+		})
+	}
+}
