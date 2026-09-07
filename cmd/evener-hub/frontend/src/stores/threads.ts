@@ -2746,7 +2746,7 @@ export const threadsStore = createStore<ThreadsStoreState>(() => ({
   },
 
   async forceStop(ref) {
-    await requireClient().request("evener/thread/forceStop", { ref });
+    await requireClient().forceStop(ref);
     threadsStore.setState((state) => ({
       restartBlockingObligations: new Map(state.restartBlockingObligations).set(ref, Symbol()),
     }));

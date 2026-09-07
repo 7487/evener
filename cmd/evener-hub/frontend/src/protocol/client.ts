@@ -110,6 +110,7 @@ export class AppwireClient {
   private readonly clientInfo: { name: string; version: string };
 
   private socket: WebSocketLike | null = null;
+  private recoveryClient: AppwireClient | null = null;
   private connectionState: ConnectionState = "idle";
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
@@ -182,6 +183,7 @@ export class AppwireClient {
   }
 
   close(): void {
+    this.recoveryClient?.close();
     if (this.connectionState === "closed") return;
     const socket = this.socket;
     this.socket = null;
@@ -207,6 +209,31 @@ export class AppwireClient {
     this.disarmReconnect();
     this.failAllPending(new ConnectionClosedError("AppwireClient: closed"));
     this.setState("closed");
+  }
+
+  // Recovery owns one short-lived connection so a saturated primary request
+  // queue cannot prevent the user's stop request from reaching the hub.
+  async forceStop(ref: string): Promise<void> {
+    if (this.isClosed()) throw new ConnectionClosedError("AppwireClient: closed");
+    if (this.recoveryClient) throw new Error("A force stop is already pending");
+    const recovery = new AppwireClient({
+      url: this.url,
+      socketFactory: this.socketFactory,
+      now: this.now,
+      clientInfo: this.clientInfo,
+    });
+    this.recoveryClient = recovery;
+    // Bound socket-open as well as handshake/request waits. Closing rejects
+    // the pending operation and disarms any reconnect scheduled by a drop.
+    const timeout = setTimeout(() => recovery.close(), DEFAULT_REQUEST_TIMEOUT_MS);
+    try {
+      await recovery.connect();
+      await recovery.request("evener/thread/forceStop", { ref });
+    } finally {
+      clearTimeout(timeout);
+      recovery.close();
+      this.recoveryClient = null;
+    }
   }
 
   request<M extends MethodName>(

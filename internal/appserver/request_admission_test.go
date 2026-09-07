@@ -79,3 +79,29 @@ func TestRequestAdmissionFailureKeepsConnectionUsable(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryConnectionReachesHandlerWhilePrimaryQueueIsFull(t *testing.T) {
+	server := NewServer(ServerConfig{})
+	blocked := make(chan struct{}, 1)
+	server.blockedEnqueue = func() { blocked <- struct{}{} }
+	started, release := parkThreadList(t, server)
+	enteredRecovery := make(chan struct{})
+	HandleTyped(server.Router(), appwire.MethodEvenerThreadForceStop, func(context.Context, appwire.ThreadForceStopParams) (appwire.EmptyResponse, error) {
+		close(enteredRecovery)
+		return appwire.EmptyResponse{}, nil
+	})
+	hub := serveWebSocketHTTP(t, server)
+	primary := dialRawAppWire(t, hub)
+	initializeRaw(t, primary)
+	for id := int64(2); id < 68; id++ {
+		sendRaw(t, primary, rawRequest(t, id, appwire.MethodThreadList, appwire.ThreadListParams{}))
+	}
+	waitFor(t, "stalled primary worker", started)
+	waitFor(t, "full 64-entry queue blocking primary receive loop", blocked)
+	recovery := dialAppWireClient(t, hub)
+	if err := recovery.Request(t.Context(), appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: "local:owner"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "independent recovery handler", enteredRecovery)
+	release()
+}

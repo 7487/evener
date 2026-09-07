@@ -590,3 +590,76 @@ describe("AppwireClient", () => {
     expect(readyCount).toBe(1);
   });
 });
+
+describe("independent force-stop connection", () => {
+  test("bypasses primary backlog, bounds overlap and closes after confirmed recovery", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = new AppwireClient({
+      url: "wss://hub/rpc?auth=fixture",
+      socketFactory: (url) => {
+        expect(url).toBe("wss://hub/rpc?auth=fixture");
+        const socket = new FakeSocket({ autoInitialize: true });
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const connected = client.connect();
+    const primary = sockets[0];
+    if (!primary) throw new Error("missing primary");
+    primary.open();
+    await connected;
+    const backlog = Array.from({ length: 66 }, () => client.request("thread/list", {}).catch(() => undefined));
+    const stopped = client.forceStop("local:owner");
+    const recovery = sockets[1];
+    if (!recovery) throw new Error("missing independent recovery connection");
+    await expect(client.forceStop("local:other")).rejects.toThrow();
+    recovery.open();
+    await flushUntil(() => sentFrames(recovery).some((frame) => frame.method === "evener/thread/forceStop"));
+    const request = lastSentFrame(recovery);
+    expect(request.method).toBe("evener/thread/forceStop");
+    expect(request.params).toEqual({ ref: "local:owner" });
+    expect(sentFrames(primary).some((frame) => frame.method === "evener/thread/forceStop")).toBe(false);
+    recovery.receive({ id: request.id, result: {} });
+    await stopped;
+    expect(recovery.closeRequests).toHaveLength(1);
+    expect(client.state).toBe("ready");
+    expect(primary.closeRequests).toHaveLength(0);
+    client.close();
+    await Promise.all(backlog);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test.each(["disconnect", "rejected", "handshake timeout", "owner close"])(
+    "cleans up on %s without a recovery retry",
+    async (failure) => {
+      const sockets: FakeSocket[] = [];
+      const client = new AppwireClient({
+        url: "ws://hub/rpc",
+        socketFactory: () => {
+          const socket = new FakeSocket({ autoInitialize: true });
+          sockets.push(socket);
+          return socket;
+        },
+      });
+      const stopped = client.forceStop("local:owner");
+      const rejected = expect(stopped).rejects.toThrow();
+      const recovery = sockets[0];
+      if (!recovery) throw new Error("missing recovery connection");
+      if (failure === "disconnect" || failure === "rejected") {
+        recovery.open();
+        await flushUntil(() => sentFrames(recovery).some((frame) => frame.method === "evener/thread/forceStop"));
+        if (failure === "disconnect") recovery.closeFromServer(1006);
+        else recovery.receive({ id: lastSentFrame(recovery).id, error: { code: -32000, message: "exit unconfirmed" } });
+      } else if (failure === "owner close") {
+        client.close();
+      } else {
+        await vi.advanceTimersByTimeAsync(30_000);
+      }
+      await rejected;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sockets).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+      client.close();
+    },
+  );
+});

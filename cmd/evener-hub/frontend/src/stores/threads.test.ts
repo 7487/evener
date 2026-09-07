@@ -8760,3 +8760,16 @@ test("clear response fences goal responses from the previous instance", async ()
   expect(threadsStore.getState().threads.get("ref_a")?.goal?.objective).toBe("new objective");
   expect(threadsStore.getState().watchedThreads.get("ref_a")?.goal?.objective).toBe("new objective");
 });
+
+test("force stop uses the independent recovery API and records only confirmed success", async () => {
+  const fake = new FakeClient();
+  connectionStore.setState({ client: fake, state: "ready" });
+  const recover = vi.spyOn(fake, "forceStop").mockRejectedValueOnce(new Error("exit unconfirmed"));
+  await expect(threadsStore.getState().forceStop("local:owner")).rejects.toThrow("exit unconfirmed");
+  expect(threadsStore.getState().restartBlockingObligations.has("local:owner")).toBe(false);
+  recover.mockResolvedValueOnce(undefined);
+  await threadsStore.getState().forceStop("local:owner");
+  expect(recover).toHaveBeenNthCalledWith(2, "local:owner");
+  expect(threadsStore.getState().restartBlockingObligations.has("local:owner")).toBe(true);
+  expect(fake.calls.some((call) => call.method === "evener/thread/forceStop")).toBe(false);
+});

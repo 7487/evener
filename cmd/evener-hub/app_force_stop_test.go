@@ -123,7 +123,12 @@ func TestForceStopFailuresDoNotPretendExit(t *testing.T) {
 				}
 				return p, nil
 			})
-			err := forceStopThread(t.Context(), hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: controller}, appwire.ThreadForceStopParams{Ref: "local:" + webTestSessionID}, nil)
+			cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: controller}
+			err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:" + webTestSessionID}, nil)
+			state := cfg.ResumeLocks.RecoveryState(webTestSessionID)
+			if state.Stopping != 0 || state.ResumeRequired != (stage == "exit" || stage == "alreadyExited") {
+				t.Fatalf("incorrect recovery requirement after %s: %+v", stage, state)
+			}
 			if (err == nil) != (stage == "alreadyExited") {
 				t.Fatalf("error=%v", err)
 			}
@@ -997,6 +1002,50 @@ func TestCapturedSessionActionsRejectAdmissionBeforeRecovery(t *testing.T) {
 				fresh := admitSessionRecovery(t.Context(), cfg, appwire.RequestMessage(appwire.NewIntID(2), method, params))
 				if _, err := exactDispatch(fresh, t, server, method, params); err != nil || source.applied != 1 {
 					t.Fatalf("fresh reasoning setting failed: err=%v applied=%d", err, source.applied)
+				}
+			}
+		})
+	}
+}
+
+func TestForceStopUnconfirmedSignalRequiresExplicitResume(t *testing.T) {
+	for _, failure := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			runDir := t.TempDir()
+			entry := rendezvous.Entry{PID: 4242, SessionID: "current", ThreadID: "current", WorkspaceRef: "local:stable", StateDir: t.TempDir(), StartedAt: time.Now()}
+			writeRendezvous(t, runDir, entry)
+			var events []string
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var process daemonprocess.Process = &forceStopProcess{events: &events, waitErr: failure}
+			if errors.Is(failure, context.Canceled) {
+				waiting := &waitingForceStopProcess{entered: make(chan struct{}), release: make(chan struct{})}
+				process = waiting
+				go func() {
+					select {
+					case <-waiting.entered:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
+			}
+			cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+				return process, nil
+			})}
+			if err := forceStopThread(ctx, cfg, appwire.ThreadForceStopParams{Ref: "local:stable"}, nil); err == nil {
+				t.Fatal("unconfirmed exit reported success")
+			}
+			for _, alias := range []string{"stable", "current"} {
+				state := cfg.ResumeLocks.RecoveryState(alias)
+				if !state.ResumeRequired || state.Stopping != 0 {
+					t.Fatalf("signaled alias lost explicit resume requirement: %s %+v", alias, state)
+				}
+				if _, err := hubThreadAutoResume(t.Context(), cfg, appsource.NewRegistry(), appwire.ThreadResumeParams{Session: alias}); err == nil {
+					t.Fatal("automatic resume accepted after unconfirmed termination")
+				}
+				thread := applyThreadResumeRequirement(cfg, "", alias, appwire.Thread{})
+				if !thread.Evener.ResumeRequired {
+					t.Fatal("fresh client cannot discover explicit resume requirement")
 				}
 			}
 		})

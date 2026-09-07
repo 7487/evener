@@ -54,7 +54,8 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	}()
 	aliases := forceStopAliases(entry)
 	finishRecovery := cfg.ResumeLocks.BeginForceStop(aliases)
-	defer func() { finishRecovery(stopErr == nil) }()
+	terminationRequested := false
+	defer func() { finishRecovery(stopErr == nil || terminationRequested) }()
 	if sources != nil {
 		if source, ok := sources.Source("local"); ok {
 			if local, ok := source.(*appsource.LocalDaemonSource); ok {
@@ -92,6 +93,9 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	if err := process.Kill(); err != nil && !errors.Is(err, daemonprocess.ErrExited) {
 		return appwire.Unavailable(fmt.Sprintf("cannot force stop daemon: %v", err))
 	}
+	// A successful signal can outlive the connection or exit-confirmation
+	// deadline. Automatic actions must not restart that daemon afterward.
+	terminationRequested = true
 	exitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := process.Wait(exitCtx); err != nil {
