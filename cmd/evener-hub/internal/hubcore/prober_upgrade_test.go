@@ -79,3 +79,48 @@ func TestRosterReportsRestartRequiredAfterProtocolUpgrade(t *testing.T) {
 		t.Fatalf("replacement activity did not recover: %+v", recovered)
 	}
 }
+
+func TestStatusProberClassifiesProtocolMismatchWithoutMetadata(t *testing.T) {
+	for _, protocol := range []string{"", appwire.ProtocolVersion, "evener-appwire-v3"} {
+		for _, typed := range []bool{false, true} {
+			name := protocol + "/invalid-request"
+			if typed {
+				name = protocol + "/typed-mismatch"
+			}
+			t.Run(name, func(t *testing.T) {
+				peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					conn, err := websocket.Accept(w, r, nil)
+					if err != nil {
+						return
+					}
+					defer conn.CloseNow()
+					var request struct {
+						ID any `json:"id"`
+					}
+					if err := wsjson.Read(r.Context(), conn, &request); err != nil {
+						return
+					}
+					response := map[string]any{"id": request.ID}
+					if typed {
+						response["result"] = appwire.InitializeResponse{ProtocolVersion: "evener-appwire-v3"}
+					} else {
+						response["error"] = map[string]any{"code": appwire.CodeInvalidRequest, "message": "request rejected"}
+					}
+					if err := wsjson.Write(r.Context(), conn, response); err != nil {
+						t.Errorf("write initialize: %v", err)
+					}
+				}))
+				defer peer.Close()
+				prober := &StatusProber{client: peer.Client()}
+				got := prober.Probe(rendezvous.Entry{SessionID: "session-upgrade", ThreadID: "session-upgrade", Protocol: protocol, Endpoint: "ws" + strings.TrimPrefix(peer.URL, "http") + "/rpc"})
+				wantRestart := typed || protocol == "evener-appwire-v3"
+				if got.OK != wantRestart {
+					t.Fatalf("probe = %+v, want restart classification %v", got, wantRestart)
+				}
+				if wantRestart && (got.Status != appwire.ThreadStatusRestartRequired || got.SessionID != "session-upgrade") {
+					t.Fatalf("restart projection = %+v", got)
+				}
+			})
+		}
+	}
+}

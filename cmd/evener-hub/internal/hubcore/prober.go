@@ -55,8 +55,9 @@ func (p *StatusProber) Probe(entry rendezvous.Entry) ProbeResult {
 	if _, err := appClient.Initialize(ctx, appwire.InitializeParams{ClientInfo: appwire.ClientInfo{Name: "evener-hub"}}); err != nil {
 		var wire appwire.WireError
 		var mismatch appwire.ProtocolVersionMismatchError
-		if entry.Protocol != "" && entry.Protocol != appwire.ProtocolVersion &&
-			(errors.As(err, &mismatch) || (errors.As(err, &wire) && wire.Code == appwire.CodeInvalidRequest)) {
+		if errors.As(err, &mismatch) ||
+			(entry.Protocol != "" && entry.Protocol != appwire.ProtocolVersion &&
+				errors.As(err, &wire) && wire.Code == appwire.CodeInvalidRequest) {
 			id := entry.SessionID
 			if id == "" {
 				id = entry.ThreadID
