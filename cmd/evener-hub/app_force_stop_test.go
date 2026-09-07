@@ -948,3 +948,57 @@ func TestRecoveryAdmissionUsesNativeTargetAndPreservesRetryEpoch(t *testing.T) {
 		})
 	}
 }
+
+// recoveryReasoningSource records the externally visible setting application.
+type recoveryReasoningSource struct {
+	relayLifecycleSource
+	applied int
+}
+
+func (s *recoveryReasoningSource) ID() string { return "local" }
+func (s *recoveryReasoningSource) SetThreadReasoningEffort(context.Context, appwire.ThreadReasoningEffortSetParams) error {
+	s.applied++
+	return nil
+}
+
+func TestCapturedSessionActionsRejectAdmissionBeforeRecovery(t *testing.T) {
+	for _, method := range []string{
+		appwire.MethodTurnStart, appwire.MethodTurnSteer, appwire.MethodTurnInterrupt,
+		appwire.MethodThreadModelSet, appwire.MethodThreadVisionModelSet,
+		appwire.MethodThreadReasoningEffortSet, appwire.MethodThreadCompactStart,
+		appwire.MethodThreadClear, appwire.MethodThreadShutdown, appwire.MethodGoalSet,
+		appwire.MethodTurnQueue, appwire.MethodTurnDrainAsSteer,
+		appwire.MethodTurnPromoteQueuedAsSteer, appwire.MethodTurnCancelQueued,
+	} {
+		t.Run(method, func(t *testing.T) {
+			cfg := hubcore.WebConfig{ResumeLocks: hubcore.NewResumeLocks()}
+			source := &recoveryReasoningSource{}
+			sources := appsource.NewRegistry()
+			sources.Add(source)
+			server := newHubAppServer(cfg, sources)
+			params := map[string]any{
+				"ref": "local:admitted-session", "clientMutationId": "old-action",
+				"expectedInstanceId": "instance", "expectedEntryId": "entry", "index": 0,
+				"input":           []appwire.InputItem{{Type: "text", Text: "queued input"}},
+				"reasoningEffort": "high", "model": "test", "modelProvider": "test",
+			}
+			ctx := admitSessionRecovery(t.Context(), cfg, appwire.RequestMessage(appwire.NewIntID(1), method, params))
+			finish := cfg.ResumeLocks.BeginForceStop([]string{"admitted-session"})
+			finish(true)
+			cfg.ResumeLocks.ExplicitResumeCompleted("admitted-session", cfg.ResumeLocks.RecoveryState("admitted-session").Epoch)
+			_, err := exactDispatch(ctx, t, server, method, params)
+			if !isSessionRecoveryAdmissionError(err) {
+				t.Fatalf("old action crossed recovery admission: err=%v applied=%d", err, source.applied)
+			}
+			if source.applied != 0 {
+				t.Fatal("old reasoning setting applied to resumed session")
+			}
+			if method == appwire.MethodThreadReasoningEffortSet {
+				fresh := admitSessionRecovery(t.Context(), cfg, appwire.RequestMessage(appwire.NewIntID(2), method, params))
+				if _, err := exactDispatch(fresh, t, server, method, params); err != nil || source.applied != 1 {
+					t.Fatalf("fresh reasoning setting failed: err=%v applied=%d", err, source.applied)
+				}
+			}
+		})
+	}
+}

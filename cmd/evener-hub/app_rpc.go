@@ -836,7 +836,7 @@ func registerThreadHandlers(
 		return appwire.EmptyResponse{}, setThreadVisionModelWithResume(ctx, cfg, sources, params)
 	})
 	appserver.HandleTyped(server.Router(), appwire.MethodThreadReasoningEffortSet, func(ctx context.Context, params appwire.ThreadReasoningEffortSetParams) (appwire.EmptyResponse, error) {
-		return withDeletionTargetOwnership(ctx, cfg, params.Ref, "", "", func() (appwire.EmptyResponse, error) {
+		return withSessionActionOwnership(ctx, cfg, params.Ref, "", func() (appwire.EmptyResponse, error) {
 			if err := refreshDaemonRestartRequiredError(ctx, cfg, params.Ref, "", ""); err != nil {
 				return appwire.EmptyResponse{}, err
 			}
