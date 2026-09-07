@@ -280,8 +280,13 @@ describe("apply", () => {
 
     expect(reload).toHaveBeenCalledTimes(1);
     expect(hubUpdateStore.getState().restartTimedOut).toBe(false);
-    // The poll has to see the NEW hub, so it must never be answered from a cache.
-    expect(fetchImpl).toHaveBeenCalledWith("/api/health", { credentials: "same-origin", cache: "no-store" });
+    // The poll has to see the NEW hub, so it must never be answered from a cache,
+    // and every attempt carries a deadline so a hung fetch cannot outlive the timeout.
+    for (const call of (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(call[0]).toBe("/api/health");
+      expect(call[1]).toMatchObject({ credentials: "same-origin", cache: "no-store" });
+      expect(call[1].signal).toBeInstanceOf(AbortSignal);
+    }
   });
 
   test("gives up after RESTART_TIMEOUT_MS when the version never changes", async () => {
@@ -310,6 +315,45 @@ describe("apply", () => {
 
     expect(reload).not.toHaveBeenCalled();
     expect(hubUpdateStore.getState().restarting).toBe(false);
+    expect(hubUpdateStore.getState().restartTimedOut).toBe(true);
+  });
+
+  test("aborts a hung health fetch and still times out", async () => {
+    vi.useFakeTimers();
+    const reload = vi.fn();
+    const signals: AbortSignal[] = [];
+    // Never settles on its own; only the store's own deadline can end it.
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (signal) signals.push(signal);
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    }) as unknown as typeof fetch;
+    resetHubUpdateStoreForTests({ fetchImpl, reload });
+    const fake = connectFakeClient();
+    fake.on("evener/update/check", () => ({ ...UP_TO_DATE, updateAvailable: true }));
+    fake.on("evener/update/apply", () => ({
+      release: "snapshot",
+      channel: "snapshot",
+      installed: ["/x/evener"],
+      restarting: true,
+    }));
+    await act(() => hubUpdateStore.getState().runCheck());
+    act(() => {
+      void hubUpdateStore.getState().apply();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RESTART_TIMEOUT_MS + RESTART_POLL_MS);
+    });
+
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(reload).not.toHaveBeenCalled();
     expect(hubUpdateStore.getState().restartTimedOut).toBe(true);
   });
 

@@ -59,14 +59,24 @@ function requireClient(): AppwireClientLike {
   return client;
 }
 
-async function healthVersion(): Promise<string | null> {
+// healthVersion gives up after timeoutMs so a hub that accepts the
+// connection and then never answers cannot outlive RESTART_TIMEOUT_MS.
+async function healthVersion(timeoutMs: number): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await deps.fetchImpl("/api/health", { credentials: "same-origin", cache: "no-store" });
+    const response = await deps.fetchImpl("/api/health", {
+      credentials: "same-origin",
+      cache: "no-store",
+      signal: controller.signal,
+    });
     if (!response.ok) return null;
     const body = (await response.json()) as { version?: string };
     return typeof body.version === "string" ? body.version : null;
   } catch {
-    return null; // the hub is mid-restart; keep polling
+    return null; // the hub is mid-restart or the attempt timed out; keep polling
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -76,7 +86,7 @@ async function waitForNewHub(previous: string | null): Promise<void> {
   const deadline = Date.now() + RESTART_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
-    const version = await healthVersion();
+    const version = await healthVersion(Math.max(0, deadline - Date.now()));
     if (version !== null && version !== previous) {
       hubUpdateStore.setState({ restarting: false });
       deps.reload();
