@@ -29,9 +29,6 @@ func restartRequiredDaemon(ctx context.Context, cfg hubcore.WebConfig, ref, thre
 	if cfg.Roster == nil || threadID == "" {
 		return hubcore.LiveEntry{}, false, nil
 	}
-	if err := cfg.Roster.OwnershipError(); err != nil {
-		return hubcore.LiveEntry{}, false, fmt.Errorf("daemon ownership discovery failed: %w", err)
-	}
 	type ownershipEdge struct {
 		stateDir, ownerID, childID string
 		isSubagent                 bool
@@ -110,6 +107,9 @@ func restartRequiredDaemon(ctx context.Context, cfg hubcore.WebConfig, ref, thre
 	}
 	if unconfirmedDaemonForThread(cfg.Roster, jobTreeRootID) {
 		return hubcore.LiveEntry{}, false, fmt.Errorf("cannot verify daemon ownership in job tree %s", jobTreeRootID)
+	}
+	if err := cfg.Roster.OwnershipError(); err != nil {
+		return hubcore.LiveEntry{}, false, fmt.Errorf("daemon ownership discovery failed: %w", err)
 	}
 	return hubcore.LiveEntry{}, false, nil
 }
