@@ -93,6 +93,9 @@ func TestServerAppWireThreadClearReplaysTheSameReplacement(t *testing.T) {
 	if first.Thread.ID != "new" || second.Thread.ID != "new" {
 		t.Fatalf("clear thread ids = (%q, %q), want replacement new", first.Thread.ID, second.Thread.ID)
 	}
+	if !first.Thread.Evener.MutationStateAuthoritative || !second.Thread.Evener.MutationStateAuthoritative {
+		t.Fatal("root clear snapshots must identify the authoritative replacement mutation state")
+	}
 	if first.Ref != params.Ref || second.Ref != params.Ref {
 		t.Fatalf("clear refs = (%q, %q), want stable %q", first.Ref, second.Ref, params.Ref)
 	}
@@ -121,6 +124,10 @@ func TestServerAppWireThreadClearReplaysTheSameReplacement(t *testing.T) {
 	}
 	if replayed.Thread.ID != "new" || replayed.Receipt.Disposition != appwire.MutationDispositionReplayed {
 		t.Fatalf("restart replay = (%q, %q), want (new, replayed)", replayed.Thread.ID, replayed.Receipt.Disposition)
+	}
+
+	if !replayed.Thread.Evener.MutationStateAuthoritative {
+		t.Fatal("persisted clear receipt lost replacement mutation authority")
 	}
 
 	wrongWorkspace := NewServer(ServerConfig{StateDir: stateDir})
