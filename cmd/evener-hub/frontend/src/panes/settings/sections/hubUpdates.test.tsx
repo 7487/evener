@@ -65,6 +65,8 @@ test("release build checks on mount with the build channel and reports up to dat
   render(<HubSection />);
 
   expect(await screen.findByText(/Up to date on snapshot/)).toBeTruthy();
+  // No Loader is rendered in this (non-restarting) state, so this role="status" match is unambiguous.
+  expect(screen.getByRole("status").textContent).toMatch(/Up to date on snapshot/);
   expect(fake.calls).toContainEqual({ method: "evener/update/check", params: { channel: "snapshot" } });
   expect(screen.getByRole("radio", { name: "Snapshot" }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("button", { name: "Update and restart" })).toHaveProperty("disabled", true);

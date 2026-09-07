@@ -96,7 +96,7 @@ export function HubUpdates() {
             disabled={applying || restarting}
           />
 
-          <p className={CLASS.status}>
+          <p className={CLASS.status} role="status">
             {restarting && <Loader label="Restarting hub" />}
             {!restarting && restartTimedOut && "The hub didn't come back within 30s. Check its logs."}
             {!restarting && !restartTimedOut && checking && "Checking…"}
