@@ -77,3 +77,13 @@ type ThreadForceStopParams struct { Ref string `json:"ref"` }
 - [ ] Run the tests red, implement the action, then run focused tests green.
 - [ ] Run Biome on touched src files, `make test-web`, all five browser guards, and `make merge-approval-gate`. Review the whole branch against its stack base and commit verified changes.
 - [ ] Create a separate PR closing #934, state the #936 dependency, request RoboRev, and address actionable findings without merging.
+
+## Verification boundaries
+
+Darwin does not expose a PID-specific current flock owner. The verifier combines the bound process generation, user, command and start time with a writable matching API-log inode, CLOEXEC, historical lock evidence, and current exclusive contention. This depends on Evener's API logger closing its descriptor when releasing ownership; it never unlocks and retains that descriptor. The historical flag alone does not establish ownership. Deliberate same-user process impersonation is outside this recovery contract.
+
+Linux binds signaling and exit confirmation through a pidfd. Its process start timestamp is rounded conservatively to the end of the reported clock tick, so a rendezvous published inside that first tick can be refused. Checked arithmetic preserves that bound on long-running hosts. Both platforms refuse unavailable verification rather than fall back to numeric-PID signaling. Historical wall-clock changes can make timestamp ordering ambiguous; generation and inode/lock checks remain required independently.
+
+Recovery must remain reachable when both navigation and initial thread hydration fail. A local session loading surface therefore offers the same confirmation as the session menus; the hub remains the authority for whether the ref has a direct daemon owner.
+
+Serialization tests combine ownership of the actual stable/current mutexes with real resume/delete outcomes and acquisition call-site review. They do not infer scheduler timing from sleeps or runtime stack text; Go synctest does not consider mutex waits durably blocked.
