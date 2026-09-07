@@ -677,7 +677,7 @@ func registerThreadHandlers(
 			if wire, ok := errors.AsType[appwire.WireError](err); ok && wire.Code == appwire.CodeInvalidParams {
 				return appwire.TurnStartResponse{}, err
 			}
-			if isTargetDeletedError(err) || isDaemonRestartRequiredError(err) {
+			if isTargetDeletedError(err) || isDaemonRestartRequiredError(err) || isSessionRecoveryAdmissionError(err) {
 				return appwire.TurnStartResponse{}, err
 			}
 			if _, resumeErr := resumeTurnStartThread(ctx, cfg, sources, appwire.ThreadResumeParams{Ref: params.Ref, Session: params.ThreadID}); resumeErr != nil {

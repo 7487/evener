@@ -188,13 +188,25 @@ func sessionRecoveryState(cfg hubcore.WebConfig, ref, threadID string) hubcore.S
 	return cfg.ResumeLocks.RecoveryState(id)
 }
 
+// sessionRecoveryAdmissionError is terminal for an action already rejected by
+// recovery, even if another request explicitly resumes before retry routing.
+// Unwrap preserves the existing wire-level action-unavailable response.
+type sessionRecoveryAdmissionError struct{ appwire.WireError }
+
+func (err sessionRecoveryAdmissionError) Unwrap() error { return err.WireError }
+
+func isSessionRecoveryAdmissionError(err error) bool {
+	_, ok := errors.AsType[sessionRecoveryAdmissionError](err)
+	return ok
+}
+
 func sessionActionRecoveryError(cfg hubcore.WebConfig, ref, threadID string, epoch uint64) error {
 	state := sessionRecoveryState(cfg, ref, threadID)
 	if state.Stopping > 0 || state.ResumeRequired {
-		return appwire.Unavailable("session recovery requires an explicit thread/resume before submitting another action")
+		return sessionRecoveryAdmissionError{appwire.Unavailable("session recovery requires an explicit thread/resume before submitting another action")}
 	}
 	if state.Epoch != epoch {
-		return appwire.Unavailable("session recovery canceled this pending action; submit it again")
+		return sessionRecoveryAdmissionError{appwire.Unavailable("session recovery canceled this pending action; submit it again")}
 	}
 	return nil
 }

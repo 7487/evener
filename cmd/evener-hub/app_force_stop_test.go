@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"primeradiant.com/evener/appwire"
+	"primeradiant.com/evener/cmd/evener-hub/internal/appsource"
 	"primeradiant.com/evener/cmd/evener-hub/internal/daemonprocess"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
 	"primeradiant.com/evener/internal/appserver"
@@ -757,5 +758,51 @@ func TestSessionRecoveryRejectsOldActionsAfterExplicitResume(t *testing.T) {
 	finish(false)
 	if state := sessionRecoveryState(cfg, "local:stable", ""); state.ResumeRequired || state.Stopping != 0 {
 		t.Fatalf("failed stop declared session stopped: %+v", state)
+	}
+}
+
+func TestTurnStartDoesNotRetryRecoveryRejectionAfterExplicitResume(t *testing.T) {
+	cfg := hubcore.WebConfig{ResumeLocks: hubcore.NewResumeLocks()}
+	const ref = "local:recovery-waiter"
+	oldEpoch := sessionRecoveryState(cfg, ref, "").Epoch
+	finish := cfg.ResumeLocks.BeginForceStop([]string{"recovery-waiter"})
+	finish(true)
+	cfg.ResumeLocks.ExplicitResumeCompleted("recovery-waiter", cfg.ResumeLocks.RecoveryState("recovery-waiter").Epoch)
+	stale := sessionActionRecoveryError(cfg, ref, "", oldEpoch)
+	if stale == nil {
+		t.Fatal("fixture did not reject the stale admission")
+	}
+	oldResolve, oldResume := resolveTurnStartSource, resumeTurnStartThread
+	t.Cleanup(func() { resolveTurnStartSource, resumeTurnStartThread = oldResolve, oldResume })
+	resolved, resumed, submitted := 0, 0, 0
+	source := &scriptedAppSource{id: "local", startTurn: func(context.Context, appwire.TurnStartParams) (appwire.TurnStartResponse, error) {
+		submitted++
+		return appwire.TurnStartResponse{}, nil
+	}}
+	resolveTurnStartSource = func(*appsource.Registry, string, string) (appsource.Source, error) {
+		resolved++
+		if resolved == 1 {
+			return nil, stale
+		}
+		return source, nil
+	}
+	resumeTurnStartThread = func(context.Context, hubcore.WebConfig, *appsource.Registry, appwire.ThreadResumeParams) (appwire.ThreadResumeResponse, error) {
+		resumed++
+		return appwire.ThreadResumeResponse{}, nil
+	}
+	server := newHubAppServer(cfg, appsource.NewRegistry())
+	_, err := exactDispatch(t.Context(), t, server, appwire.MethodTurnStart, appwire.TurnStartParams{Ref: ref, ClientMutationID: "pending-before-recovery", Input: []appwire.InputItem{{Type: "text", Text: "old queued input"}}})
+	if err == nil {
+		t.Fatal("stale turn/start was accepted after explicit resume")
+	}
+	wire := appserver.WireError(err)
+	if wire.Code != appwire.CodeUnavailable || evenerErrorInfoFromData(wire.Data) != string(appwire.ErrorActionUnavailable) {
+		t.Fatalf("recovery rejection lost wire classification: %+v", wire)
+	}
+	if wire.Message != stale.Error() {
+		t.Fatalf("wire message changed: %q vs %q", wire.Message, stale.Error())
+	}
+	if resumed != 0 || submitted != 0 || resolved != 1 {
+		t.Fatalf("stale input retried: resolutions=%d resumes=%d submissions=%d", resolved, resumed, submitted)
 	}
 }
