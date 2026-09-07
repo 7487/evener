@@ -754,6 +754,17 @@ function getMutationRuntime(): MutationRuntime | null {
     onStorageChange: (targetRefs) => {
       if (isCurrentMutationRuntime(runtime)) notifyMutationPersistence(targetRefs);
     },
+    onBlockedMutation: (targetRef, client) => {
+      if (!isCurrentMutationRuntime(runtime) || currentDispatchClient() !== client) return;
+      threadsStore.setState((state) => {
+        const mutationAuthorityRefs = new Set(state.mutationAuthorityRefs);
+        mutationAuthorityRefs.delete(targetRef);
+        return { mutationAuthorityRefs };
+      });
+      void handleReady(client, dispatchReadyEpoch, targetRef).catch(() => {
+        // Discovery retries while the mutation lacks authoritative state.
+      });
+    },
     onClearResponse: applyClearResponse,
   });
   const outbox = new MutationOutbox(storage, {

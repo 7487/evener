@@ -7,6 +7,7 @@ import type { MutationOutboxIndexedDB } from "./mutationOutboxIndexedDB";
 export interface MutationDispatcherOptions {
   getClient: (targetRef: string) => AppwireClientLike | null | undefined;
   onStorageChange?: (targetRefs: string[]) => void;
+  onBlockedMutation?: (targetRef: string, client: AppwireClientLike) => void;
   onClearResponse?: (targetRef: string, response: ThreadClearResponse) => void;
 }
 
@@ -14,6 +15,7 @@ export class MutationDispatcher {
   readonly #storage: MutationOutboxIndexedDB;
   readonly #getClient: MutationDispatcherOptions["getClient"];
   readonly #onStorageChange: NonNullable<MutationDispatcherOptions["onStorageChange"]>;
+  readonly #onBlockedMutation: NonNullable<MutationDispatcherOptions["onBlockedMutation"]>;
   readonly #onClearResponse: NonNullable<MutationDispatcherOptions["onClearResponse"]>;
   readonly #dispatching = new Map<string, Promise<void>>();
   readonly #requestedRuns = new Map<string, number>();
@@ -22,6 +24,7 @@ export class MutationDispatcher {
     this.#storage = storage;
     this.#getClient = options.getClient;
     this.#onStorageChange = options.onStorageChange ?? (() => undefined);
+    this.#onBlockedMutation = options.onBlockedMutation ?? (() => undefined);
     this.#onClearResponse = options.onClearResponse ?? (() => undefined);
   }
 
@@ -156,8 +159,12 @@ export class MutationDispatcher {
         data?.mutationOutcome === "unknown" &&
         (data.cause === "persistenceUnavailable" || data.retryDisposition === "blocked")
       ) {
-        await this.#storage.markUnknown(record.clientMutationId, "blockedUnknown");
-        this.#onStorageChange([record.targetRef]);
+        try {
+          await this.#storage.markUnknown(record.clientMutationId, "blockedUnknown");
+          this.#onStorageChange([record.targetRef]);
+        } finally {
+          this.#onBlockedMutation(record.targetRef, client);
+        }
       }
       // Request timeouts, transport failures, and automatically retryable
       // unknown outcomes retain submitting. A later ready/discovery event
