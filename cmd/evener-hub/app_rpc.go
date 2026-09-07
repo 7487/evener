@@ -814,6 +814,9 @@ func registerThreadHandlers(
 	appserver.HandleTyped(server.Router(), appwire.MethodThreadCompactStart, func(ctx context.Context, params appwire.ThreadCompactStartParams) (appwire.EmptyResponse, error) {
 		return appwire.EmptyResponse{}, compactThreadWithResume(ctx, cfg, sources, params)
 	})
+	appserver.HandleTyped(server.Router(), appwire.MethodEvenerThreadForceStop, func(ctx context.Context, params appwire.ThreadForceStopParams) (appwire.EmptyResponse, error) {
+		return appwire.EmptyResponse{}, forceStopThread(ctx, cfg, params)
+	})
 	appserver.HandleTyped(server.Router(), appwire.MethodThreadShutdown, func(ctx context.Context, params appwire.ThreadShutdownParams) (appwire.EmptyResponse, error) {
 		return appwire.EmptyResponse{}, shutdownThreadTolerateExited(ctx, cfg, sources, params)
 	})

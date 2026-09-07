@@ -1632,6 +1632,10 @@ export interface ThreadCompactStartParams {
   ref: string;
 }
 
+export interface ThreadForceStopParams {
+  ref: string;
+}
+
 export interface ThreadForkParams {
   ref: string;
   sourceTurnId: string;
@@ -2120,6 +2124,7 @@ export const METHOD_NAMES = [
   "thread/reasoning-effort/set",
   "thread/vision-model/set",
   "thread/compact/start",
+  "evener/thread/forceStop",
   "thread/shutdown",
   "turn/start",
   "turn/steer",
@@ -2301,6 +2306,7 @@ export interface MethodTypes {
   "thread/reasoning-effort/set": { params: ThreadReasoningEffortSetParams; result: EmptyResponse };
   "thread/vision-model/set": { params: ThreadVisionModelSetParams; result: EmptyResponse };
   "thread/compact/start": { params: ThreadCompactStartParams; result: EmptyResponse };
+  "evener/thread/forceStop": { params: ThreadForceStopParams; result: EmptyResponse };
   "thread/shutdown": { params: ThreadShutdownParams; result: EmptyResponse };
   "turn/start": { params: TurnStartParams; result: TurnStartResponse };
   "turn/steer": { params: TurnSteerParams; result: TurnSteerResponse };

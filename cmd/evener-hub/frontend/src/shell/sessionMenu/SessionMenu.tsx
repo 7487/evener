@@ -34,6 +34,7 @@ export interface SessionMenuActions {
   onOpenPane(pane: SessionPanelKind): void;
   onRename(name: string): Promise<void>;
   onShutdown(): Promise<void>;
+  onForceStop?(): Promise<void>;
   onPin(target: PinTarget, section?: PinSectionInfo): Promise<void>;
   onUnpin(): Promise<void>;
   onToggleArchive(): Promise<void>;
@@ -87,6 +88,7 @@ export function SessionMenu({
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [shutdownOpen, setShutdownOpen] = useState(false);
+  const [forceStopOpen, setForceStopOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -159,6 +161,9 @@ export function SessionMenu({
       onSelect: () => setShutdownOpen(true),
     },
   ];
+  if (actions.onForceStop) {
+    destructiveItems.push({ id: "force-stop", label: "Force stop…", onSelect: () => setForceStopOpen(true) });
+  }
   if (deleteEligible) {
     destructiveItems.push({ id: "delete", label: "Delete…", onSelect: () => setDeleteOpen(true) });
   }
@@ -243,6 +248,38 @@ export function SessionMenu({
           The agent process for this session will stop. You can still read the transcript afterward.
         </p>
       </Dialog>
+
+      {actions.onForceStop && (
+        <Dialog
+          open={forceStopOpen}
+          onClose={() => setForceStopOpen(false)}
+          title="Force stop this session?"
+          footer={
+            <div className={CLASS.footer}>
+              <Button variant="quiet" onClick={() => setForceStopOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() =>
+                  void confirm(
+                    () => actions.onForceStop?.() ?? Promise.resolve(),
+                    () => setForceStopOpen(false),
+                  )
+                }
+              >
+                Force stop
+              </Button>
+            </div>
+          }
+        >
+          <p className={CLASS.body}>
+            Active turns and jobs may be interrupted. Saved transcripts are retained. You can resume the session after
+            its process stops.
+          </p>
+        </Dialog>
+      )}
 
       <Dialog
         open={deleteOpen}

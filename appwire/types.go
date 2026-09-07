@@ -46,6 +46,7 @@ const (
 	MethodThreadVisionModelSet        = "thread/vision-model/set"
 	MethodThreadCompactStart          = "thread/compact/start"
 	MethodThreadShutdown              = "thread/shutdown"
+	MethodEvenerThreadForceStop       = "evener/thread/forceStop"
 	MethodTurnStart                   = "turn/start"
 	MethodTurnSteer                   = "turn/steer"
 	MethodTurnInterrupt               = "turn/interrupt"
@@ -1664,6 +1665,10 @@ type TurnCancelQueuedResponse struct {
 }
 
 type ThreadCompactStartParams struct {
+	Ref string `json:"ref"`
+}
+
+type ThreadForceStopParams struct {
 	Ref string `json:"ref"`
 }
 

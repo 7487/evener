@@ -190,6 +190,7 @@ export interface ThreadsStoreState {
   // views switch to the new instance together.
   clearThread(ref: string): Promise<void>;
   shutdown(ref: string): Promise<void>;
+  forceStop(ref: string): Promise<void>;
   // Forks a thread from a source turn, or - with opts.aside - forks the
   // session at its current tip into a side thread (same wire method,
   // mutually exclusive param sets - see ForkFromTurnOptions). The response
@@ -2741,6 +2742,10 @@ export const threadsStore = createStore<ThreadsStoreState>(() => ({
     dispatchableMutationRefs.add(ref);
     await runtime.dispatcher.dispatchTargets([ref]);
     await refreshMutationPins(runtime, [ref]);
+  },
+
+  async forceStop(ref) {
+    await requireClient().request("evener/thread/forceStop", { ref });
   },
 
   async shutdown(ref) {
