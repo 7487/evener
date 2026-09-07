@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1364,22 +1365,41 @@ func TestRosterRefreshEntryDoesNotSucceedWithoutRouteAfterNewerMiss(t *testing.T
 
 func TestRosterRetainsChangedClaimAfterProbeFailure(t *testing.T) {
 	dir := t.TempDir()
-	entry := rendezvous.Entry{PID: 1001, SessionID: "before", ThreadID: "before", Protocol: "evener-appwire-v3", Endpoint: "ws://daemon/rpc"}
+	entry := rendezvous.Entry{PID: 1001, SessionID: "before", ThreadID: "before", Protocol: appwire.ProtocolVersion, Endpoint: "ws://daemon/rpc"}
 	writeRendezvous(t, dir, entry)
 	prober := &flakyProber{sessionID: "before"}
 	roster := NewRoster(dir, prober)
 	roster.procAlive = func(int) bool { return true }
 	roster.Refresh()
+	previous := entry
+	prober.fail = true
+	roster.Refresh()
+	if !roster.HasConfirmedEntry(previous) {
+		t.Fatal("unchanged identity lost its route during a transient probe failure")
+	}
 	entry.SessionID, entry.ThreadID = "after", "after"
 	writeRendezvous(t, dir, entry)
 	prober.fail = true
-	roster.Refresh()
-	if _, ok := roster.Find("before"); !ok {
-		t.Fatal("previous ownership was discarded")
+	for range 2 {
+		roster.Refresh()
+		if _, ok := roster.Find("before"); ok || roster.HasConfirmedEntry(previous) {
+			t.Fatal("previous identity remains routable after its PID changed identity")
+		}
+		if len(roster.List()) != 0 {
+			t.Fatal("unconfirmed replacement published a live route")
+		}
+		claims := roster.UnconfirmedEntries()
+		if len(claims) != 2 || !slices.Contains(claims, previous) || !slices.Contains(claims, entry) {
+			t.Fatalf("old and changed claims must remain unresolved: %+v", claims)
+		}
 	}
-	claims := roster.UnconfirmedEntries()
-	if len(claims) != 1 || claims[0].SessionID != "after" {
-		t.Fatalf("changed live claim not retained: %+v", claims)
+	prober.fail, prober.sessionID = false, "after"
+	roster.Refresh()
+	if _, ok := roster.Find("after"); !ok || !roster.HasConfirmedEntry(entry) {
+		t.Fatal("confirmed replacement did not acquire its route")
+	}
+	if _, ok := roster.Find("before"); ok || len(roster.UnconfirmedEntries()) != 0 {
+		t.Fatal("confirmed replacement retained previous ownership")
 	}
 }
 

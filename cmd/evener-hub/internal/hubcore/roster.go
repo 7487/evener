@@ -330,6 +330,7 @@ func (r *Roster) refresh() error {
 	// probes) keeps List() responsive while a slow probe pass runs.
 	r.mu.RLock()
 	prevByPID := r.byPID
+	previousUnconfirmed := slices.Clone(r.unconfirmed)
 	r.mu.RUnlock()
 
 	type probeResult struct {
@@ -354,15 +355,33 @@ func (r *Roster) refresh() error {
 	bySess := make(map[string]LiveEntry, len(entries))
 	byPID := make(map[int]LiveEntry, len(entries))
 	var unconfirmed []rendezvous.Entry
+	retainUnconfirmed := func(entry rendezvous.Entry) {
+		if !slices.Contains(unconfirmed, entry) {
+			unconfirmed = append(unconfirmed, entry)
+		}
+	}
 	for _, res := range results {
 		e := res.entry
 		if !res.OK {
-			// The rendezvous file plus a live PID are the authoritative "this
-			// session exists" signal; keep the previously-seen entry while its
-			// process is alive (a transient probe miss).
-			if prev, had := prevByPID[e.PID]; had && r.procAlive(e.PID) {
+			alive := r.procAlive(e.PID)
+			if alive {
+				for _, claim := range previousUnconfirmed {
+					if claim.PID == e.PID {
+						retainUnconfirmed(claim)
+					}
+				}
+			}
+			// A transient probe miss preserves a route only while the complete
+			// rendezvous identity is unchanged. PID liveness cannot confirm a
+			// replacement's ownership of either the old or the new session.
+			if prev, had := prevByPID[e.PID]; had && alive {
 				if !sameDaemonIdentity(prev.Entry, e) {
-					unconfirmed = append(unconfirmed, e)
+					retainUnconfirmed(prev.Entry)
+					resolved := prev.Entry
+					resolved.SessionID = prev.SessionID
+					retainUnconfirmed(resolved)
+					retainUnconfirmed(e)
+					continue
 				}
 				byPID[e.PID] = prev
 				if prev.SessionID != "" {
@@ -372,8 +391,8 @@ func (r *Roster) refresh() error {
 				}
 				continue
 			}
-			if r.procAlive(e.PID) {
-				unconfirmed = append(unconfirmed, e)
+			if alive {
+				retainUnconfirmed(e)
 				continue // ownership is unresolved; do not publish it as a live daemon
 			}
 			// The process is confirmed GONE, yet its rendezvous file is still
