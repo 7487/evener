@@ -295,7 +295,14 @@ function jobNotificationTone(
 
 function titleForJobNotification(attrs: Record<string, string>, type: string): string {
   if (type === "watch-send") return "Watch delivered";
-  if (type === "watch") return "Watch triggered";
+  if (type === "watch") {
+    // A job-targeted condition fire names its job ("Output matched on
+    // job_a1b2"); a job-less timer names what happened ("Timer fired" is
+    // the prose's own lead — keep the title short, the prose carries it).
+    const jobId = (attrs.job_id ?? "").trim();
+    if (jobId) return `Output matched on ${jobId}`;
+    return "Watch triggered";
+  }
   const status = (attrs.status || attrs.event || "notification").trim();
   if (!status) return "Job notification";
   return `Job ${status}`;
@@ -306,7 +313,13 @@ function notificationSecondary(
   tone: NotificationTone,
   description: string,
   analysis: JobNotificationAnalysis,
+  notificationType?: string,
 ): string {
+  // A watch card's secondary names the trigger (the output_match / event the
+  // watch fired on) — the one producer field that says what happened. The
+  // job_type/status/output echo attrs stay out (NotificationCard suppresses
+  // them for watch type too).
+  if (notificationType === "watch") return (attrs.reason ?? "").trim();
   const bits: string[] = [];
   const type = (attrs.job_type ?? "").trim();
   if (description) bits.push(description);
@@ -325,7 +338,11 @@ function parseJobNotification(block: string): ParsedNotification | null {
   const attrs = parseQuotedAttrs(m[1] ?? "");
   const bodyText = (m[2] ?? "").trim();
   let type = "job";
-  if ((attrs.event === "watch" || attrs.status === "watch") && !attrs.job_id) type = "watch";
+  // A watch fire names its watched job (watchNotificationFromWatch always
+  // sets JobID — agent/job_watch.go), so event/status "watch" wins over the
+  // job_id presence check: a job-targeted condition fire is still a watch
+  // delivery, with prose worth keeping and no echo metadata worth showing.
+  if (attrs.event === "watch" || attrs.status === "watch") type = "watch";
   if (attrs.event === "watch_send") type = "watch-send";
   // A watch notification's body is all prose (the fired sentence plus the
   // watch's own note); only a job report carries an excerpt of job output. The
@@ -352,7 +369,7 @@ function parseJobNotification(block: string): ParsedNotification | null {
     type,
     title: titleForJobNotification(attrs, type),
     tone,
-    secondary: notificationSecondary(attrs, tone, description, analysis),
+    secondary: notificationSecondary(attrs, tone, description, analysis, type),
     jobId: attrs.job_id?.trim() || undefined,
     jobType: attrs.job_type?.trim() || undefined,
     watchId: attrs.watch_id?.trim() || undefined,

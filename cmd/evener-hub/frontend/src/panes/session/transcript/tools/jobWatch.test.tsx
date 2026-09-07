@@ -8,6 +8,7 @@
 // registers its exact-match "job_watch" descriptor (exact matches win over
 // the family predicate per toolRenderers.ts).
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
 import type { ItemModel } from "../../../../protocol/model";
 import { toolRendererFor } from "../toolRenderers";
@@ -174,6 +175,24 @@ test("list body renders one row per watch with a status chip and the watch id", 
   expect(text).toContain("ended");
 });
 
+test("list rows are buttons that expand the row's detail sentence (RoboRev PR #954)", async () => {
+  const user = userEvent.setup();
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(<Body item={watchItem({ operation: "list" }, LIST_RAW)} live={false} />);
+  const rows = screen.getAllByTestId("job-watch-row");
+  expect(rows).toHaveLength(3);
+  for (const row of rows) expect(row.tagName).toBe("BUTTON");
+  // Detail hidden until tapped.
+  expect(screen.queryByTestId("job-watch-row-detail")).toBeNull();
+  await user.click(rows[1]!);
+  const detail = screen.getByTestId("job-watch-row-detail").textContent ?? "";
+  expect(detail).toContain("job_a1b2");
+  expect(detail).toContain("ready|done");
+  await user.click(rows[1]!);
+  expect(screen.queryByTestId("job-watch-row-detail")).toBeNull();
+});
+
 const INSPECT_RAW = {
   watch_id: "watch_09QmWzRtNvxK",
   source: "job_a1b2",
@@ -198,6 +217,102 @@ test("inspect body is one sentence with the source, pattern, and budget use", ()
   expect(body).toContain("job_a1b2");
   expect(body).toContain("ready|done");
   expect(body).toContain("3 of 50");
+});
+
+test("inspect body humanizes the embedded heartbeat instead of raw milliseconds (RoboRev PR #954)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(<Body item={watchItem({ operation: "inspect", watch_id: "watch_09QmWzRtNvxK" }, INSPECT_RAW)} live={false} />);
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("every 2m");
+  expect(body).not.toContain("120000");
+});
+
+test("inspect body renders embedded events, every throttle, and filter in words (RoboRev PR #954)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "inspect", watch_id: "watch_ev" },
+        {
+          watch_id: "watch_ev",
+          source: "dlg_7Hk2",
+          watching: true,
+          condition: "events: [assistant.tool] every 3 where tool_name=read_file, status=error",
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("dlg_7Hk2");
+  expect(body).toContain("assistant.tool");
+  expect(body).not.toContain("events: [assistant.tool]");
+  expect(body).not.toContain("where tool_name=");
+});
+
+test("inspect body humanizes a repeating timer condition (RoboRev PR #954)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "inspect", watch_id: "watch_rep" },
+        { watch_id: "watch_rep", source: "self", watching: true, condition: "repeat_seconds: 300" },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("every 5m");
+  expect(body).not.toContain("repeat_seconds");
+});
+
+test("list rows humanize repeating timers and event conditions (RoboRev PR #954)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "list" },
+        {
+          watches: [
+            { watch_id: "watch_rep", source: "self", watching: true, condition: "repeat_seconds: 90" },
+            {
+              watch_id: "watch_ev",
+              source: "dlg_7Hk2",
+              watching: true,
+              condition: "events: [assistant.tool] every 3 where tool_name=read_file, status=error",
+            },
+          ],
+          count: 2,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("every 1m30s");
+  expect(body).not.toContain("repeat_seconds");
+  expect(body).not.toContain("where tool_name=");
+});
+
+test("absent structured state falls back to the raw footer text (RoboRev PR #954)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  const footer = "[watching self · watch_id watch_legacy · after 300s note: hello]";
+  render(
+    <Body
+      item={item({ toolName: "job_watch", argumentsJSON: JSON.stringify({ operation: "create" }), output: footer })}
+      live={false}
+    />,
+  );
+  expect(screen.getByText(footer)).toBeTruthy();
+  // And the summary still degrades to the operation verb, never a bare name.
+  expect(d.summary(item({ toolName: "job_watch", argumentsJSON: JSON.stringify({ operation: "create" }) }))).toBe(
+    "job_watch: create",
+  );
 });
 
 // --- §D: clear + terminal catch-up -----------------------------------------
@@ -261,4 +376,12 @@ test("after 60s reads as one minute and sub-minute stays in seconds", () => {
   expect(d.summary(oneMinute)).toContain("in 1m");
   const halfMinute = watchItem({ operation: "create" }, { ...TIMER_RAW, after_seconds: 45, note: "ping" });
   expect(d.summary(halfMinute)).toContain("in 45s");
+});
+
+test("leftover seconds are kept, never rounded into the minute (RoboRev PR #954)", () => {
+  const d = toolRendererFor("job_watch");
+  const ninety = watchItem({ operation: "create" }, { ...TIMER_RAW, after_seconds: 90, note: "ping" });
+  expect(d.summary(ninety)).toContain("in 1m30s");
+  const repeating = watchItem({ operation: "create" }, { ...TIMER_RAW, after_seconds: undefined, repeat_seconds: 90 });
+  expect(d.summary(repeating)).toContain("every 1m30s");
 });

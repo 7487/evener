@@ -18,6 +18,7 @@ import { Chip } from "../../../../widgets";
 import { requireClass } from "../../../../widgets/internal/requireClass";
 import type { ToolRenderProps } from "../toolRenderers";
 import { registerToolRenderer } from "../toolRenderers";
+import { HeadClippedOutputBody } from "./bodies";
 import { clip, clipJobID, parseArgs, str } from "./helpers";
 import styles from "./jobWatch.module.css";
 
@@ -76,26 +77,39 @@ function strArrayField(object: JsonObject, key: string): string[] {
 }
 
 // humanizeSeconds renders a caller-supplied duration in the units the model
-// asked in: sub-minute stays in seconds ("in 45s"), whole minutes collapse
-// ("in 5m", "in 1m"); an hour or more names hours and leftover minutes
-// ("in 1h05m"). Zero/negative never reaches here (numField filters it) —
-// the caller falls back to the raw footer text instead of inventing one.
+// asked in: sub-minute stays in seconds ("in 45s"); whole minutes collapse
+// ("in 5m", "in 1m"); leftover seconds are kept ("in 1m30s", never a lossy
+// "in 1m" — RoboRev PR #954); an hour or more names hours and leftover
+// minutes ("in 1h05m"). Zero/negative never reaches here (numField filters
+// it) — the caller falls back to the raw footer text instead of inventing
+// one.
 export function humanizeSeconds(totalSeconds: number): string {
   if (totalSeconds < 60) return `in ${Math.round(totalSeconds)}s`;
   const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) return `in ${totalMinutes}m`;
+  const leftoverSeconds = Math.round(totalSeconds % 60);
+  if (totalMinutes < 60) {
+    return leftoverSeconds === 0
+      ? `in ${totalMinutes}m`
+      : `in ${totalMinutes}m${String(leftoverSeconds).padStart(2, "0")}s`;
+  }
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return minutes === 0 ? `in ${hours}h` : `in ${hours}h${String(minutes).padStart(2, "0")}m`;
 }
 
 // humanizeInterval renders a caller-supplied cadence: sub-minute stays in
-// seconds ("every 45s"), whole minutes collapse ("every 2m"), hours name
-// hours ("every 1h"). Same zero/negative contract as humanizeSeconds.
+// seconds ("every 45s"), whole minutes collapse ("every 2m"), leftover
+// seconds are kept ("every 1m30s"); hours name hours ("every 1h"). Same
+// zero/negative contract as humanizeSeconds.
 export function humanizeInterval(totalSeconds: number): string {
   if (totalSeconds < 60) return `every ${Math.round(totalSeconds)}s`;
   const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) return `every ${totalMinutes}m`;
+  const leftoverSeconds = Math.round(totalSeconds % 60);
+  if (totalMinutes < 60) {
+    return leftoverSeconds === 0
+      ? `every ${totalMinutes}m`
+      : `every ${totalMinutes}m${String(leftoverSeconds).padStart(2, "0")}s`;
+  }
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return minutes === 0 ? `every ${hours}h` : `every ${hours}h${String(minutes).padStart(2, "0")}m`;
@@ -280,24 +294,107 @@ function normalizeRow(value: unknown): WatchRow | undefined {
   };
 }
 
-// rowConditionPhrase renders one list row's humanized condition: a live
-// timer reads "in 5m" off its after_seconds (raw seconds, never the stored
-// "after_seconds: 300" text), a live condition watch keeps its pattern plus
-// its cadence, and an ended watch reads as "ended: reason" — never as a
-// warning.
+// A parsed inspect/list Condition string. The producer renders a watch
+// config's trigger as one "; "-joined line (watchConditionSummary,
+// agent/job_watch.go:2460-2494, filter grammar watchEventFilterSummary
+// :2497-2508): `output_match: …`; `after_seconds: N` / `repeat_seconds: N`
+// / `progress_interval_ms: N`; `note: …`; `events: [*]` or
+// `events: [a, b]` with optional `every N` and `where tool_name=X,
+// status=Y`. The reader parses that embedded grammar back — inventing
+// nothing, since inspect's raw carries no separate structured fields.
+interface ParsedCondition {
+  outputMatch?: string;
+  afterSeconds?: number;
+  repeatSeconds?: number;
+  progressIntervalMS?: number;
+  events: string[];
+  every?: number;
+  filterToolName?: string;
+  filterStatus?: string;
+}
+
+function numAfter(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function parseConditionText(condition: string): ParsedCondition {
+  const parsed: ParsedCondition = { events: [] };
+  for (const part of condition.split(";")) {
+    const text = part.trim();
+    const outputMatch = /^output_match:\s*(.+)$/.exec(text)?.[1]?.trim();
+    if (outputMatch) {
+      parsed.outputMatch = outputMatch;
+      continue;
+    }
+    const afterSeconds = /^after_seconds:\s*(\d+)/.exec(text)?.[1];
+    if (afterSeconds !== undefined) {
+      parsed.afterSeconds = numAfter(afterSeconds);
+      continue;
+    }
+    const repeatSeconds = /^repeat_seconds:\s*(\d+)/.exec(text)?.[1];
+    if (repeatSeconds !== undefined) {
+      parsed.repeatSeconds = numAfter(repeatSeconds);
+      continue;
+    }
+    const progressMS = /^progress_interval_ms:\s*(\d+)/.exec(text)?.[1];
+    if (progressMS !== undefined) {
+      parsed.progressIntervalMS = numAfter(progressMS);
+      continue;
+    }
+    const eventsClause = /^events:\s*\[(.*)\]\s*(?:every\s+(\d+))?\s*(?:where\s+(.+))?$/.exec(text);
+    if (eventsClause) {
+      parsed.events = (eventsClause[1] ?? "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name !== "");
+      parsed.every = numAfter(eventsClause[2]);
+      const whereClause = (eventsClause[3] ?? "").trim();
+      if (whereClause) {
+        const tool = /tool_name=([^,\s]+)/.exec(whereClause)?.[1];
+        const status = /status=([^,\s]+)/.exec(whereClause)?.[1];
+        if (tool) parsed.filterToolName = tool;
+        if (status) parsed.filterStatus = status;
+      }
+    }
+    // `note: …` and anything unrecognized stay out: the note is the watch's
+    // own prose (shown by the create body, never by a row), and unknown
+    // future parts degrade to the fallback below rather than inventing
+    // rendering.
+  }
+  return parsed;
+}
+
+// conditionSentence renders one humanized trigger sentence from a parsed
+// Condition: pattern, timer cadence, heartbeat, events, and filter in
+// prose, machine tokens in mono. Shared by list rows (short form) and
+// inspect bodies (full form) so the two never drift.
 function rowConditionPhrase(row: WatchRow): string {
   if (!row.watching) {
     return row.endReason ? `ended: ${row.endReason}` : "ended";
   }
   if (row.condition) {
-    const after = /after_seconds:\s*(\d+)/.exec(row.condition);
-    if (after?.[1]) return `${humanizeSeconds(Number(after[1]))} · ${sourceLabel(row.source)}`;
-    const progress = /progress_interval_ms:\s*(\d+)/.exec(row.condition);
-    const match = /output_match:\s*([^;]+)/.exec(row.condition);
-    const pattern = match?.[1]?.trim();
-    const cadence = progress?.[1] ? ` · ${humanizeInterval(Number(progress[1]) / 1000)}` : "";
-    if (pattern) return `“${pattern}” · ${sourceLabel(row.source)}${cadence}`;
-    return `${row.condition} · ${sourceLabel(row.source)}${cadence}`;
+    const parsed = parseConditionText(row.condition);
+    const source = sourceLabel(row.source);
+    if (parsed.afterSeconds !== undefined) return `${humanizeSeconds(parsed.afterSeconds)} · ${source}`;
+    if (parsed.repeatSeconds !== undefined) {
+      return `every ${humanizeInterval(parsed.repeatSeconds).replace(/^every /, "")} · ${source}`;
+    }
+    const bits: string[] = [];
+    if (parsed.outputMatch) bits.push(`“${parsed.outputMatch}”`);
+    if (parsed.events.length > 0) {
+      const names = parsed.events.includes("*") ? "any event" : parsed.events.join(", ");
+      bits.push(parsed.every !== undefined ? `${names} every ${parsed.every}` : names);
+    }
+    if (parsed.filterToolName || parsed.filterStatus) {
+      bits.push(parsed.filterStatus === "error" ? "failed tool calls" : `calls on ${parsed.filterToolName ?? "?"}`);
+    }
+    if (parsed.progressIntervalMS !== undefined) {
+      bits.push(humanizeInterval(parsed.progressIntervalMS / 1000));
+    }
+    if (bits.length > 0) return `${bits.join(" · ")} · ${source}`;
+    return `${row.condition} · ${source}`;
   }
   return sourceLabel(row.source);
 }
@@ -421,9 +518,20 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
       ) : (
         "matching"
       );
+    // Name the filtered event: in inspect/list context the events array is
+    // not shown separately, and the filter only ever attaches to
+    // assistant.tool — without the name the sentence loses what fires.
+    const eventName =
+      spec.events.length === 1 ? (
+        <>
+          {" "}
+          (<span className={CLASS.mono}>{spec.events[0]}</span>)
+        </>
+      ) : null;
     return (
       <span>
-        Wakes you when <span className={CLASS.mono}>{source}</span> makes a tool call {ending}.
+        Wakes you when <span className={CLASS.mono}>{source}</span> makes a tool call {ending}
+        {eventName}.
       </span>
     );
   }
@@ -466,6 +574,60 @@ function CreateBody({ raw }: { raw: JsonObject }) {
   );
 }
 
+function WatchRow({ row }: { row: WatchRow }) {
+  const [open, setOpen] = useState(false);
+  // Rows are real buttons (mockup §C: tappable rows opening the watch's
+  // details). Expanding shows the row's own detail sentence inline — the
+  // same humanized grammar as the inspect body, minus deliveries/created
+  // which list raw does not carry.
+  const detail = row.watching ? rowDetailPhrase(row) : undefined;
+  return (
+    <div key={row.id}>
+      <button
+        type="button"
+        className={CLASS.row}
+        data-testid="job-watch-row"
+        aria-expanded={detail ? open : undefined}
+        onClick={() => {
+          if (detail) setOpen((previous) => !previous);
+        }}
+      >
+        <Chip>{row.watching ? "watching" : "ended"}</Chip>
+        <span className={CLASS.rowId} title={row.id}>
+          {clipJobID(row.id)}
+        </span>
+        <span className={CLASS.rowCondition}>{rowConditionPhrase(row)}</span>
+      </button>
+      {detail && open ? (
+        <div className={CLASS.section} data-testid="job-watch-row-detail">
+          <div className={CLASS.trigger}>{detail}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// rowDetailPhrase renders the expanded sentence behind a tapped list row:
+// the row's condition plus its deliveries/created context when the raw
+// carries them (inspect-equivalent detail; list entries may omit them).
+function rowDetailPhrase(row: WatchRow): string | undefined {
+  if (!row.watching || !row.condition) return undefined;
+  const parsed = parseConditionText(row.condition);
+  const source = sourceLabel(row.source);
+  if (parsed.outputMatch) {
+    const heartbeat =
+      parsed.progressIntervalMS !== undefined
+        ? `, heartbeat ${humanizeInterval(parsed.progressIntervalMS / 1000)}`
+        : "";
+    const deliveries =
+      row.deliveries !== undefined ? ` — ${row.deliveries} of ${WATCH_DELIVERY_BUDGET} deliveries used` : "";
+    return `Watching ${source} for “${parsed.outputMatch}”${heartbeat}${deliveries}.`;
+  }
+  if (parsed.afterSeconds !== undefined) return `Reminds ${humanizeSeconds(parsed.afterSeconds)}.`;
+  if (parsed.repeatSeconds !== undefined) return `Reminds ${humanizeInterval(parsed.repeatSeconds)}.`;
+  return undefined;
+}
+
 function ListBody({ raw }: { raw: JsonObject }) {
   const live = Array.isArray(raw.watches) ? raw.watches : [];
   const recent = Array.isArray(raw.recent_watches) ? raw.recent_watches : [];
@@ -486,13 +648,7 @@ function ListBody({ raw }: { raw: JsonObject }) {
   return (
     <div>
       {rows.map((row) => (
-        <div key={row.id} className={CLASS.row} data-testid="job-watch-row">
-          <Chip>{row.watching ? "watching" : "ended"}</Chip>
-          <span className={CLASS.rowId} title={row.id}>
-            {clipJobID(row.id)}
-          </span>
-          <span className={CLASS.rowCondition}>{rowConditionPhrase(row)}</span>
-        </div>
+        <WatchRow key={row.id} row={row} />
       ))}
     </div>
   );
@@ -534,28 +690,80 @@ function InspectBody({ raw }: { raw: JsonObject }) {
     );
   }
   const condition = strField(raw, "condition");
-  const match = condition ? /output_match:\s*([^;]+)/.exec(condition) : null;
-  const pattern = match?.[1]?.trim();
+  const parsed = condition ? parseConditionText(condition) : undefined;
   const deliveries = typeof raw.deliveries === "number" ? raw.deliveries : undefined;
   const created = formatCreatedDate(strField(raw, "created_at"));
+  const used = deliveries !== undefined ? ` — ${deliveries} of ${WATCH_DELIVERY_BUDGET} deliveries used` : "";
+  const since = created ? `, ${created}` : "";
+  // Every embedded condition form renders humanized: pattern, timer
+  // cadence, heartbeat, events (+every throttle), and filter — the same
+  // sentence grammar as the create/inspect one-liners, never raw keys.
+  if (parsed?.outputMatch) {
+    return (
+      <div className={CLASS.section}>
+        <div className={CLASS.trigger} data-testid="job-watch-trigger">
+          <span>
+            Watching <span className={CLASS.mono}>{source}</span> for{" "}
+            <span className={CLASS.mono}>{parsed.outputMatch}</span>
+            {parsed.progressIntervalMS !== undefined
+              ? `, heartbeat ${humanizeInterval(parsed.progressIntervalMS / 1000)}`
+              : ""}
+            {used}
+            {since}.
+          </span>
+        </div>
+      </div>
+    );
+  }
+  if (parsed?.afterSeconds !== undefined || parsed?.repeatSeconds !== undefined) {
+    const seconds = parsed.afterSeconds ?? parsed.repeatSeconds ?? 0;
+    const when = parsed.afterSeconds !== undefined ? humanizeSeconds(seconds) : humanizeInterval(seconds);
+    return (
+      <div className={CLASS.section}>
+        <div className={CLASS.trigger} data-testid="job-watch-trigger">
+          <span>
+            Reminds {when}
+            {used}
+            {since}.
+          </span>
+        </div>
+      </div>
+    );
+  }
+  if (
+    parsed &&
+    (parsed.events.length > 0 ||
+      parsed.filterToolName ||
+      parsed.filterStatus ||
+      parsed.progressIntervalMS !== undefined)
+  ) {
+    return (
+      <div className={CLASS.section}>
+        <div className={CLASS.trigger} data-testid="job-watch-trigger">
+          <ConditionSentence
+            source={source}
+            spec={{
+              events: parsed.events,
+              progressIntervalMS: parsed.progressIntervalMS,
+              filterToolName: parsed.filterToolName,
+              filterStatus: parsed.filterStatus,
+            }}
+          />
+          <span>
+            {used}
+            {since}.
+          </span>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={CLASS.section}>
       <div className={CLASS.trigger} data-testid="job-watch-trigger">
         <span>
           Watching <span className={CLASS.mono}>{source}</span>
-          {pattern ? (
-            <>
-              {" "}
-              for <span className={CLASS.mono}>{pattern}</span>
-            </>
-          ) : null}
-          {deliveries !== undefined ? (
-            <>
-              {" "}
-              — {deliveries} of {WATCH_DELIVERY_BUDGET} deliveries used
-            </>
-          ) : null}
-          {created ? `, ${created}` : ""}.
+          {used}
+          {since}.
         </span>
       </div>
     </div>
@@ -563,13 +771,13 @@ function InspectBody({ raw }: { raw: JsonObject }) {
 }
 
 function JobWatchBody(props: ToolRenderProps) {
-  const { item } = props;
+  const { item, live } = props;
   const raw = asJsonObject(item.raw);
-  // Without structured state the body stays empty rather than echoing the
-  // raw footer — the summary already carries the operation, and a mono
-  // block of the whole footer is the "current (bad)" rendering the mockup
-  // replaces.
-  if (!raw) return null;
+  // Without structured state (a stored transcript predating it, or a shape
+  // the normalizer doesn't recognize) fall back to the raw footer text —
+  // the call's only useful output (RoboRev PR #954). The structured bodies
+  // above replace the mono wall only when there is structure to render.
+  if (!raw) return <HeadClippedOutputBody item={item} live={live} />;
   const operation = jobWatchOperation(item, raw);
   switch (operation) {
     case "list":
