@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -200,6 +201,89 @@ func TestUpgradeRejectsUnsupportedPlatform(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported platform darwin-amd64") {
 		t.Fatalf("error = %q, want unsupported platform", err.Error())
+	}
+}
+
+func TestCopyExecutableLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.WriteFile(src, []byte("binary body"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	dst := filepath.Join(dir, "evener")
+
+	if err := copyExecutable(src, dst); err != nil {
+		t.Fatalf("copyExecutable: %v", err)
+	}
+
+	body, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(body) != "binary body" {
+		t.Fatalf("dst = %q, want %q", string(body), "binary body")
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("dst mode = %v, want 0755", info.Mode().Perm())
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temp files left behind: %v", leftovers)
+	}
+}
+
+// Concurrent installs (a hub self-update and an `evener upgrade` in another
+// process) race on the same destination, so each must rename a complete file
+// of its own rather than share one temp path and interleave writes.
+func TestCopyExecutableConcurrentInstallsNeverMix(t *testing.T) {
+	dir := t.TempDir()
+	first := strings.Repeat("A", 1<<20)
+	second := strings.Repeat("B", 1<<20)
+	srcA := filepath.Join(dir, "srcA")
+	srcB := filepath.Join(dir, "srcB")
+	if err := os.WriteFile(srcA, []byte(first), 0o644); err != nil {
+		t.Fatalf("write srcA: %v", err)
+	}
+	if err := os.WriteFile(srcB, []byte(second), 0o644); err != nil {
+		t.Fatalf("write srcB: %v", err)
+	}
+	dst := filepath.Join(dir, "evener")
+
+	for i := range 20 {
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for j, src := range []string{srcA, srcB} {
+			wg.Go(func() {
+				errs[j] = copyExecutable(src, dst)
+			})
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if err != nil {
+				t.Fatalf("copyExecutable: %v", err)
+			}
+		}
+		body, err := os.ReadFile(dst)
+		if err != nil {
+			t.Fatalf("read dst: %v", err)
+		}
+		if string(body) != first && string(body) != second {
+			t.Fatalf("iteration %d: dst is neither source (len %d)", i, len(body))
+		}
+		leftovers, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+		if err != nil {
+			t.Fatalf("glob: %v", err)
+		}
+		if len(leftovers) != 0 {
+			t.Fatalf("iteration %d: temp files left behind: %v", i, leftovers)
+		}
 	}
 }
 

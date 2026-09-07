@@ -289,9 +289,18 @@ func copyExecutable(src, dst string) error {
 	defer func() {
 		_ = in.Close()
 	}()
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	// A unique temp file per call: a concurrent install (another process
+	// running `evener upgrade` against the same prefix) must not write into
+	// the same partial file. Both then rename a complete binary and the last
+	// one wins intact.
+	out, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".*.tmp")
 	if err != nil {
+		return err
+	}
+	tmp := out.Name()
+	if err := out.Chmod(0o755); err != nil { // CreateTemp opens 0600
+		_ = closeFile(out)
+		_ = os.Remove(tmp)
 		return err
 	}
 	_, copyErr := copyStream(out, in)
