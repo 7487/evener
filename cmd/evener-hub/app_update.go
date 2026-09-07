@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,16 +16,20 @@ import (
 	"primeradiant.com/evener/internal/selfupdate"
 )
 
-// Test seams: the GitHub check and the exec-in-place restart.
+// Test seams: the GitHub check, the exec-in-place restart, and the restart
+// goroutine's log destination.
 var (
-	runHubUpdateCheck  = selfupdate.Check
-	scheduleHubRestart = scheduleHubRestartAfterResponse
+	runHubUpdateCheck            = selfupdate.Check
+	scheduleHubRestart           = scheduleHubRestartAfterResponse
+	execHubBinary                = selfupdate.Restart
+	hubUpdateStderr    io.Writer = os.Stderr
 )
 
 // hubRestartDelay gives the appwire response time to reach the browser
 // before the process image is replaced; the frontend needs the success
-// result to start its health poll.
-const hubRestartDelay = 500 * time.Millisecond
+// result to start its health poll. A var, not a const, so tests can set it
+// to 0.
+var hubRestartDelay = 500 * time.Millisecond
 
 // hubUpdateMu serializes evener/update/apply: copyExecutable in
 // internal/selfupdate writes a fixed dst+".tmp" path, so a second apply
@@ -33,6 +38,16 @@ const hubRestartDelay = 500 * time.Millisecond
 // restart -- the process is about to be replaced, so a second apply
 // afterward must also be refused, not merely serialized.
 var hubUpdateMu sync.Mutex
+
+// tryLockHubUpdate acquires hubUpdateMu for the two RPCs that can install a
+// new hub binary (evener/update/apply and evener/upgrade), returning the
+// shared "already in progress" error when the other one already holds it.
+func tryLockHubUpdate() error {
+	if !hubUpdateMu.TryLock() {
+		return errors.New("a hub update is already in progress")
+	}
+	return nil
+}
 
 // isDevBuild reports whether this hub was built without a release channel
 // (a worktree build). Such a hub is never self-updated: replacing it with a
@@ -94,8 +109,8 @@ func hubUpdateApply(ctx context.Context, params appwire.UpdateApplyParams) (appw
 	if err != nil {
 		return appwire.UpdateApplyResponse{}, err
 	}
-	if !hubUpdateMu.TryLock() {
-		return appwire.UpdateApplyResponse{}, errors.New("a hub update is already in progress")
+	if err := tryLockHubUpdate(); err != nil {
+		return appwire.UpdateApplyResponse{}, err
 	}
 	unlockOnReturn := true
 	defer func() {
@@ -140,14 +155,16 @@ func evenerBinaryFrom(channel string, installed []string) (string, error) {
 }
 
 // scheduleHubRestartAfterResponse execs binary with the hub's own arguments
-// after hubRestartDelay. On exec failure the old hub keeps running and the
-// failure is logged; there is nothing else to roll back.
+// after hubRestartDelay. hubUpdateMu is held across the exec attempt (see
+// its doc comment); on failure the old hub keeps running, so the lock is
+// released here too, or every later apply/upgrade would be refused forever.
 func scheduleHubRestartAfterResponse(binary string, args []string) {
 	go func() {
 		time.Sleep(hubRestartDelay)
-		_, _ = fmt.Fprintf(os.Stderr, "[hub] self-update: restarting as %s\n", binary)
-		if err := selfupdate.Restart(binary, args); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "[hub] self-update: restart failed, still running the previous binary: %v\n", err)
+		_, _ = fmt.Fprintf(hubUpdateStderr, "[hub] self-update: restarting as %s\n", binary)
+		if err := execHubBinary(binary, args); err != nil {
+			hubUpdateMu.Unlock()
+			_, _ = fmt.Fprintf(hubUpdateStderr, "[hub] self-update: restart failed, still running the previous binary: %v\n", err)
 		}
 	}()
 }

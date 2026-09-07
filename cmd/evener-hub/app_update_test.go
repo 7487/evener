@@ -12,6 +12,30 @@ import (
 	"primeradiant.com/evener/internal/selfupdate"
 )
 
+// syncWriter is an io.Writer that closes a channel the first time a write
+// contains match, letting a test wait for a specific log line from the
+// restart goroutine instead of sleeping.
+type syncWriter struct {
+	mu    sync.Mutex
+	match string
+	done  chan struct{}
+	fired bool
+}
+
+func newSyncWriter(match string) *syncWriter {
+	return &syncWriter{match: match, done: make(chan struct{})}
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.fired && strings.Contains(string(p), w.match) {
+		w.fired = true
+		close(w.done)
+	}
+	return len(p), nil
+}
+
 func setBuild(t *testing.T, sha, channel string) {
 	t.Helper()
 	prevSHA, prevChannel := buildinfo.GitSHA, buildinfo.Channel
@@ -343,5 +367,43 @@ func TestHubUpdateApplySerializesConcurrentCalls(t *testing.T) {
 	})
 	if _, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{}); err != nil {
 		t.Fatalf("apply after failure: %v", err)
+	}
+}
+
+func TestHubUpdateApplyReleasesLockWhenRestartExecFails(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	previousDelay := hubRestartDelay
+	hubRestartDelay = 0
+	t.Cleanup(func() { hubRestartDelay = previousDelay })
+
+	previousExec := execHubBinary
+	execHubBinary = func(binary string, args []string) error { return errors.New("exec failed") }
+	t.Cleanup(func() { execHubBinary = previousExec })
+
+	stderr := newSyncWriter("restart failed")
+	previousStderr := hubUpdateStderr
+	hubUpdateStderr = stderr
+	t.Cleanup(func() { hubUpdateStderr = previousStderr })
+
+	stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		return selfupdate.Result{Release: "snapshot", Channel: "snapshot", Installed: []string{"/x/evener"}}, nil
+	})
+
+	// This test exercises the real scheduleHubRestartAfterResponse goroutine,
+	// not the stub other tests install for scheduleHubRestart.
+	if _, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{}); err != nil {
+		t.Fatalf("hubUpdateApply: %v", err)
+	}
+
+	<-stderr.done // wait for the goroutine to log the failed restart and release the lock
+
+	upgrades := stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		return selfupdate.Result{}, errors.New("boom")
+	})
+	if _, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{}); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("second apply err = %v", err)
+	}
+	if *upgrades != 1 {
+		t.Fatalf("upgrades = %d, want the second apply to reach the upgrade seam", *upgrades)
 	}
 }

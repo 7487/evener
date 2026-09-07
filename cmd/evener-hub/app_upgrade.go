@@ -10,7 +10,17 @@ import (
 
 var runHubSelfUpgrade = selfupdate.Upgrade
 
+// hubUpgrade answers evener/upgrade: install the requested channel's build
+// without restarting into it (the caller execs manually, unlike
+// evener/update/apply). It takes hubUpdateMu so it can't race
+// hubUpdateApply over selfupdate's fixed .tmp install path, and always
+// releases it before returning since it never execs.
 func hubUpgrade(ctx context.Context, params appwire.UpgradeParams) (appwire.UpgradeResponse, error) {
+	if err := tryLockHubUpdate(); err != nil {
+		return appwire.UpgradeResponse{}, err
+	}
+	defer hubUpdateMu.Unlock()
+
 	result, err := runHubSelfUpgrade(ctx, selfupdate.Options{
 		Requested:      params.Requested,
 		CurrentChannel: buildinfo.UpgradeChannel(),
