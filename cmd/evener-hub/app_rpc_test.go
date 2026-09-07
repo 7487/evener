@@ -8371,7 +8371,7 @@ func TestHubRPCThreadStartKeepsProviderForModelIDsWithSlashes(t *testing.T) {
 }
 
 func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) {
-	for _, fault := range []string{"probe", "listing", "status"} {
+	for _, fault := range []string{"probe", "listing", "status", "stale-instance"} {
 		t.Run(fault, func(t *testing.T) {
 			const sessionID = "033snFBSHFr78ZbQQMAeBD"
 			daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
@@ -8383,6 +8383,11 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 					Evener: appwire.EvenerThread{
 						Ref:          params.Ref,
 						Capabilities: appwire.ThreadCapabilities{Send: true},
+						Diagnostics: &appwire.EvenerDiagnostics{Delegates: []appwire.EvenerDelegateInfo{
+							{ChildSessionID: "active-child", Lifecycle: "running", Status: "running"},
+							{ChildSessionID: "idle-child", Lifecycle: "idle", Status: "completed", Resumable: true},
+							{ChildSessionID: "closed-child", Lifecycle: "closed", Status: "completed", Terminal: true},
+						}},
 					},
 				}}, nil
 			})
@@ -8419,11 +8424,14 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 				ThreadID:  sessionID,
 				SessionID: sessionID,
 			}
+			if fault == "stale-instance" {
+				entry.InstanceID = "fresh-instance"
+			}
 			var spawns int
 			spawner := &fakeRPCSpawner{spawn: func(context.Context, hubcore.SpawnRequest) (rendezvous.Entry, error) {
 				spawns++
 				writeRendezvous(t, runDir, entry)
-				if fault == "listing" {
+				if fault == "listing" || fault == "stale-instance" {
 					if err := os.WriteFile(filepath.Join(runDir, "1.json"), []byte("{"), 0600); err != nil {
 						t.Fatal(err)
 					}
@@ -8431,6 +8439,12 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 				return entry, nil
 			}}
 			roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+			if fault == "stale-instance" {
+				old := entry
+				old.InstanceID = "previous-instance"
+				writeRendezvous(t, runDir, old)
+				roster.Refresh()
+			}
 			hub := newHubRPCTestServer(t, hubcore.WebConfig{
 				RunDir:  runDir,
 				Roster:  roster,
@@ -8471,6 +8485,18 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 			}
 			if live, ok := roster.Find(sessionID); !ok || live.PID != entry.PID || live.Crashed {
 				t.Errorf("spawned daemon is not registered: %+v, present=%v", live, ok)
+			}
+			if live, _ := roster.Find(sessionID); live.InstanceID != entry.InstanceID {
+				t.Errorf("registered instance=%q, want %q", live.InstanceID, entry.InstanceID)
+			}
+			if state, ok := roster.SubagentState("active-child"); !ok || state != appwire.ThreadStatusActive {
+				t.Errorf("active child projection: state=%q live=%v", state, ok)
+			}
+			if state, ok := roster.SubagentState("idle-child"); !ok || state != appwire.ThreadStatusIdle {
+				t.Errorf("idle child projection: state=%q live=%v", state, ok)
+			}
+			if roster.IsSubagentActive("closed-child") {
+				t.Error("closed child published as live")
 			}
 			if _, err := client.ThreadRead(context.Background(), appwire.ThreadReadParams{Ref: resp.Thread.Evener.Ref}); err != nil {
 				t.Fatalf("subsequent ThreadRead: %v", err)

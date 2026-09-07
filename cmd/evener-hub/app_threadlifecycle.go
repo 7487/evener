@@ -220,8 +220,7 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 	}
 	var threadResp appwire.ThreadReadResponse
 	if cfg.Roster != nil && canUseSpawnEntry {
-		live, found := cfg.Roster.Find(entry.SessionID)
-		if !found || live.Crashed || live.PID != entry.PID {
+		if !cfg.Roster.HasConfirmedEntry(entry) {
 			threadResp, err = cfg.Roster.ReadSpawnedThread(ctx, entry, read)
 			if err != nil && threadResp.Thread.ID != "" {
 				return appwire.ThreadStartResponse{}, appwire.Unavailable(err.Error())

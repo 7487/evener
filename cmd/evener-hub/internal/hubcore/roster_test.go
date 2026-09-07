@@ -1361,3 +1361,24 @@ func TestRosterRefreshEntryDoesNotSucceedWithoutRouteAfterNewerMiss(t *testing.T
 		t.Fatalf("confirmation returned success without a route: %+v, present=%v", live, ok)
 	}
 }
+
+func TestRosterRetainsChangedClaimAfterProbeFailure(t *testing.T) {
+	dir := t.TempDir()
+	entry := rendezvous.Entry{PID: 1001, SessionID: "before", ThreadID: "before", Protocol: "evener-appwire-v3", Endpoint: "ws://daemon/rpc"}
+	writeRendezvous(t, dir, entry)
+	prober := &flakyProber{sessionID: "before"}
+	roster := NewRoster(dir, prober)
+	roster.procAlive = func(int) bool { return true }
+	roster.Refresh()
+	entry.SessionID, entry.ThreadID = "after", "after"
+	writeRendezvous(t, dir, entry)
+	prober.fail = true
+	roster.Refresh()
+	if _, ok := roster.Find("before"); !ok {
+		t.Fatal("previous ownership was discarded")
+	}
+	claims := roster.UnconfirmedEntries()
+	if len(claims) != 1 || claims[0].SessionID != "after" {
+		t.Fatalf("changed live claim not retained: %+v", claims)
+	}
+}

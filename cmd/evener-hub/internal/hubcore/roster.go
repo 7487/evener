@@ -359,6 +359,9 @@ func (r *Roster) refresh() error {
 			// session exists" signal; keep the previously-seen entry while its
 			// process is alive (a transient probe miss).
 			if prev, had := prevByPID[e.PID]; had && r.procAlive(e.PID) {
+				if !sameDaemonIdentity(prev.Entry, e) {
+					unconfirmed = append(unconfirmed, e)
+				}
 				byPID[e.PID] = prev
 				if prev.SessionID != "" {
 					if current, ok := bySess[prev.SessionID]; !ok || preferLiveEntry(prev, current) {
@@ -603,6 +606,25 @@ func preferLiveEntry(candidate, current LiveEntry) bool {
 	return candidate.PID > current.PID
 }
 
+func sameDaemonIdentity(a, b rendezvous.Entry) bool {
+	return a.PID == b.PID && a.Protocol == b.Protocol && a.Endpoint == b.Endpoint && a.Address == b.Address &&
+		a.SourceID == b.SourceID && a.ThreadID == b.ThreadID && a.SessionID == b.SessionID &&
+		a.WorkspaceRef == b.WorkspaceRef && a.InstanceID == b.InstanceID && a.HubToken == b.HubToken && a.StartedAt.Equal(b.StartedAt)
+}
+
+// HasConfirmedEntry reports whether the exact daemon identity has a live route.
+func (r *Roster) HasConfirmedEntry(entry rendezvous.Entry) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.hasConfirmedEntry(entry)
+}
+
+func (r *Roster) hasConfirmedEntry(entry rendezvous.Entry) bool {
+	live, ok := r.byPID[entry.PID]
+	routed, found := r.bySess[live.SessionID]
+	return ok && found && !live.Crashed && routed.PID == entry.PID && sameDaemonIdentity(live.Entry, entry)
+}
+
 // Find returns the entry with the given session_id, or false if not present.
 func (r *Roster) Find(sessionID string) (LiveEntry, bool) {
 	r.mu.RLock()
@@ -743,6 +765,29 @@ func (r *Roster) ReadSpawnedThread(ctx context.Context, entry rendezvous.Entry, 
 	result := ProbeResult{OK: true, SessionID: statusThreadID(root), Status: root.Status.Type,
 		PendingAsk: root.Evener.AskPending, PendingEscalation: len(root.Evener.PendingEscalations) > 0,
 		RunningJobs: runningJobs, CompletedJobs: completedJobs}
+	if root.Evener.Diagnostics != nil {
+		result.RunningSubagentStates = make(map[string]string)
+		for _, delegate := range root.Evener.Diagnostics.Delegates {
+			if delegate.ChildSessionID == "" || delegate.Lifecycle == "closed" {
+				continue
+			}
+			state := ""
+			switch delegate.Lifecycle {
+			case "idle":
+				state = appwire.ThreadStatusIdle
+			case "running":
+				state = appwire.ThreadStatusActive
+				if delegate.NeedsAttention {
+					state = appwire.ThreadStatusAwaiting
+				}
+			}
+			result.RunningSubagentStates[delegate.ChildSessionID] = state
+		}
+		for childID := range result.RunningSubagentStates {
+			result.RunningSubagentIDs = append(result.RunningSubagentIDs, childID)
+		}
+		sort.Strings(result.RunningSubagentIDs)
+	}
 	return response, r.publishConfirmedEntry(entry, result, generation)
 }
 
@@ -750,9 +795,9 @@ func (r *Roster) publishConfirmedEntry(entry rendezvous.Entry, result ProbeResul
 	live := liveEntryFromProbe(entry, result)
 	r.mu.Lock()
 	if generation < r.publishedGen || generation < r.entryPublishedGen[entry.PID] {
-		current, ok := r.bySess[live.SessionID]
+		confirmed := r.hasConfirmedEntry(entry)
 		r.mu.Unlock()
-		if !ok || current.Crashed || current.PID != entry.PID || current.Endpoint != entry.Endpoint || current.Protocol != entry.Protocol {
+		if !confirmed {
 			return fmt.Errorf("spawned daemon %s confirmation superseded without a route", live.SessionID)
 		}
 		return nil
