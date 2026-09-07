@@ -861,6 +861,10 @@ function JobWatchBody(props: ToolRenderProps) {
 registerToolRenderer({
   match: "job_watch",
   icon: "job",
+  // A watch card is state a reader tracks across a turn (armed timer,
+  // standing condition, inventory) — it always stands on its own line,
+  // like every other job descriptor after #947.
+  fold: "never",
   summary: jobWatchSummary,
   body: JobWatchBody,
 });
