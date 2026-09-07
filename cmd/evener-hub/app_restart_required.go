@@ -199,7 +199,7 @@ func daemonRestartRequiredError(ctx context.Context, cfg hubcore.WebConfig, ref,
 	if !ok {
 		return nil
 	}
-	wire := appwire.WireError{Code: appwire.CodeConflict, Message: fmt.Sprintf("Session restart required: daemon pid %d speaks %s; this hub requires %s. Stop the daemon, then resume this session. Stopping interrupts active work.", entry.PID, entry.Protocol, appwire.ProtocolVersion), Data: appwire.ErrorData{EvenerErrorInfo: appwire.ErrorConflict, Cause: "daemonRestartRequired"}}
+	wire := appwire.WireError{Code: appwire.CodeConflict, Message: fmt.Sprintf("Session restart required: daemon pid %d uses an incompatible protocol; this hub requires %s. Stop the daemon, then resume this session. Stopping interrupts active work.", entry.PID, appwire.ProtocolVersion), Data: appwire.ErrorData{EvenerErrorInfo: appwire.ErrorConflict, Cause: "daemonRestartRequired"}}
 	if mutationID != "" {
 		return restartRequiredMutationError(wire, mutationID)
 	}
