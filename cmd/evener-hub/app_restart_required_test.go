@@ -364,6 +364,25 @@ func TestNavigationDisablesRenameForRestartRequiredDaemon(t *testing.T) {
 	}
 }
 
+func TestNavigationCrashRecordCannotEnableRenameForIncompatibleReplacement(t *testing.T) {
+	const workspaceID = "02wMz5Txv1C3Hut0M8GCeB"
+	const currentID = "02wMz5Txv1C3Hut0M8GCeC"
+	roster := hubcore.NewRosterWithEntries(
+		hubcore.LiveEntry{Entry: rendezvous.Entry{PID: 2, StartedAt: time.Unix(2, 0), WorkspaceRef: "local:" + workspaceID}, SessionID: currentID, Status: appwire.ThreadStatusRestartRequired},
+		hubcore.LiveEntry{Entry: rendezvous.Entry{PID: 1, StartedAt: time.Unix(1, 0), WorkspaceRef: "local:" + workspaceID}, SessionID: "02wMz5Txv1C3Hut0M8GCeD", Status: "errored", Crashed: true},
+	)
+	tree := hubcore.Tree{Live: []hubcore.TreeNode{{ID: workspaceID, State: appwire.ThreadStatusRestartRequired}}}
+	inputs := navigationBuildInputsFromTreeSnapshot("generation", 1, tree, nil, hubapi.AttentionSummary{}, roster.List(), nil, nil, nil, nil)
+	projection, err := buildNavigationProjection(inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := projection.LivePage(0, 50).Sessions
+	if len(rows) != 1 || rows[0].Ref != "local:"+workspaceID || rows[0].Rename {
+		t.Fatalf("incompatible replacement must remain unrenameable: %+v", rows)
+	}
+}
+
 func TestHubUpgradeClassifiesUncachedDaemonOwnership(t *testing.T) {
 	for _, method := range []string{appwire.MethodThreadRead, appwire.MethodTurnQueue, appwire.MethodEvenerThreadNameSet, appwire.MethodThreadReasoningEffortSet, appwire.MethodEvenerSandboxEscalationResolve} {
 		t.Run(method, func(t *testing.T) {
