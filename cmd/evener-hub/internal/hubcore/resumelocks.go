@@ -11,6 +11,7 @@ type ResumeLocks struct {
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
 	recovery map[string]SessionRecoveryState
+	sequence uint64
 }
 
 // NewResumeLocks returns an empty registry ready for use.
@@ -35,10 +36,11 @@ func (r *ResumeLocks) For(sessionID string) *sync.Mutex {
 // SessionRecoveryState is the action admission state shared by every transport.
 // Epoch changes invalidate actions that were waiting for session ownership.
 type SessionRecoveryState struct {
-	Epoch          uint64
-	Stopping       int
-	ResumeRequired bool
-	group          *sessionRecoveryGroup
+	Epoch                uint64
+	LastRecoverySequence uint64
+	Stopping             int
+	ResumeRequired       bool
+	group                *sessionRecoveryGroup
 }
 
 type sessionRecoveryGroup struct {
@@ -51,6 +53,14 @@ func (r *ResumeLocks) RecoveryState(sessionID string) SessionRecoveryState {
 	return r.recovery[sessionID]
 }
 
+// RecoverySequence is captured once when a transport is established. A
+// request read later cannot turn unread pre-recovery input into fresh intent.
+func (r *ResumeLocks) RecoverySequence() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sequence
+}
+
 // BeginForceStop blocks new actions and invalidates existing ownership waiters.
 // A failed stop releases the active fence without declaring the session stopped.
 func (r *ResumeLocks) BeginForceStop(aliases []string) func(bool) {
@@ -58,10 +68,12 @@ func (r *ResumeLocks) BeginForceStop(aliases []string) func(bool) {
 	if r.recovery == nil {
 		r.recovery = make(map[string]SessionRecoveryState)
 	}
+	r.sequence++
 	group := &sessionRecoveryGroup{aliases: append([]string(nil), aliases...)}
 	for _, id := range aliases {
 		state := r.recovery[id]
 		state.Epoch++
+		state.LastRecoverySequence = r.sequence
 		state.Stopping++
 		state.group = group
 		r.recovery[id] = state
@@ -70,9 +82,11 @@ func (r *ResumeLocks) BeginForceStop(aliases []string) func(bool) {
 	return func(stopped bool) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		r.sequence++
 		for _, id := range aliases {
 			state := r.recovery[id]
 			state.Stopping--
+			state.LastRecoverySequence = r.sequence
 			state.ResumeRequired = state.ResumeRequired || stopped
 			r.recovery[id] = state
 		}

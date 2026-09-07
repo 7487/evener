@@ -121,7 +121,7 @@ function RestartRequiredNotice({
       if (resumeRequired) {
         const { client, state } = connectionStore.getState();
         if (!client || state !== "ready") throw new Error("Connect to the hub before resuming this session.");
-        await client.request("thread/resume", { ref: sessionRef });
+        await client.resumeThread(sessionRef);
       }
       await threadsStore.getState().refreshThread(sessionRef);
     } catch (err) {

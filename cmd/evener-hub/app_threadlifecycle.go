@@ -334,6 +334,9 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 		lock := cfg.ResumeLocks.For(sessionID)
 		lock.Lock()
 		defer lock.Unlock()
+		if err := sessionConnectionRecoveryError(ctx, cfg, "", sessionID); err != nil {
+			return appwire.ThreadResumeResponse{}, err
+		}
 		state := cfg.ResumeLocks.RecoveryState(sessionID)
 		if state.Epoch != epoch || state.Stopping > 0 || (automatic && state.ResumeRequired) {
 			return appwire.ThreadResumeResponse{}, appwire.Unavailable("session recovery requires a fresh explicit thread/resume request")

@@ -105,3 +105,72 @@ func TestRecoveryConnectionReachesHandlerWhilePrimaryQueueIsFull(t *testing.T) {
 	waitFor(t, "independent recovery handler", enteredRecovery)
 	release()
 }
+
+func TestConnectionAdmissionPrecedesUnreadBacklog(t *testing.T) {
+	var generation atomic.Uint64
+	server := NewServer(ServerConfig{ConnectionAdmissionContext: func(ctx context.Context) context.Context {
+		return context.WithValue(ctx, requestAdmissionTestKey{}, generation.Load())
+	}})
+	blocked := make(chan struct{}, 1)
+	server.blockedEnqueue = func() { blocked <- struct{}{} }
+	started, release := parkThreadList(t, server)
+	var resumed, mutated atomic.Int32
+	check := func(ctx context.Context) error {
+		if ctx.Value(requestAdmissionTestKey{}).(uint64) != generation.Load() {
+			return appwire.Unavailable("session requires explicit Resume on a fresh connection")
+		}
+		return nil
+	}
+	HandleTyped(server.Router(), appwire.MethodThreadResume, func(ctx context.Context, _ appwire.ThreadResumeParams) (appwire.ThreadResumeResponse, error) {
+		if err := check(ctx); err != nil {
+			return appwire.ThreadResumeResponse{}, err
+		}
+		resumed.Add(1)
+		return appwire.ThreadResumeResponse{}, nil
+	})
+	HandleTyped(server.Router(), appwire.MethodThreadReasoningEffortSet, func(ctx context.Context, _ appwire.ThreadReasoningEffortSetParams) (appwire.EmptyResponse, error) {
+		if err := check(ctx); err != nil {
+			return appwire.EmptyResponse{}, err
+		}
+		mutated.Add(1)
+		return appwire.EmptyResponse{}, nil
+	})
+	HandleTyped(server.Router(), appwire.MethodEvenerThreadForceStop, func(context.Context, appwire.ThreadForceStopParams) (appwire.EmptyResponse, error) {
+		generation.Add(1)
+		return appwire.EmptyResponse{}, nil
+	})
+	hub := serveWebSocketHTTP(t, server)
+	primary := dialRawAppWire(t, hub)
+	initializeRaw(t, primary)
+	for id := int64(2); id < 68; id++ {
+		sendRaw(t, primary, rawRequest(t, id, appwire.MethodThreadList, appwire.ThreadListParams{}))
+	}
+	waitFor(t, "stalled worker", started)
+	waitFor(t, "full queue", blocked)
+	sendRaw(t, primary, rawRequest(t, 68, appwire.MethodThreadResume, appwire.ThreadResumeParams{Ref: "local:owner"}))
+	sendRaw(t, primary, rawRequest(t, 69, appwire.MethodThreadReasoningEffortSet, appwire.ThreadReasoningEffortSetParams{Ref: "local:owner", ReasoningEffort: "high"}))
+	recovery := dialAppWireClient(t, hub)
+	if err := recovery.Request(t.Context(), appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: "local:owner"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	for id := int64(2); id <= 69; id++ {
+		message, err := primary.Recv(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id >= 68 && message.Error == nil {
+			t.Fatalf("unread request %d admitted after recovery: %+v", id, message)
+		}
+	}
+	if resumed.Load() != 0 || mutated.Load() != 0 {
+		t.Fatal("unread actions replayed")
+	}
+	fresh := dialAppWireClient(t, hub)
+	if err := fresh.Request(t.Context(), appwire.MethodThreadResume, appwire.ThreadResumeParams{Ref: "local:owner"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Load() != 1 {
+		t.Fatal("fresh explicit resume failed")
+	}
+}

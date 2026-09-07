@@ -2101,6 +2101,7 @@ test.each([false, true])("restart-required empty transcript suppresses first-sen
 
 test("offers explicit resume after restart even without pending messages", async () => {
   const fake = connectFakeClient();
+  const resumeTransport = vi.spyOn(fake, "resumeThread");
   let status = "restartRequired";
   fake.on("thread/read", () => readResponse("ref_a", { status: { type: status } }));
   fake.on("thread/resume", () => {
@@ -2120,6 +2121,7 @@ test("offers explicit resume after restart even without pending messages", async
   fireEvent.click(resume);
   await waitFor(() => expect(threadsStore.getState().threads.get("ref_a")?.status.type).toBe("idle"));
   expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+  expect(resumeTransport).toHaveBeenCalledWith("ref_a");
 });
 
 test.each(["success", "refused"])(

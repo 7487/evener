@@ -57,7 +57,7 @@ func withDeletionTargetOwnership[R any](
 		return zero, err
 	}
 	if clientMutationID != "" {
-		if err := sessionActionRecoveryError(cfg, ref, threadID, epoch); err != nil {
+		if err := sessionActionRecoveryError(ctx, cfg, ref, threadID, epoch); err != nil {
 			var zero R
 			return zero, err
 		}
@@ -81,7 +81,7 @@ func withDeletionTargetOwnership[R any](
 func withSessionActionOwnership[R any](ctx context.Context, cfg hubcore.WebConfig, ref, threadID string, action func() (R, error)) (R, error) {
 	epoch := sessionRequestRecoveryEpoch(ctx, cfg, ref, threadID)
 	return withDeletionTargetOwnership(ctx, cfg, ref, threadID, "", func() (R, error) {
-		if err := sessionActionRecoveryError(cfg, ref, threadID, epoch); err != nil {
+		if err := sessionActionRecoveryError(ctx, cfg, ref, threadID, epoch); err != nil {
 			var zero R
 			return zero, err
 		}
@@ -201,7 +201,10 @@ func isSessionRecoveryAdmissionError(err error) bool {
 	return ok
 }
 
-func sessionActionRecoveryError(cfg hubcore.WebConfig, ref, threadID string, epoch uint64) error {
+func sessionActionRecoveryError(ctx context.Context, cfg hubcore.WebConfig, ref, threadID string, epoch uint64) error {
+	if err := sessionConnectionRecoveryError(ctx, cfg, ref, threadID); err != nil {
+		return err
+	}
 	state := sessionRecoveryState(cfg, ref, threadID)
 	if state.Stopping > 0 || state.ResumeRequired {
 		return sessionRecoveryAdmissionError{appwire.Unavailable("session recovery requires an explicit thread/resume before submitting another action")}
@@ -276,4 +279,21 @@ func sessionRequestRecoveryEpoch(ctx context.Context, cfg hubcore.WebConfig, ref
 		return admission.epoch
 	}
 	return sessionRecoveryState(cfg, ref, threadID).Epoch
+}
+
+type sessionConnectionRecoveryKey struct{}
+
+func admitSessionConnection(ctx context.Context, cfg hubcore.WebConfig) context.Context {
+	if cfg.ResumeLocks == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionConnectionRecoveryKey{}, cfg.ResumeLocks.RecoverySequence())
+}
+
+func sessionConnectionRecoveryError(ctx context.Context, cfg hubcore.WebConfig, ref, threadID string) error {
+	sequence, ok := ctx.Value(sessionConnectionRecoveryKey{}).(uint64)
+	if ok && sessionRecoveryState(cfg, ref, threadID).LastRecoverySequence > sequence {
+		return sessionRecoveryAdmissionError{appwire.Unavailable("session recovery requires Resume on a fresh connection before submitting another action")}
+	}
+	return nil
 }

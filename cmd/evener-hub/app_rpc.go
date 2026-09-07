@@ -222,6 +222,9 @@ func newHubAppServerWithNavigationAndTrace(cfg hubcore.WebConfig, sources *appso
 		Navigation:           capability,
 		NavigationCapability: capabilityProvider,
 		Logf:                 hubLogf,
+		ConnectionAdmissionContext: func(ctx context.Context) context.Context {
+			return admitSessionConnection(ctx, cfg)
+		},
 		RequestAdmissionContext: func(ctx context.Context, message appwire.Message) context.Context {
 			return admitSessionRecovery(ctx, cfg, message)
 		},
@@ -451,7 +454,7 @@ func registerThreadHandlers(
 			}
 		}
 		resp.Thread, err = mergePastThreadForRead(ctx, cfg, params, resp.Thread)
-		resp.Thread = applyThreadResumeRequirement(cfg, params.Ref, params.ThreadID, resp.Thread)
+		resp.Thread = applyThreadResumeRequirement(ctx, cfg, params.Ref, params.ThreadID, resp.Thread)
 		if err != nil {
 			read.finish(false)
 			return appwire.ThreadReadResponse{}, err

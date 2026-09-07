@@ -41,6 +41,7 @@ export interface AppwireClientLike {
   connect: AppwireClient["connect"];
   request: AppwireClient["request"];
   forceStop: AppwireClient["forceStop"];
+  resumeThread: AppwireClient["resumeThread"];
   onNotification: AppwireClient["onNotification"];
   onReady: AppwireClient["onReady"];
   onStateChange: AppwireClient["onStateChange"];
@@ -196,6 +197,10 @@ export class FakeClient implements AppwireClientLike {
   retryNowCalls = 0;
   retryNow(): void {
     this.retryNowCalls += 1;
+  }
+
+  async resumeThread(ref: string): Promise<void> {
+    await this.request("thread/resume", { ref });
   }
 
   async forceStop(ref: string): Promise<void> {

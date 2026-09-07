@@ -47,6 +47,9 @@ type ServerConfig struct {
 	// It must be pure, synchronous, and derive its result from the supplied
 	// connection context so cancellation remains inherited.
 	RequestAdmissionContext func(context.Context, appwire.Message) context.Context
+	// ConnectionAdmissionContext captures immutable metadata before accepting
+	// any WebSocket frames. It must preserve the supplied context cancellation.
+	ConnectionAdmissionContext func(context.Context) context.Context
 }
 
 type SubscriptionAdmissionIntent uint8

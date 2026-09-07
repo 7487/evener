@@ -328,6 +328,11 @@ func TestHubForceStopUnconfirmedRootReadAndExplicitResume(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("retained crash marker=%v err=%v", entries, err)
 	}
+	client = dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: ref}); err != nil {
 		t.Fatal(err)
 	}
@@ -725,8 +730,18 @@ func TestHubForceStopRejectsWaitingMutationUntilExplicitResume(t *testing.T) {
 			if live.Thread.Status.Type != "idle" || !live.Thread.Evener.ResumeRequired || live.Thread.Evener.Capabilities.Send {
 				t.Fatalf("live fenced snapshot=%+v", live.Thread)
 			}
+			oldClient := client
+			client = dialHubRPC(t, hub)
+			defer client.Close()
+			if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: ref}); err != nil {
 				t.Fatalf("explicit resume: %v", err)
+			}
+			staleRead, err := oldClient.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: ref})
+			if err != nil || !staleRead.Thread.Evener.ResumeRequired || staleRead.Thread.Evener.Capabilities.Send {
+				t.Fatalf("old connection lost Resume after another client resumed: %+v %v", staleRead.Thread, err)
 			}
 			fresh, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: ref})
 			if err != nil {
@@ -753,10 +768,10 @@ func TestSessionRecoveryRejectsOldActionsAfterExplicitResume(t *testing.T) {
 	if state := sessionRecoveryState(cfg, "local:stable", ""); state.ResumeRequired || state.Stopping != 0 {
 		t.Fatalf("stable alias still fenced after explicit resume: %+v", state)
 	}
-	if err := sessionActionRecoveryError(cfg, "local:stable", "", oldEpoch); err == nil {
+	if err := sessionActionRecoveryError(t.Context(), cfg, "local:stable", "", oldEpoch); err == nil {
 		t.Fatal("old ownership waiter admitted after explicit resume")
 	}
-	if err := sessionActionRecoveryError(cfg, "local:current", "", epoch); err != nil {
+	if err := sessionActionRecoveryError(t.Context(), cfg, "local:current", "", epoch); err != nil {
 		t.Fatalf("fresh action refused: %v", err)
 	}
 	finish = cfg.ResumeLocks.BeginForceStop([]string{"stable", "current"})
@@ -773,7 +788,7 @@ func TestTurnStartDoesNotRetryRecoveryRejectionAfterExplicitResume(t *testing.T)
 	finish := cfg.ResumeLocks.BeginForceStop([]string{"recovery-waiter"})
 	finish(true)
 	cfg.ResumeLocks.ExplicitResumeCompleted("recovery-waiter", cfg.ResumeLocks.RecoveryState("recovery-waiter").Epoch)
-	stale := sessionActionRecoveryError(cfg, ref, "", oldEpoch)
+	stale := sessionActionRecoveryError(t.Context(), cfg, ref, "", oldEpoch)
 	if stale == nil {
 		t.Fatal("fixture did not reject the stale admission")
 	}
@@ -902,7 +917,15 @@ func TestHubForceStopRejectsRequestsQueuedBeforeRecovery(t *testing.T) {
 		t.Fatalf("queued requests restarted daemon %d times after recovery", resumes.Load())
 	}
 	send(6, appwire.MethodThreadResume, appwire.ThreadResumeParams{Ref: ref})
-	_ = receive(6)
+	if message := receive(6); message.Error == nil || resumes.Load() != 0 {
+		t.Fatal("old connection acknowledged recovery")
+	}
+	fresh := dialHubRPC(t, hub)
+	defer fresh.Close()
+	if _, err := fresh.Initialize(ctx, appwire.InitializeParams{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = fresh.Request(ctx, appwire.MethodThreadResume, appwire.ThreadResumeParams{Ref: ref}, nil)
 	if resumes.Load() != 1 {
 		t.Fatalf("fresh explicit resume did not reach spawn boundary: %d", resumes.Load())
 	}
@@ -938,13 +961,13 @@ func TestRecoveryAdmissionUsesNativeTargetAndPreservesRetryEpoch(t *testing.T) {
 			}
 			other := cfg.ResumeLocks.BeginForceStop([]string{"unrelated"})
 			other(true)
-			if err := sessionActionRecoveryError(cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err != nil {
+			if err := sessionActionRecoveryError(t.Context(), cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err != nil {
 				t.Fatalf("another session invalidated this admission: %v", err)
 			}
 			finish := cfg.ResumeLocks.BeginForceStop([]string{tc.target})
 			finish(true)
 			cfg.ResumeLocks.ExplicitResumeCompleted(tc.target, cfg.ResumeLocks.RecoveryState(tc.target).Epoch)
-			if err := sessionActionRecoveryError(cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err == nil {
+			if err := sessionActionRecoveryError(t.Context(), cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err == nil {
 				t.Fatal("retry replaced the request's admission epoch")
 			}
 			if epoch := sessionRequestRecoveryEpoch(t.Context(), cfg, "", tc.target); epoch != cfg.ResumeLocks.RecoveryState(tc.target).Epoch {
@@ -1043,11 +1066,57 @@ func TestForceStopUnconfirmedSignalRequiresExplicitResume(t *testing.T) {
 				if _, err := hubThreadAutoResume(t.Context(), cfg, appsource.NewRegistry(), appwire.ThreadResumeParams{Session: alias}); err == nil {
 					t.Fatal("automatic resume accepted after unconfirmed termination")
 				}
-				thread := applyThreadResumeRequirement(cfg, "", alias, appwire.Thread{})
+				thread := applyThreadResumeRequirement(t.Context(), cfg, "", alias, appwire.Thread{})
 				if !thread.Evener.ResumeRequired {
 					t.Fatal("fresh client cannot discover explicit resume requirement")
 				}
 			}
 		})
+	}
+}
+
+func TestConnectionRecoveryFenceIncludesUnreadActionsAndConnectionsBornDuringStop(t *testing.T) {
+	cfg := hubcore.WebConfig{ResumeLocks: hubcore.NewResumeLocks()}
+	before := admitSessionConnection(t.Context(), cfg)
+	finish := cfg.ResumeLocks.BeginForceStop([]string{"stable", "current"})
+	during := admitSessionConnection(t.Context(), cfg)
+	finish(true)
+	cfg.ResumeLocks.ExplicitResumeCompleted("stable", cfg.ResumeLocks.RecoveryState("stable").Epoch)
+	sources := appsource.NewRegistry()
+	source := &recoveryReasoningSource{}
+	sources.Add(source)
+	server := newHubAppServer(cfg, sources)
+	for name, ctx := range map[string]context.Context{"before": before, "during": during} {
+		t.Run(name, func(t *testing.T) {
+			for _, alias := range []string{"stable", "current"} {
+				for _, method := range []string{appwire.MethodThreadResume, appwire.MethodThreadReasoningEffortSet, appwire.MethodTurnStart} {
+					params := map[string]any{"ref": "local:" + alias, "clientMutationId": "old-action", "input": []appwire.InputItem{{Type: "text", Text: "unread input"}}}
+					admitted := admitSessionRecovery(ctx, cfg, appwire.RequestMessage(appwire.NewIntID(1), method, params))
+					if _, err := exactDispatch(admitted, t, server, method, params); !isSessionRecoveryAdmissionError(err) {
+						t.Fatalf("%s unread request escaped connection fence: %v", method, err)
+					}
+				}
+				thread := applyThreadResumeRequirement(ctx, cfg, "", alias, appwire.Thread{Evener: appwire.EvenerThread{Capabilities: appwire.ThreadCapabilities{Send: true}}})
+				if !thread.Evener.ResumeRequired || thread.Evener.Capabilities.Send {
+					t.Fatal("stale connection read lost actionable Resume after another client resumed")
+				}
+			}
+			unrelated := appwire.ThreadReasoningEffortSetParams{Ref: "local:unrelated", ReasoningEffort: "high"}
+			admitted := admitSessionRecovery(ctx, cfg, appwire.RequestMessage(appwire.NewIntID(2), appwire.MethodThreadReasoningEffortSet, unrelated))
+			beforeApplied := source.applied
+			if _, err := exactDispatch(admitted, t, server, appwire.MethodThreadReasoningEffortSet, unrelated); err != nil || source.applied != beforeApplied+1 {
+				t.Fatalf("unrelated target action invalidated: %v", err)
+			}
+		})
+	}
+	fresh := admitSessionConnection(t.Context(), cfg)
+	if sessionConnectionRecoveryError(fresh, cfg, "", "current") != nil {
+		t.Fatal("fresh connection remained stale")
+	}
+	finish = cfg.ResumeLocks.BeginForceStop([]string{"current"})
+	finish(true)
+	fresh = admitSessionConnection(t.Context(), cfg)
+	if _, err := hubThreadAutoResume(fresh, cfg, appsource.NewRegistry(), appwire.ThreadResumeParams{Session: "current"}); err == nil {
+		t.Fatal("fresh connection automatically cleared explicit resume requirement")
 	}
 }

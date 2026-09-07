@@ -521,7 +521,7 @@ func pastEntryThread(ctx context.Context, cfg hubcore.WebConfig, entry hubcore.P
 			// expose the in-process child's turn start time.
 		},
 	}
-	thread = applyThreadResumeRequirement(cfg, ref, entry.Meta.ID, thread)
+	thread = applyThreadResumeRequirement(ctx, cfg, ref, entry.Meta.ID, thread)
 	if _, required, ownershipErr := restartRequiredDaemon(ctx, cfg, ref, entry.Meta.ID); ownershipErr != nil {
 		return appwire.Thread{}, ownershipErr
 	} else if required {
@@ -980,9 +980,9 @@ func isTerminalHistoricalJobStatus(status string) bool {
 
 // applyThreadResumeRequirement projects the hub-owned action fence on both
 // saved snapshots and daemons started by another controller.
-func applyThreadResumeRequirement(cfg hubcore.WebConfig, ref, threadID string, thread appwire.Thread) appwire.Thread {
+func applyThreadResumeRequirement(ctx context.Context, cfg hubcore.WebConfig, ref, threadID string, thread appwire.Thread) appwire.Thread {
 	recovery := sessionRecoveryState(cfg, ref, threadID)
-	if recovery.ResumeRequired || recovery.Stopping > 0 {
+	if recovery.ResumeRequired || recovery.Stopping > 0 || sessionConnectionRecoveryError(ctx, cfg, ref, threadID) != nil {
 		thread.Evener.ResumeRequired = true
 		thread.Evener.Capabilities.Send = false
 	}
