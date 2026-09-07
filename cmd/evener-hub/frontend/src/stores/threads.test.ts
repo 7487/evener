@@ -8431,7 +8431,9 @@ test.each(["active", "idle"].flatMap((status) => [true, false].map((accepted) =>
       fake.on("turn/queue", (params) => ({ receipt: mutationReceipt(params.clientMutationId) }));
       fake.emitReady();
       await threadsStore.getState().ensureThread("ref_a");
-      await settleCallerContinuations();
+      // ensureThread resolves on model publication; refreshThread also waits
+      // for durable reconciliation before the single simulated recovery tick.
+      await threadsStore.getState().refreshThread("ref_a");
       expect((await storage.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
       recovered = true;
       await vi.advanceTimersByTimeAsync(2000);
@@ -8448,8 +8450,61 @@ test.each(["active", "idle"].flatMap((status) => [true, false].map((accepted) =>
 test.each(["daemonRestartRequired", "persistenceUnavailable"])(
   "blocked %s mutation invalidates earlier authority on the same connection",
   async (cause) => {
-    const storage = new MutationOutboxIndexedDB({ createMutationId: () => "authority-lost" });
-    const blocked = deferred<void>();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const storage = new MutationOutboxIndexedDB({ createMutationId: () => "authority-lost" });
+      const blocked = deferred<void>();
+      const markUnknown = storage.markUnknown.bind(storage);
+      vi.spyOn(storage, "markUnknown").mockImplementation(async (...args) => {
+        const result = await markUnknown(...args);
+        blocked.resolve();
+        return result;
+      });
+      setMutationStorageForTests(storage);
+      const fake = connectFakeClient("connecting");
+      const fresh = deferred<ThreadReadResponse>();
+      let reads = 0;
+      fake.on("thread/read", () => {
+        reads++;
+        return reads === 1 ? readResponse("ref_a", { status: { type: "idle" } }) : fresh.promise;
+      });
+      fake.on("turn/queue", (params) => {
+        throw new WireError("owner unavailable", -32014, {
+          evenerErrorInfo: "mutationOutcome",
+          clientMutationId: params.clientMutationId,
+          mutationOutcome: "unknown",
+          retryDisposition: "blocked",
+          cause,
+        });
+      });
+      fake.emitReady();
+      await threadsStore.getState().ensureThread("ref_a");
+      expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(true);
+      await threadsStore.getState().queue("ref_a", "preserve this message");
+      await blocked.promise;
+      await settleCallerContinuations();
+      expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(false);
+      expect(await retryBlockedMutation("authority-lost")).toBe(false);
+      await vi.advanceTimersByTimeAsync(2000);
+      await flushIndexedDBUntil(() => reads === 2);
+      expect(reads).toBe(2);
+      const response = readResponse("ref_a", { status: { type: "restartRequired" } });
+      response.thread.evener.mutationStateAuthoritative = false;
+      fresh.resolve(response);
+      await flushIndexedDBUntil(() => threadsStore.getState().threads.get("ref_a")?.status.type === "restartRequired");
+      expect((await storage.getOutbox("authority-lost"))?.state).toBe("blockedUnknown");
+      expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test("persistent journal failures wait for periodic recovery between attempts", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    const storage = new MutationOutboxIndexedDB({ createMutationId: () => "persistent-journal" });
+    let blocked = deferred<void>();
     const markUnknown = storage.markUnknown.bind(storage);
     vi.spyOn(storage, "markUnknown").mockImplementation(async (...args) => {
       const result = await markUnknown(...args);
@@ -8458,35 +8513,44 @@ test.each(["daemonRestartRequired", "persistenceUnavailable"])(
     });
     setMutationStorageForTests(storage);
     const fake = connectFakeClient("connecting");
-    const fresh = deferred<ThreadReadResponse>();
-    let reads = 0;
-    fake.on("thread/read", () => {
-      reads++;
-      return reads === 1 ? readResponse("ref_a", { status: { type: "idle" } }) : fresh.promise;
-    });
+    fake.on("thread/read", () => readResponse("ref_a", { status: { type: "idle" } }));
     fake.on("turn/queue", (params) => {
-      throw new WireError("owner unavailable", -32014, {
+      throw new WireError("journal unavailable", -32014, {
         evenerErrorInfo: "mutationOutcome",
         clientMutationId: params.clientMutationId,
         mutationOutcome: "unknown",
         retryDisposition: "blocked",
-        cause,
+        cause: "persistenceUnavailable",
       });
     });
     fake.emitReady();
     await threadsStore.getState().ensureThread("ref_a");
-    expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(true);
-    await threadsStore.getState().queue("ref_a", "preserve this message");
-    await blocked.promise;
-    await settleCallerContinuations();
-    expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(false);
-    expect(await retryBlockedMutation("authority-lost")).toBe(false);
-    expect(reads).toBe(2);
-    const response = readResponse("ref_a", { status: { type: "restartRequired" } });
-    response.thread.evener.mutationStateAuthoritative = false;
-    fresh.resolve(response);
-    await flushIndexedDBUntil(() => threadsStore.getState().threads.get("ref_a")?.status.type === "restartRequired");
-    expect((await storage.getOutbox("authority-lost"))?.state).toBe("blockedUnknown");
-    expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
-  },
-);
+    await threadsStore.getState().queue("ref_a", "keep until persistence recovers");
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await blocked.promise;
+      await settleCallerContinuations();
+      expect(fake.calls.filter((call) => call.method === "thread/read")).toHaveLength(attempt);
+      expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(attempt);
+      expect(await retryBlockedMutation("persistent-journal")).toBe(false);
+      expect((await storage.getOutbox("persistent-journal"))?.state).toBe("blockedUnknown");
+      if (attempt < 3) {
+        blocked = deferred<void>();
+        await vi.advanceTimersByTimeAsync(2000);
+      }
+    }
+    const settled = deferred<void>();
+    const settleReceipt = storage.settleReceipt.bind(storage);
+    vi.spyOn(storage, "settleReceipt").mockImplementation(async (...args) => {
+      const result = await settleReceipt(...args);
+      settled.resolve();
+      return result;
+    });
+    fake.on("turn/queue", (params) => ({ receipt: mutationReceipt(params.clientMutationId) }));
+    await vi.advanceTimersByTimeAsync(2000);
+    await settled.promise;
+    expect(await storage.getOutbox("persistent-journal")).toBeUndefined();
+    expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(4);
+  } finally {
+    vi.useRealTimers();
+  }
+});

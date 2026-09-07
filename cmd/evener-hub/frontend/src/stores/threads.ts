@@ -761,9 +761,10 @@ function getMutationRuntime(): MutationRuntime | null {
         mutationAuthorityRefs.delete(targetRef);
         return { mutationAuthorityRefs };
       });
-      void handleReady(client, dispatchReadyEpoch, targetRef).catch(() => {
-        // Discovery retries while the mutation lacks authoritative state.
-      });
+      // Let the periodic discovery pass refresh and reconcile. An immediate
+      // read can prove absence while journal writes still fail, creating a
+      // read/retry loop without giving persistence time to recover.
+      dispatchableMutationRefs.delete(targetRef);
     },
     onClearResponse: applyClearResponse,
   });
