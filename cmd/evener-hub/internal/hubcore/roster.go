@@ -669,6 +669,62 @@ func (r *Roster) hasConfirmedEntry(entry rendezvous.Entry) bool {
 	return ok && found && !live.Crashed && routed.PID == entry.PID && sameDaemonIdentity(live.Entry, entry)
 }
 
+// RestartRequiredRootRef resolves metadata-only admission from one roster
+// snapshot. It never reads persisted ancestry or probes daemon endpoints.
+func (r *Roster) RestartRequiredRootRef(rawRef string) (string, bool) {
+	ref, err := appwire.ParseRef(rawRef)
+	if err != nil || ref.SourceID != "local" {
+		return "", false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ownershipErr != nil || len(r.unconfirmed) != 0 {
+		return "", false
+	}
+	aliases := func(entry LiveEntry) []string {
+		refs := []string{entry.WorkspaceRef}
+		for _, id := range []string{entry.SessionID, entry.Entry.SessionID, entry.ThreadID} {
+			if id != "" {
+				refs = append(refs, appwire.Ref{SourceID: "local", ThreadID: id}.String())
+			}
+		}
+		return refs
+	}
+	var owner LiveEntry
+	found := false
+	for _, entry := range r.byPID {
+		if entry.Crashed || (entry.SourceID != "" && entry.SourceID != "local") {
+			continue
+		}
+		ids := aliases(entry)
+		if !slices.Contains(ids, rawRef) {
+			continue
+		}
+		if found || entry.Status != appwire.ThreadStatusRestartRequired {
+			return "", false
+		}
+		owner, found = entry, true
+	}
+	if !found {
+		return "", false
+	}
+	ownerAliases := aliases(owner)
+	for _, entry := range r.byPID {
+		if entry.PID == owner.PID || entry.Crashed {
+			continue
+		}
+		for _, alias := range aliases(entry) {
+			if alias != "" && slices.Contains(ownerAliases, alias) {
+				return "", false
+			}
+		}
+	}
+	if workspace, err := appwire.ParseRef(owner.WorkspaceRef); err == nil && workspace.SourceID == "local" {
+		return owner.WorkspaceRef, true
+	}
+	return appwire.Ref{SourceID: "local", ThreadID: owner.SessionID}.String(), true
+}
+
 // Find returns the entry with the given session_id, or false if not present.
 func (r *Roster) Find(sessionID string) (LiveEntry, bool) {
 	r.mu.RLock()

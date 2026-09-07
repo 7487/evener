@@ -260,12 +260,10 @@ func newHubAppServerWithNavigationAndTrace(cfg hubcore.WebConfig, sources *appso
 					if past, pastOK := pastEntryForRead(cfg, params); pastOK && past.ID != "" {
 						return appserver.SubscriptionAdmissionResolution{Key: "local:" + past.ID, Intent: appserver.SubscriptionAdmissionResolved}
 					}
-					if owner, required, ownershipErr := restartRequiredDaemon(context.Background(), cfg, params.Ref, params.ThreadID); ownershipErr == nil && required {
-						key := localSpawnWorkspaceRef(owner.Entry)
-						if key == "" {
-							key = localAppRef(owner.SessionID)
+					if cfg.Roster != nil {
+						if key, ok := cfg.Roster.RestartRequiredRootRef(normalizedAdmissionRef(params)); ok {
+							return appserver.SubscriptionAdmissionResolution{Key: key, Intent: appserver.SubscriptionAdmissionResolved}
 						}
-						return appserver.SubscriptionAdmissionResolution{Key: key, Intent: appserver.SubscriptionAdmissionResolved}
 					}
 				}
 				if err != nil {
