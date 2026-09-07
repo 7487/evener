@@ -2053,9 +2053,14 @@ test("refreshes a restarted session without closing its pane", async () => {
     </ClientProvider>,
   );
   await screen.findByRole("alert");
+  const refresh = vi.spyOn(threadsStore.getState(), "refreshThread");
   replaced = true;
   fireEvent.click(screen.getByRole("button", { name: "Refresh session" }));
-  await waitFor(() => expect(threadsStore.getState().threads.get("ref_a")?.status.type).toBe("idle"));
+  expect(refresh).toHaveBeenCalledOnce();
+  await act(async () => {
+    await refresh.mock.results[0]?.value;
+  });
+  expect(threadsStore.getState().threads.get("ref_a")?.status.type).toBe("idle");
   expect(screen.queryByRole("alert")).toBeNull();
   expect(fake.calls.filter((call) => call.method === "thread/resume" || call.method === "turn/start")).toHaveLength(0);
 });
