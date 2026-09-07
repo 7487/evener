@@ -27,6 +27,9 @@ func withSessionResume[R any](
 	once func() (R, error),
 ) (R, error) {
 	attempt := func() (R, error) {
+		if clientMutationID == "" {
+			return withSessionActionOwnership(ctx, cfg, ref, "", once)
+		}
 		return withDeletionTargetOwnership(ctx, cfg, ref, "", clientMutationID, once)
 	}
 	resp, err := attempt()
@@ -52,7 +55,7 @@ func withSessionResume[R any](
 // we must NOT resurrect it just to kill it (kata qp94 carve-out). An unknown
 // ref or any non-session-unavailable failure is still returned unchanged.
 func shutdownThreadTolerateExited(ctx context.Context, cfg hubcore.WebConfig, sources *appsource.Registry, params appwire.ThreadShutdownParams) error {
-	_, err := withDeletionTargetOwnership(ctx, cfg, params.Ref, "", "", func() (struct{}, error) {
+	_, err := withSessionActionOwnership(ctx, cfg, params.Ref, "", func() (struct{}, error) {
 		source, err := sourceForThread(sources, params.Ref, "")
 		if err != nil {
 			return struct{}{}, err

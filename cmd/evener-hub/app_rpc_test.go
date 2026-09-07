@@ -9264,12 +9264,18 @@ func TestHubRPCThreadResumeConfirmsSpawnAfterDiscoveryFailure(t *testing.T) {
 func TestHubRPCSubscribedReadRefreshesReplacedDaemonOwnership(t *testing.T) {
 	for _, sameEndpoint := range []bool{false, true} {
 		t.Run(fmt.Sprint("same endpoint=", sameEndpoint), func(t *testing.T) {
-			testHubSubscribedReadReplacedOwner(t, sameEndpoint)
+			testHubSubscribedReadReplacedOwner(t, sameEndpoint, appwire.MethodThreadRead)
 		})
 	}
 }
 
-func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool) {
+func TestHubRPCSessionActionsRefreshReplacedDaemonOwnership(t *testing.T) {
+	for _, method := range []string{appwire.MethodThreadShutdown, appwire.MethodThreadModelSet, appwire.MethodThreadVisionModelSet, appwire.MethodThreadCompactStart, appwire.MethodGoalSet} {
+		t.Run(method, func(t *testing.T) { testHubSubscribedReadReplacedOwner(t, true, method) })
+	}
+}
+
+func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool, method string) {
 	root := t.TempDir()
 	sessionID := buildRPCParentSession(t, filepath.Join(root, "projects", "upgrade-0000000000"))
 	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
@@ -9317,6 +9323,23 @@ func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool) {
 		entry.Endpoint = protocolMismatchPeer(t)
 	}
 	writeRendezvous(t, runDir, entry)
+	if method != appwire.MethodThreadRead {
+		params := map[string]any{"ref": "local:" + sessionID}
+		switch method {
+		case appwire.MethodThreadModelSet:
+			params["modelProvider"], params["model"] = "test", "test-model"
+		case appwire.MethodThreadVisionModelSet:
+			params["visionModel"] = "test/vision"
+		case appwire.MethodGoalSet:
+			params["objective"] = "test goal"
+		}
+		var response any
+		err := client.Request(context.Background(), method, params, &response)
+		if !isDaemonRestartRequiredError(err) {
+			t.Fatalf("error=%v", err)
+		}
+		return
+	}
 	response, err := client.ThreadRead(context.Background(), appwire.ThreadReadParams{Ref: "local:" + sessionID, IncludeTurns: true, Subscribe: true})
 	if err != nil {
 		t.Fatal(err)

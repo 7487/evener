@@ -48,13 +48,37 @@ func withDeletionTargetOwnership[R any](
 		}
 	}
 	result, err := action()
-	if clientMutationID != "" && isSessionUnavailableError(err) {
+	if clientMutationID != "" && daemonOwnershipMayHaveChanged(err) {
 		if restartErr := refreshDaemonRestartRequiredError(ctx, cfg, ref, threadID, clientMutationID); restartErr != nil {
 			var zero R
 			return zero, restartErr
 		}
 	}
 	return result, err
+}
+
+// withSessionActionOwnership guards actions that have no durable mutation ID.
+// Reads share deletion locking but must remain available for incompatible owners.
+func withSessionActionOwnership[R any](ctx context.Context, cfg hubcore.WebConfig, ref, threadID string, action func() (R, error)) (R, error) {
+	return withDeletionTargetOwnership(ctx, cfg, ref, threadID, "", func() (R, error) {
+		if err := daemonRestartRequiredError(ctx, cfg, ref, threadID, ""); err != nil {
+			var zero R
+			return zero, err
+		}
+		result, err := action()
+		if daemonOwnershipMayHaveChanged(err) {
+			if restartErr := refreshDaemonRestartRequiredError(ctx, cfg, ref, threadID, ""); restartErr != nil {
+				var zero R
+				return zero, restartErr
+			}
+		}
+		return result, err
+	})
+}
+
+func daemonOwnershipMayHaveChanged(err error) bool {
+	var wire appwire.WireError
+	return isSessionUnavailableError(err) || (errors.As(err, &wire) && wire.Code == appwire.CodeInvalidRequest)
 }
 
 func lockDeletionTarget(cfg hubcore.WebConfig, ref, threadID string) func() {
