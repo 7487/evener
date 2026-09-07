@@ -196,7 +196,7 @@ func (s *LocalDaemonSource) acquireRelaySession(params appwire.ThreadReadParams)
 
 func (s *LocalDaemonSource) ListThreads(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
 	out := appwire.ThreadListResponse{}
-	for _, entry := range s.liveEntries() {
+	for _, entry := range s.listedEntries() {
 		out.Data = append(out.Data, s.threadFromEntry(entry))
 	}
 	sort.SliceStable(out.Data, func(i, j int) bool {
@@ -827,6 +827,19 @@ func (s *LocalDaemonSource) entryForRefMode(rawRef, threadID string, allowReadOn
 }
 
 func (s *LocalDaemonSource) liveEntries() []LocalDaemonEntry {
+	entries := s.listedEntries()
+	out := make([]LocalDaemonEntry, 0, len(entries))
+	for _, item := range entries {
+		if item.Entry.Protocol == appwire.ProtocolVersion && item.Status != appwire.ThreadStatusRestartRequired {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// listedEntries preserves confirmed incompatible owners for display, without
+// admitting them to the live RPC routes selected by liveEntries.
+func (s *LocalDaemonSource) listedEntries() []LocalDaemonEntry {
 	if s.entries == nil {
 		return nil
 	}
@@ -834,7 +847,7 @@ func (s *LocalDaemonSource) liveEntries() []LocalDaemonEntry {
 	out := make([]LocalDaemonEntry, 0, len(entries))
 	for _, item := range entries {
 		entry := item.Entry
-		if entry.Protocol != appwire.ProtocolVersion || entry.Endpoint == "" || entry.ThreadID == "" {
+		if entry.Endpoint == "" || entry.ThreadID == "" || (entry.Protocol != appwire.ProtocolVersion && item.Status != appwire.ThreadStatusRestartRequired) {
 			continue
 		}
 		sourceID := entry.SourceID

@@ -1026,10 +1026,15 @@ func TestLocalDaemonResolveRelaySessionCanonicalizesAliasesWithoutAcquiring(t *t
 func TestLocalDaemonListPreservesRestartRequiredStatus(t *testing.T) {
 	source := NewLocalDaemonSourceWithEntries("local", func() []LocalDaemonEntry {
 		return []LocalDaemonEntry{{
-			Entry:  rendezvous.Entry{Protocol: appwire.ProtocolVersion, Endpoint: "ws://daemon", SourceID: "local", ThreadID: "owner", SessionID: "owner"},
+			Entry:  rendezvous.Entry{Protocol: "evener-appwire-v4", Endpoint: "ws://daemon", SourceID: "local", ThreadID: "owner", SessionID: "owner"},
 			Status: appwire.ThreadStatusRestartRequired,
 		}}
 	}, nil)
+	dials := 0
+	source.dial = func(context.Context, string, *http.Client, http.Header) (appwire.Transport, error) {
+		dials++
+		return nil, errors.New("unexpected incompatible daemon dial")
+	}
 	response, err := source.ListThreads(t.Context(), appwire.ThreadListParams{})
 	if err != nil {
 		t.Fatal(err)
@@ -1044,4 +1049,14 @@ func TestLocalDaemonListPreservesRestartRequiredStatus(t *testing.T) {
 	if thread.Evener.Capabilities != (appwire.ThreadCapabilities{}) {
 		t.Fatalf("capabilities=%+v", thread.Evener.Capabilities)
 	}
+	if _, err := source.ReadThread(t.Context(), appwire.ThreadReadParams{Ref: "local:owner"}); err == nil {
+		t.Fatal("incompatible daemon was readable through a live route")
+	}
+	if _, err := source.ListModels(t.Context(), appwire.ModelListParams{}); err != nil {
+		t.Fatal(err)
+	}
+	if dials != 0 {
+		t.Fatalf("incompatible daemon dials=%d", dials)
+	}
+
 }

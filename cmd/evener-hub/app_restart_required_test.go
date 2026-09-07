@@ -1109,3 +1109,33 @@ type changedOwnershipProber struct {
 func (p *changedOwnershipProber) Probe(rendezvous.Entry) hubcore.ProbeResult {
 	return hubcore.ProbeResult{SessionID: p.sessionID, Status: appwire.ThreadStatusIdle, OK: !p.fail}
 }
+
+func TestHubRPCListShowsIncompatibleDaemonWithoutPastIndex(t *testing.T) {
+	const sessionID = "unindexed-owner"
+	runDir := t.TempDir()
+	entry := rendezvous.Entry{PID: os.Getpid(), Protocol: "evener-appwire-v4", Endpoint: protocolMismatchPeer(t), SourceID: "local", ThreadID: sessionID, SessionID: sessionID}
+	writeRendezvous(t, runDir, entry)
+	roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+	roster.Refresh()
+	hub := newHubRPCTestServer(t, hubcore.WebConfig{Roster: roster})
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := client.ThreadList(t.Context(), appwire.ThreadListParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 {
+		t.Fatalf("threads=%+v", list.Data)
+	}
+	thread := list.Data[0]
+	if thread.ID != sessionID || thread.Status.Type != appwire.ThreadStatusRestartRequired || thread.Evener.Capabilities != (appwire.ThreadCapabilities{}) {
+		t.Fatalf("thread=%+v", thread)
+	}
+	if err := client.ThreadShutdown(t.Context(), appwire.ThreadShutdownParams{Ref: "local:" + sessionID}); !isDaemonRestartRequiredError(err) {
+		t.Fatalf("shutdown error=%v", err)
+	}
+}
