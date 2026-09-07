@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { hubUpdateStore, type UpdateChannel, useHubUpdateStore } from "../../../stores/hubUpdate";
+import { hubUpdateStore, RESTART_TIMEOUT_MS, type UpdateChannel, useHubUpdateStore } from "../../../stores/hubUpdate";
 import { useSettingsOverviewStore } from "../../../stores/settingsOverview";
 import { Button, ConfirmDialog, Loader, RadioGroup } from "../../../widgets";
 import { requireClass } from "../../../widgets/internal/requireClass";
@@ -98,7 +98,9 @@ export function HubUpdates() {
 
           <p className={CLASS.status} role="status">
             {restarting && <Loader label="Restarting hub" />}
-            {!restarting && restartTimedOut && "The hub didn't come back within 30s. Check its logs."}
+            {!restarting &&
+              restartTimedOut &&
+              `The hub didn't come back within ${RESTART_TIMEOUT_MS / 1000}s. Check its logs.`}
             {!restarting && !restartTimedOut && checking && "Checking…"}
             {!restarting && !restartTimedOut && !checking && checkError !== null && (
               <>Couldn't check for updates: {checkError}</>
