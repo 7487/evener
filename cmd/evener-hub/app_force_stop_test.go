@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"primeradiant.com/evener/internal/appserver"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -16,6 +15,7 @@ import (
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/cmd/evener-hub/internal/daemonprocess"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
+	"primeradiant.com/evener/internal/appserver"
 	"primeradiant.com/evener/rendezvous"
 )
 

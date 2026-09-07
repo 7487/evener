@@ -35,8 +35,8 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 		cfg.ResumeLocks.For(id).Lock()
 	}
 	defer func() {
-		for i := len(aliases) - 1; i >= 0; i-- {
-			cfg.ResumeLocks.For(aliases[i]).Unlock()
+		for _, alias := range slices.Backward(aliases) {
+			cfg.ResumeLocks.For(alias).Unlock()
 		}
 	}()
 	if err := ctx.Err(); err != nil {
