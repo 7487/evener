@@ -335,7 +335,9 @@ func registerThreadHandlers(
 		read, err := relays.readThread(ctx, source, params)
 		if err != nil {
 			allowPast := allowsPastFallbackAfterLiveReadFailure(source, params, err)
-			if _, local := localPastThreadID(params); local && cfg.Roster != nil && isSessionUnavailableError(err) {
+			var wire appwire.WireError
+			ownershipMayHaveChanged := isSessionUnavailableError(err) || (errors.As(err, &wire) && wire.Code == appwire.CodeInvalidRequest)
+			if _, local := localPastThreadID(params); local && cfg.Roster != nil && ownershipMayHaveChanged {
 				if refreshErr := hubRosterRefresh(ctx, cfg.Roster); refreshErr != nil {
 					return appwire.ThreadReadResponse{}, appwire.Unavailable(refreshErr.Error())
 				}

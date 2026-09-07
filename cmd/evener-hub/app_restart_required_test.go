@@ -154,22 +154,24 @@ func testHubProtocolUpgrade(t *testing.T, protocol string, cleared, cached bool)
 
 func protocolMismatchPeer(t *testing.T) string {
 	t.Helper()
-	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.CloseNow()
-		var request struct {
-			ID any `json:"id"`
-		}
-		if err := wsjson.Read(r.Context(), conn, &request); err != nil {
-			return
-		}
-		_ = wsjson.Write(r.Context(), conn, map[string]any{"id": request.ID, "error": map[string]any{"code": appwire.CodeInvalidRequest, "message": "incompatible protocol"}})
-	}))
+	peer := httptest.NewServer(http.HandlerFunc(serveProtocolMismatch))
 	t.Cleanup(peer.Close)
 	return "ws" + strings.TrimPrefix(peer.URL, "http") + "/rpc"
+}
+
+func serveProtocolMismatch(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.CloseNow()
+	var request struct {
+		ID any `json:"id"`
+	}
+	if err := wsjson.Read(r.Context(), conn, &request); err != nil {
+		return
+	}
+	_ = wsjson.Write(r.Context(), conn, map[string]any{"id": request.ID, "error": map[string]any{"code": appwire.CodeInvalidRequest, "message": "incompatible protocol"}})
 }
 
 func TestHubResumeRefreshesProtocolStateBeforeDeciding(t *testing.T) {

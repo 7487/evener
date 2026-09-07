@@ -9262,6 +9262,14 @@ func TestHubRPCThreadResumeConfirmsSpawnAfterDiscoveryFailure(t *testing.T) {
 }
 
 func TestHubRPCSubscribedReadRefreshesReplacedDaemonOwnership(t *testing.T) {
+	for _, sameEndpoint := range []bool{false, true} {
+		t.Run(fmt.Sprint("same endpoint=", sameEndpoint), func(t *testing.T) {
+			testHubSubscribedReadReplacedOwner(t, sameEndpoint)
+		})
+	}
+}
+
+func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool) {
 	root := t.TempDir()
 	sessionID := buildRPCParentSession(t, filepath.Join(root, "projects", "upgrade-0000000000"))
 	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
@@ -9275,7 +9283,14 @@ func TestHubRPCSubscribedReadRefreshesReplacedDaemonOwnership(t *testing.T) {
 	appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(context.Context, appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
 		return appwire.ThreadReadResponse{Thread: appwire.Thread{ID: sessionID, SessionID: sessionID, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}}, nil
 	})
-	peer := httptest.NewServer(http.HandlerFunc(daemon.ServeWebSocket))
+	var handlerMu sync.RWMutex
+	serve := http.HandlerFunc(daemon.ServeWebSocket)
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerMu.RLock()
+		handler := serve
+		handlerMu.RUnlock()
+		handler(w, r)
+	}))
 	defer peer.Close()
 	runDir := t.TempDir()
 	entry := rendezvous.Entry{PID: os.Getpid(), Protocol: appwire.ProtocolVersion, Endpoint: "ws" + strings.TrimPrefix(peer.URL, "http"), SourceID: "local", ThreadID: sessionID, SessionID: sessionID}
@@ -9292,9 +9307,15 @@ func TestHubRPCSubscribedReadRefreshesReplacedDaemonOwnership(t *testing.T) {
 	if _, err := client.Initialize(context.Background(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
 		t.Fatal(err)
 	}
-	peer.Close()
 	entry.Protocol = "evener-appwire-v4"
-	entry.Endpoint = protocolMismatchPeer(t)
+	if sameEndpoint {
+		handlerMu.Lock()
+		serve = serveProtocolMismatch
+		handlerMu.Unlock()
+	} else {
+		peer.Close()
+		entry.Endpoint = protocolMismatchPeer(t)
+	}
 	writeRendezvous(t, runDir, entry)
 	response, err := client.ThreadRead(context.Background(), appwire.ThreadReadParams{Ref: "local:" + sessionID, IncludeTurns: true, Subscribe: true})
 	if err != nil {
