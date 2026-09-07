@@ -8386,6 +8386,9 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 					},
 				}}, nil
 			})
+			appserver.HandleTyped(daemon.Router(), appwire.MethodThreadList, func(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+				return appwire.ThreadListResponse{Data: []appwire.Thread{{ID: sessionID, SessionID: sessionID, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}}}, nil
+			})
 			var gotPrompt string
 			var turns int
 			appserver.HandleTyped(daemon.Router(), appwire.MethodTurnStart, func(_ context.Context, params appwire.TurnStartParams) (appwire.TurnStartResponse, error) {
@@ -8398,7 +8401,9 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 				Listener: daemonHTTP.Listener,
 				dropped:  make(chan struct{}),
 			}
-			daemonHTTP.Listener = dropper
+			if fault == "probe" {
+				daemonHTTP.Listener = dropper
+			}
 			daemonHTTP.Start()
 			defer daemonHTTP.Close()
 
@@ -8422,7 +8427,7 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 				}
 				return entry, nil
 			}}
-			roster := hubcore.NewRoster(runDir, failedRPCProber{})
+			roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
 			hub := newHubRPCTestServer(t, hubcore.WebConfig{
 				RunDir:  runDir,
 				Roster:  roster,
@@ -8444,10 +8449,12 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 			if err != nil {
 				t.Fatalf("ThreadStart: %v", err)
 			}
-			select {
-			case <-dropper.dropped:
-			default:
-				t.Fatal("startup test did not drop the first daemon connection")
+			if fault == "probe" {
+				select {
+				case <-dropper.dropped:
+				default:
+					t.Fatal("startup test did not drop the first daemon connection")
+				}
 			}
 			if gotPrompt != "review the open PRs" {
 				t.Fatalf("prompt=%q, want review the open PRs", gotPrompt)
@@ -8459,6 +8466,22 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 			if spawns != 1 || turns != 1 {
 				t.Fatalf("spawns=%d turns=%d", spawns, turns)
 			}
+			if live, ok := roster.Find(sessionID); !ok || live.PID != entry.PID || live.Crashed {
+				t.Errorf("spawned daemon is not registered: %+v, present=%v", live, ok)
+			}
+			if _, err := client.ThreadRead(context.Background(), appwire.ThreadReadParams{Ref: resp.Thread.Evener.Ref}); err != nil {
+				t.Fatalf("subsequent ThreadRead: %v", err)
+			}
+			if _, err := client.TurnStart(context.Background(), appwire.TurnStartParams{
+				Ref: resp.Thread.Evener.Ref, ClientMutationID: "follow-up", ExpectedInstanceID: sessionID,
+				Input: []appwire.InputItem{{Type: "text", Text: "continue review"}},
+			}); err != nil {
+				t.Fatalf("subsequent TurnStart: %v", err)
+			}
+			if spawns != 1 || turns != 2 || gotPrompt != "continue review" {
+				t.Fatalf("follow-up delivery: spawns=%d turns=%d prompt=%q", spawns, turns, gotPrompt)
+			}
+
 		})
 	}
 }

@@ -185,6 +185,16 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 				}
 			}
 		}
+		if canUseSpawnEntry {
+			// The initial direct route also needs a published owner so later
+			// reads, relays, and navigation can find the spawned daemon.
+			live, found := cfg.Roster.Find(entry.SessionID)
+			if !found || live.Crashed || live.PID != entry.PID {
+				if err := cfg.Roster.RefreshEntry(ctx, entry); err != nil {
+					return appwire.ThreadStartResponse{}, appwire.Unavailable(err.Error())
+				}
+			}
+		}
 	}
 	ref := localSpawnWorkspaceRef(entry)
 	var source appsource.Source
