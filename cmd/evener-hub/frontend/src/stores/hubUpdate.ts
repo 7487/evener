@@ -13,7 +13,7 @@
 
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
-import { errorText } from "../protocol/errors";
+import { friendlyErrorMessage } from "../protocol/errors";
 import type { AppwireClientLike } from "../protocol/testing/fakeClient";
 import type { UpdateCheckResponse } from "../protocol/types.gen";
 import { connectionStore } from "./connection";
@@ -109,7 +109,7 @@ export const hubUpdateStore = createStore<HubUpdateStoreState>((set, get) => ({
       }
     } catch (err) {
       if (get().channel === channel) {
-        set({ check: null, checking: false, checkError: errorText(err) });
+        set({ check: null, checking: false, checkError: friendlyErrorMessage(err) });
       }
     }
   },
@@ -128,7 +128,7 @@ export const hubUpdateStore = createStore<HubUpdateStoreState>((set, get) => ({
     try {
       await requireClient().request("evener/update/apply", { channel: get().channel ?? "" });
     } catch (err) {
-      set({ applying: false, applyError: errorText(err) });
+      set({ applying: false, applyError: friendlyErrorMessage(err) });
       return;
     }
     set({ applying: false, restarting: true });

@@ -1,5 +1,6 @@
 import { act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { GENERIC_ERROR_MESSAGE, HUB_UNREACHABLE_MESSAGE, WireError } from "../protocol/errors";
 import { FakeClient } from "../protocol/testing/fakeClient";
 import type { UpdateCheckResponse } from "../protocol/types.gen";
 import { connectionStore } from "./connection";
@@ -68,10 +69,10 @@ describe("runCheck", () => {
     expect(fake.calls).toEqual([{ method: "evener/update/check", params: { channel: "" } }]);
   });
 
-  test("stores the error text and clears the previous result on failure", async () => {
+  test("stores the hub's own message and clears the previous result on failure", async () => {
     const fake = connectFakeClient();
     fake.on("evener/update/check", () => {
-      throw new Error("GET x: 403 Forbidden: API rate limit exceeded");
+      throw new WireError("GET x: 403 Forbidden: API rate limit exceeded", -1);
     });
 
     await act(() => hubUpdateStore.getState().runCheck());
@@ -79,6 +80,17 @@ describe("runCheck", () => {
     const state = hubUpdateStore.getState();
     expect(state.check).toBeNull();
     expect(state.checkError).toContain("rate limit");
+  });
+
+  test("shows the generic message for a non-WireError rejection, not its raw text", async () => {
+    const fake = connectFakeClient();
+    fake.on("evener/update/check", () => {
+      throw new Error("TypeError: cyclic object value");
+    });
+
+    await act(() => hubUpdateStore.getState().runCheck());
+
+    expect(hubUpdateStore.getState().checkError).toBe(GENERIC_ERROR_MESSAGE);
   });
 
   test("setChannel clears the stale check result", async () => {
@@ -218,7 +230,7 @@ describe("apply", () => {
     const fake = connectFakeClient();
     fake.on("evener/update/check", () => ({ ...UP_TO_DATE, updateAvailable: true }));
     fake.on("evener/update/apply", () => {
-      throw new Error("this hub is a dev build");
+      throw new WireError("this hub is a dev build", -1);
     });
 
     hubUpdateStore.getState().setChannel("snapshot");
@@ -231,6 +243,23 @@ describe("apply", () => {
     expect(hubUpdateStore.getState().applyError).toContain("dev build");
     expect(hubUpdateStore.getState().restarting).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("shows the hub-unreachable message when apply fails on the transport", async () => {
+    const fetchImpl = healthFetch(["be70029"]);
+    resetHubUpdateStoreForTests({ fetchImpl, reload: vi.fn() });
+    const fake = connectFakeClient();
+    fake.on("evener/update/check", () => ({ ...UP_TO_DATE, updateAvailable: true }));
+    fake.on("evener/update/apply", () => {
+      throw new Error('AppwireClient: cannot call "evener/update/apply" while state is "closed"');
+    });
+
+    hubUpdateStore.getState().setChannel("snapshot");
+    await act(() => hubUpdateStore.getState().runCheck());
+    await act(() => hubUpdateStore.getState().apply());
+
+    expect(hubUpdateStore.getState().applyError).toBe(HUB_UNREACHABLE_MESSAGE);
+    expect(hubUpdateStore.getState().restarting).toBe(false);
   });
 
   test("requires a prior check and rejects apply() without one", async () => {

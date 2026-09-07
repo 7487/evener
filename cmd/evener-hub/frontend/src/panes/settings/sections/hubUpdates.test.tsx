@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { WireError } from "../../../protocol/errors";
 import { FakeClient } from "../../../protocol/testing/fakeClient";
 import type { SettingsOverviewResponse, UpdateCheckResponse } from "../../../protocol/types.gen";
 import { connectionStore } from "../../../stores/connection";
@@ -130,7 +131,7 @@ test("check failure shows the error and a working Check for updates button", asy
   let attempts = 0;
   fake.on("evener/update/check", () => {
     attempts += 1;
-    if (attempts === 1) throw new Error("GET x: 403 Forbidden: API rate limit exceeded");
+    if (attempts === 1) throw new WireError("GET x: 403 Forbidden: API rate limit exceeded", -1);
     return { ...UP_TO_DATE, channel: "release", latestTag: "v0.1.0" };
   });
 
