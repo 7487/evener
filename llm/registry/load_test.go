@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -762,6 +763,94 @@ func TestUnresolvedBaseURL(t *testing.T) {
 				t.Fatalf("UnresolvedBaseURL(%q) problems = %v, want one naming %s", tt.id, problems, tt.wantProblem)
 			}
 		})
+	}
+}
+
+// TestTemplateVarsEnv covers which vars_env entries an add form should offer:
+// the ones a URL template reads, wherever that template lives (a row's own
+// base URL counts), plus a host rule's inputs. The models.dev env list also
+// names the credential's own variable (GOOGLE_APPLICATION_CREDENTIALS), which
+// no template reads and the registry never substitutes (roborev round 19).
+func TestTemplateVarsEnv(t *testing.T) {
+	r := fixtureLoad(t, nil, "")
+	// A row's own base URL carries its own vars_env mapping (models.dev's
+	// per-model api templates, convertModel): the row is the only place
+	// REGION is read or mapped, and the provider's UNREAD is read nowhere.
+	r.curated["row-only"] = &record{head: Provider{
+		Transport: Transport{
+			BaseURL: "https://example.test/v1",
+			VarsEnv: map[string]string{"UNREAD": "EXAMPLE_UNREAD"},
+		},
+		Models: map[string]Model{"m": {Transport: &Transport{
+			BaseURL: "https://{REGION}.example.test/v1",
+			VarsEnv: map[string]string{"REGION": "EXAMPLE_REGION"},
+		}}},
+	}}
+	r.curated["rule-only"] = &record{head: Provider{Transport: Transport{
+		BaseURL:  "{GOOGLE_VERTEX_HOST}/v1",
+		HostRule: HostRuleVertexLocation,
+		VarsEnv: map[string]string{
+			"GOOGLE_VERTEX_LOCATION":         "GOOGLE_VERTEX_LOCATION",
+			"GOOGLE_APPLICATION_CREDENTIALS": "GOOGLE_APPLICATION_CREDENTIALS",
+		},
+	}}}
+	// The host rule and its input mapping live on a row's own transport
+	// (the schema allows a row host_rule; transportShape merges it).
+	r.curated["row-rule-only"] = &record{head: Provider{
+		Transport: Transport{BaseURL: "https://example.test/v1", VarsEnv: map[string]string{"UNREAD": "EXAMPLE_UNREAD"}},
+		Models: map[string]Model{"m": {Transport: &Transport{
+			BaseURL:  "{GOOGLE_VERTEX_HOST}/v1",
+			HostRule: HostRuleVertexLocation,
+			VarsEnv:  map[string]string{"GOOGLE_VERTEX_LOCATION": "GOOGLE_VERTEX_LOCATION"},
+		}}},
+	}}
+	// No curated base URL, but a row with its own template: the provider's
+	// whole map stays offered (the user types the URL) and the row's mapping
+	// is offered too.
+	r.curated["typed-url"] = &record{head: Provider{
+		Transport: Transport{VarsEnv: map[string]string{"ACCOUNT": "EXAMPLE_ACCOUNT"}},
+		Models: map[string]Model{"m": {Transport: &Transport{
+			BaseURL: "https://{REGION}.example.test/v1",
+			VarsEnv: map[string]string{"REGION": "EXAMPLE_REGION"},
+		}}},
+	}}
+	for _, tt := range []struct {
+		id   string
+		want map[string]string
+	}{
+		// GOOGLE_VERTEX_ENDPOINT is read and mapped only by the OpenAI-compatible
+		// rows' own base URL; GOOGLE_APPLICATION_CREDENTIALS by nothing.
+		{id: "google-vertex", want: map[string]string{"GOOGLE_VERTEX_PROJECT": "GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION": "GOOGLE_VERTEX_LOCATION", "GOOGLE_VERTEX_ENDPOINT": "GOOGLE_VERTEX_ENDPOINT"}},
+		{id: "openai", want: map[string]string{"BASE_URL": "OPENAI_BASE_URL"}},
+		{id: "row-only", want: map[string]string{"REGION": "EXAMPLE_REGION"}},
+		{id: "rule-only", want: map[string]string{"GOOGLE_VERTEX_LOCATION": "GOOGLE_VERTEX_LOCATION"}},
+		{id: "row-rule-only", want: map[string]string{"GOOGLE_VERTEX_LOCATION": "GOOGLE_VERTEX_LOCATION"}},
+		// No curated base URL (models.dev publishes no api): the user types
+		// the URL, so every vars_env entry stays offered.
+		{id: "watsonx", want: map[string]string{"WATSONX_AI_PROJECT_ID": "WATSONX_AI_PROJECT_ID"}},
+		{id: "typed-url", want: map[string]string{"ACCOUNT": "EXAMPLE_ACCOUNT", "REGION": "EXAMPLE_REGION"}},
+		{id: "no-such-provider"},
+	} {
+		t.Run(tt.id, func(t *testing.T) {
+			if got := r.TemplateVarsEnv(tt.id); !maps.Equal(got, tt.want) {
+				t.Fatalf("TemplateVarsEnv(%q) = %v, want %v", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTemplateVarsEnvTopLevelGlob: a top-level glob row may carry a transport
+// (applyGlobs merges it into every matching row before substitution), so its
+// placeholders and mappings are offered to the providers that have a matching
+// row and to no other.
+func TestTemplateVarsEnvTopLevelGlob(t *testing.T) {
+	glob := "[models.\"*llama-3.3-70b*\"]\nbase_url = \"https://{GLOB_REGION}.example.test/v1\"\nvars_env = { \"GLOB_REGION\" = \"EXAMPLE_GLOB_REGION\" }\n"
+	r := fixtureLoad(t, nil, "", WithOverlay(overlayWith(glob)))
+	if got := r.TemplateVarsEnv("google-vertex")["GLOB_REGION"]; got != "EXAMPLE_GLOB_REGION" {
+		t.Fatalf("google-vertex (has llama-3.3-70b rows) TemplateVarsEnv = %v, want GLOB_REGION mapped", r.TemplateVarsEnv("google-vertex"))
+	}
+	if got, want := r.TemplateVarsEnv("openai"), map[string]string{"BASE_URL": "OPENAI_BASE_URL"}; !maps.Equal(got, want) {
+		t.Fatalf("openai (no matching row) TemplateVarsEnv = %v, want %v", got, want)
 	}
 }
 

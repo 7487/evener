@@ -906,11 +906,20 @@ func expandTemplate(tpl string, lookup func(string) (string, bool)) (string, []s
 
 // varLookupWith is the spec §9.1 variable order with a warnings sink: the
 // user layer's vars, then the environment through vars_env, then the curated
-// and upstream defaults. A user `vars` entry whose $ENV reference is unset
-// warns and resolves to nothing instead of falling through to vars_env or
-// the curated default, so the URL never silently uses the value the user
-// meant to replace (spec §10).
-func (r *Registry) varLookupWith(rec *record, warn func(string)) func(string) (string, bool) {
+// and upstream defaults. A vars_env mapping or a default is the provider's
+// own, or, for a name the provider does not map at all, that of t, the
+// transport shape being resolved: a row's own mapping, merged in by
+// transportShape, is where models.dev keeps a per-model api template's
+// placeholders (GOOGLE_VERTEX_ENDPOINT on google-vertex's OpenAI-compatible
+// rows), and a caller resolving the provider's own transport passes it as t,
+// which adds nothing. A provider mapping whose variable is unset does not
+// fall back to the row's: a user who redirected the name (a user-layer
+// vars_env merges into the provider's) meant to replace that value, so the
+// URL stays unresolved and warned rather than silently reading the stock
+// variable — the same rule spec §10 states for a user `vars` entry whose
+// $ENV reference is unset, which warns and resolves to nothing instead of
+// falling through to vars_env or the curated default.
+func (r *Registry) varLookupWith(rec *record, t Transport, warn func(string)) func(string) (string, bool) {
 	return func(name string) (string, bool) {
 		if v, ok := rec.userVars[name]; ok {
 			expanded, missing := expandEnv(v, r.env)
@@ -924,13 +933,21 @@ func (r *Registry) varLookupWith(rec *record, warn func(string)) func(string) (s
 				return expanded, true
 			}
 		}
-		if envName, ok := rec.head.Transport.VarsEnv[name]; ok {
+		envName, mapped := rec.head.Transport.VarsEnv[name]
+		if !mapped {
+			envName, mapped = t.VarsEnv[name]
+		}
+		if mapped {
 			if v, ok := r.env(envName); ok && v != "" {
 				return v, true
 			}
 		}
-		if v, ok := rec.head.Transport.Vars[name]; ok && v != "" {
-			return v, true
+		def, has := rec.head.Transport.Vars[name]
+		if !has {
+			def, has = t.Vars[name]
+		}
+		if has && def != "" {
+			return def, true
 		}
 		return "", false
 	}
@@ -938,8 +955,8 @@ func (r *Registry) varLookupWith(rec *record, warn func(string)) func(string) (s
 
 // varLookup is varLookupWith for the callers that have no warnings channel
 // (the hidden computation and the endpoint stop).
-func (r *Registry) varLookup(rec *record) func(string) (string, bool) {
-	return r.varLookupWith(rec, func(string) {})
+func (r *Registry) varLookup(rec *record, t Transport) func(string) (string, bool) {
+	return r.varLookupWith(rec, t, func(string) {})
 }
 
 // resolveBaseURLWith substitutes t.BaseURL for rec using lookup, applying
@@ -1001,15 +1018,21 @@ func (r *Registry) resolveBaseURLVia(t Transport, lookup, env func(string) (stri
 // host-rule failures and the unresolved $ENV references of user `vars`.
 func (r *Registry) resolveBaseURL(rec *record, t Transport) (string, []string, []string) {
 	var varWarnings []string
-	url, missing, warnings := r.resolveBaseURLWith(rec, t, r.varLookupWith(rec, func(w string) { varWarnings = append(varWarnings, w) }))
+	url, missing, warnings := r.resolveBaseURLWith(rec, t, r.varLookupWith(rec, t, func(w string) { varWarnings = append(varWarnings, w) }))
 	return url, missing, append(warnings, varWarnings...)
 }
 
 // defaultVarLookup consults only the curated and upstream defaults — no user
 // vars, no environment (spec §10's "after substituting the curated defaults").
-func (r *Registry) defaultVarLookup(rec *record) func(string) (string, bool) {
+func (r *Registry) defaultVarLookup(rec *record, t Transport) func(string) (string, bool) {
 	return func(name string) (string, bool) {
+		// The provider's own default, or, for a name it does not set, the
+		// default of t, the transport shape being resolved — a row's own
+		// curated `vars` merged in by transportShape — mirroring varLookupWith.
 		v, ok := rec.head.Transport.Vars[name]
+		if !ok {
+			v, ok = t.Vars[name]
+		}
 		return v, ok && v != ""
 	}
 }
@@ -1060,6 +1083,78 @@ func (r *Registry) UnresolvedBaseURL(id string) (unset, problems []string) {
 	slices.Sort(unset)
 	slices.Sort(warnings)
 	return slices.Compact(unset), slices.Compact(warnings)
+}
+
+// TemplateVarsEnv lists the variables a curated provider's URL templates
+// read, as a vars_env map restricted to them: a placeholder in the base URL
+// or an endpoint template — the provider's own transport, one of its rows',
+// or a top-level glob row's when the glob matches one of its rows
+// (applyGlobs merges that transport into the row before substitution) — or
+// an input of any of those transports' host rules. The mappings come from
+// the same transports,
+// with the provider's own entry winning a name both carry: a models.dev
+// per-model api template maps its placeholders on the row alone
+// (convertModel), which is where google-vertex's OpenAI-compatible rows keep
+// GOOGLE_VERTEX_ENDPOINT. A vars_env entry no template reads is left out —
+// models.dev lists GOOGLE_APPLICATION_CREDENTIALS beside the Vertex project
+// and location, but the credential is read from the environment or the
+// store, never substituted — so a form built on the result offers no input
+// the registry would ignore. A provider with no curated base URL at all
+// (cloudflare-ai-gateway, watsonx: models.dev publishes no api for them)
+// keeps every provider-level mapping: the user supplies the URL, and a
+// placeholder they type still resolves from instance vars. Nil for an
+// unknown id.
+func (r *Registry) TemplateVarsEnv(id string) map[string]string {
+	rec, ok := r.curated[id]
+	if !ok {
+		return nil
+	}
+	referenced := map[string]bool{}
+	var mapped map[string]string
+	note := func(t Transport) {
+		for _, tpl := range []string{t.BaseURL, t.Endpoint, t.StreamEndpoint, t.ModelsEndpoint, t.CountTokensEndpoint} {
+			for _, m := range placeholderRe.FindAllStringSubmatch(tpl, -1) {
+				referenced[m[1]] = true
+			}
+		}
+		for _, name := range hostRuleAuthorityVars(t.HostRule) {
+			referenced[name] = true
+		}
+		mapped = mergeStringMap(mapped, t.VarsEnv)
+	}
+	matchesRow := func(glob string) bool {
+		for rowID := range rec.head.Models {
+			if matchGlob(glob, rowID) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, rows := range r.topGlobs {
+		for glob, row := range rows {
+			if row.Transport != nil && matchesRow(glob) {
+				note(*row.Transport)
+			}
+		}
+	}
+	for _, row := range rec.head.Models {
+		if row.Transport != nil {
+			note(*row.Transport)
+		}
+	}
+	note(rec.head.Transport)
+	if rec.head.Transport.BaseURL == "" {
+		for name := range rec.head.Transport.VarsEnv {
+			referenced[name] = true
+		}
+	}
+	out := map[string]string{}
+	for name, env := range mapped {
+		if referenced[name] {
+			out[name] = env
+		}
+	}
+	return out
 }
 
 // ProviderIDs lists the curated registry ids, sorted.

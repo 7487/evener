@@ -24,6 +24,10 @@ fake.on("model/list", () => ({
   data: [
     { provider: "anthropic", model: "claude-sonnet-4-5" },
     { provider: "openai", model: "gpt-5" },
+    // Deliberately over-long qualified id: the guard picks this through the
+    // real picker and asserts the trigger ellipsizes it inside the card
+    // instead of pushing effort/Start out.
+    { provider: "example-provider-with-a-very-long-name", model: "extra-long-qualifier-model-variant-turbo-01" },
   ],
 }));
 const directoryRoot = "/home/test/projects/team/experiments/session-start-interface";
@@ -249,9 +253,9 @@ function measureAttachments() {
   };
 }
 
-// The prompt card and everything in its control row. Issue #198: attach, the
-// model trigger and Start belong INSIDE the card at every width, the way the
-// session composer has always had them - this pane used to hand the row a
+// The prompt card and everything in its control row. Attach, the model
+// trigger, effort, and Start belong INSIDE the card at every width, the way
+// the session composer has always had them - this pane used to hand the row a
 // class that turned it into a `position: fixed` viewport band on a phone, so
 // the paperclip sat at the foot of the screen instead of under the prompt.
 // Every reading here is a box the guard compares against the card's own.
@@ -263,6 +267,8 @@ function measurePromptCard() {
   const submit = document.querySelector<HTMLElement>('[data-testid="spawn-submit"]');
   const modelTrigger = document.querySelector<HTMLElement>('[data-testid="spawn-model-trigger"]');
   const modelSlot = document.querySelector<HTMLElement>('[data-testid="spawn-model-slot"]');
+  const modelValue = document.querySelector<HTMLElement>('[data-testid="spawn-model-value"]');
+  const effort = document.querySelector<HTMLElement>('[data-testid="spawn-effort"]');
   return {
     card: card ? boxOf(card) : null,
     controls: controls ? { ...boxOf(controls), position: getComputedStyle(controls).position } : null,
@@ -270,17 +276,26 @@ function measurePromptCard() {
     attach: attach ? boxOf(attach) : null,
     submit: submit ? boxOf(submit) : null,
     modelTrigger: modelTrigger ? boxOf(modelTrigger) : null,
-    // The breakpoint switches the SLOT, and a button under a display:none
-    // ancestor keeps its own computed display while only its box collapses
-    // (kata bsq9) - so the verdict is read from the slot, by the same shared
-    // predicate every other reading here uses.
+    // The value span inside the trigger: a long qualified model id must
+    // ellipsize inside the row, never push effort/Start out of the card.
+    modelValue: modelValue
+      ? { ...boxOf(modelValue), scrollWidth: modelValue.scrollWidth, clientWidth: modelValue.clientWidth }
+      : null,
+    effort: effort ? boxOf(effort) : null,
+    // The model slot renders at every width now - the verdict is still read
+    // from the slot, by the same shared predicate every other reading here
+    // uses.
     modelSlot: readVisibility(modelSlot, "spawn model slot"),
   };
 }
 
 function measureSpawn() {
   const mobileConfigElement = document.querySelector<HTMLElement>('[data-testid="spawn-mobile-config"]');
-  const desktopConfigElement = mobileConfigElement?.previousElementSibling as HTMLElement | null;
+  // The remaining desktop-only config surface: the plugin disclosure hides
+  // itself below 899px (pluginSelection.module.css's .desktopSurface), so it
+  // is the explicit counterpart to the mobile list - not a positional guess
+  // at whatever happens to precede the mobile block.
+  const desktopConfigElement = document.querySelector<HTMLElement>('[data-testid="spawn-plugin-desktop"]');
   const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="mobile-spawn-row"]')).map((row) => {
     const control = row.firstElementChild as HTMLElement | null;
     const sizedElement = control?.matches("button") ? control : row;
@@ -293,8 +308,8 @@ function measureSpawn() {
     };
   });
 
-  const heading = document.querySelector<HTMLElement>("[data-testid='spawn-mobile-prompt-intro'] h3");
-  const subtitle = document.querySelector<HTMLElement>("[data-testid='spawn-mobile-prompt-intro'] p");
+  const heading = document.querySelector<HTMLElement>("[data-testid='spawn-prompt-intro'] h2");
+  const subtitle = document.querySelector<HTMLElement>("[data-testid='spawn-prompt-intro'] p");
   const pluginSummary = document.querySelector<HTMLElement>('[data-testid="spawn-plugin-summary"]');
   const pluginRow = document.querySelector<HTMLElement>('[data-label="Plugins"]');
   const pluginSheet = document.querySelector<HTMLElement>('[role="dialog"][aria-labelledby] h2')?.parentElement
@@ -310,7 +325,7 @@ function measureSpawn() {
     viewport: { width: window.innerWidth, height: window.innerHeight },
     mobileConfig: readVisibility(mobileConfigElement, "mobile config"),
     desktopConfig: readVisibility(desktopConfigElement, "desktop config"),
-    mobileIntro: visibility('[data-testid="spawn-mobile-prompt-intro"]'),
+    promptIntro: visibility('[data-testid="spawn-prompt-intro"]'),
     desktopTitle: visibility('[data-testid="pane-title-desktop"]'),
     mobileTitle: visibility('[data-testid="pane-title-mobile"]'),
     promptCard: measurePromptCard(),
@@ -319,10 +334,10 @@ function measureSpawn() {
     accessiblePrompt: {
       headingTag: heading?.tagName.toLowerCase() ?? "missing",
       headingText: heading?.textContent?.trim() ?? "",
-      headingVisible: heading ? isVisible(visibility("[data-testid='spawn-mobile-prompt-intro'] h3")) : false,
+      headingVisible: heading ? isVisible(visibility("[data-testid='spawn-prompt-intro'] h2")) : false,
       subtitleTag: subtitle?.tagName.toLowerCase() ?? "missing",
       subtitleText: subtitle?.textContent?.trim() ?? "",
-      subtitleVisible: subtitle ? isVisible(visibility("[data-testid='spawn-mobile-prompt-intro'] p")) : false,
+      subtitleVisible: subtitle ? isVisible(visibility("[data-testid='spawn-prompt-intro'] p")) : false,
       headingHiddenFromAT: heading?.getAttribute("aria-hidden") === "true",
       subtitleHiddenFromAT: subtitle?.getAttribute("aria-hidden") === "true",
     },
@@ -349,6 +364,42 @@ async function settleSpawn(): Promise<true> {
     await new Promise((resolve) => requestAnimationFrame(resolve));
     if (document.querySelector('[data-testid="spawn-plugin-disclosure"]')) return true;
     if (performance.now() > deadline) throw new Error("Spawn plugin preview did not settle within 10s");
+  }
+}
+
+// Picks the harness's long-id model through the REAL picker - trigger,
+// combobox filter, option click - so the guard measures the production
+// path's own overflow behavior rather than hand-set trigger text that can
+// drift from it. Resolves once the trigger's value hook names the long id.
+// The input is React-controlled, so the value is set through the native
+// setter with a bubbling input event; the option rows are li[role=option]
+// carrying the qualified label text (modelCatalog/index.tsx).
+async function selectLongSpawnModel(): Promise<true> {
+  const trigger = document.querySelector<HTMLButtonElement>('[data-testid="spawn-model-trigger"]');
+  if (!trigger) throw new Error("Spawn model trigger is not available");
+  trigger.click();
+  const deadline = performance.now() + 10_000;
+  for (;;) {
+    const combo = document.querySelector<HTMLInputElement>('input[role="combobox"]');
+    if (combo && combo.value !== "extra-long") {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(combo, "extra-long");
+      combo.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    const options = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
+    const long = options.find((option) => (option.textContent ?? "").includes("extra-long-qualifier"));
+    if (long && isElementVisible(long)) {
+      long.click();
+      break;
+    }
+    if (performance.now() > deadline) throw new Error("Spawn long model option never appeared");
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+  }
+  for (;;) {
+    const value = document.querySelector<HTMLElement>('[data-testid="spawn-model-value"]');
+    if (value?.textContent?.includes("extra-long-qualifier")) return true;
+    if (performance.now() > deadline) throw new Error("Spawn model trigger never named the long model");
+    await new Promise((resolve) => requestAnimationFrame(resolve));
   }
 }
 
@@ -459,6 +510,7 @@ declare global {
     measureSpawn: typeof measureSpawn;
     settledSpawn: Promise<true>;
     stageSpawnAttachments: typeof stageSpawnAttachments;
+    selectLongSpawnModel: typeof selectLongSpawnModel;
     openSpawnPlugins: typeof openSpawnPlugins;
     exerciseDirectoryPicker: typeof exerciseDirectoryPicker;
     exerciseDirectoryField: typeof exerciseDirectoryField;
@@ -468,6 +520,7 @@ declare global {
 window.measureSpawn = measureSpawn;
 window.settledSpawn = settled;
 window.stageSpawnAttachments = stageSpawnAttachments;
+window.selectLongSpawnModel = selectLongSpawnModel;
 window.openSpawnPlugins = openSpawnPlugins;
 
 window.exerciseDirectoryPicker = exerciseDirectoryPicker;

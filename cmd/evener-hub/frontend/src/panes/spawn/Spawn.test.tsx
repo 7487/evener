@@ -148,20 +148,62 @@ function workingDir(): HTMLElement {
   return screen.getByLabelText(/^Working directory:/, { selector: "#spawn-cwd" });
 }
 
-// The DESKTOP Model field's closed trigger (ModelField -> ModelCatalog): a
-// plain button, not a labelable control (see AdvancedOptions.tsx's own note on
-// the composite-widget label pattern), so it is found by its "— change model"
-// accessible-name suffix rather than by label - scoped to its own field
-// wrapper, because the prompt card now carries a second such button (the
-// phone-only ModelSwitchTrigger) and Advanced options can carry a third.
+// The DESKTOP Model control lives in the prompt card's own control row (the
+// session composer's ModelSwitchTrigger, every width): a plain button, not a
+// labelable control, so it is found by its "— change model" accessible-name
+// suffix. Advanced options can carry a second such button, so the lookup stays
+// scoped to the card.
 function modelTrigger(): HTMLElement {
-  return within(screen.getByTestId("spawn-desktop-model")).getByRole("button", { name: /change model/i });
+  return within(screen.getByTestId("spawn-controls")).getByRole("button", { name: /change model/i });
 }
 
-/** The prompt card's own model trigger - the phone's way to set the model,
- * and the same control the session composer carries (issue #198). */
-function cardModelTrigger(): HTMLElement {
-  return screen.getByTestId("spawn-model-trigger");
+/** The trigger's value hook inside the card's control row. */
+function modelValue(): HTMLElement {
+  return screen.getByTestId("spawn-model-value");
+}
+
+/** The quiet effort control in the card's control row (StatusRow's overlay-select recipe). */
+function effortControl(): HTMLElement {
+  return screen.getByLabelText("Prompt reasoning effort");
+}
+
+// The card's effort control and the Advanced Options schema field share the
+// wording "Reasoning effort": with the panel open, AT and label automation
+// must still resolve each control unambiguously, so the card's own label
+// carries its surface ("Prompt reasoning effort").
+test("the card effort control keeps a distinct accessible name with Advanced options open", async () => {
+  const user = userEvent.setup();
+  const advancedOption: LaunchOption = {
+    field: "reasoning_effort",
+    wireField: "reasoningEffort",
+    label: "Reasoning effort",
+    group: "model",
+    kind: "select",
+    perLaunch: true,
+    choices: [
+      { value: "low", label: "low" },
+      { value: "high", label: "high" },
+    ],
+  };
+  renderSpawn(
+    readyClient((f) => {
+      f.on("evener/launch/schema", () => ({ options: [advancedOption] }));
+    }),
+  );
+  await settled();
+
+  await user.click(screen.getByRole("button", { name: "Advanced options" }));
+
+  expect(screen.getByLabelText("Prompt reasoning effort")).toBe(effortControl());
+  expect(screen.getAllByLabelText(/reasoning effort/i)).toHaveLength(2);
+});
+
+/** The visible effort readout (aria-hidden: the select speaks the value). */
+function effortReadout(): HTMLElement {
+  const trigger = screen.getByTestId("spawn-effort");
+  const readout = trigger.querySelector("[data-testid='spawn-effort-value']");
+  if (!readout) throw new Error("the card's effort control has no visible readout");
+  return readout as HTMLElement;
 }
 
 /** The trigger's rendered path. It also carries a chevron and a screen-reader
@@ -371,57 +413,67 @@ test("the desktop directory trigger announces the confirmed path", async () => {
   expect(screen.getByLabelText("Working directory: /tmp/project", { selector: "#spawn-cwd" })).toBe(workingDir());
 });
 
-test("the configuration row is working directory, model and effort - and nothing else", async () => {
+test("the directory and git info sit above the prompt; model and effort live in the card", async () => {
   renderSpawn(readyClient());
   await settled();
 
-  expect(screen.getByLabelText(/^Working directory:/, { selector: "#spawn-cwd" })).toBeTruthy();
-  expect(screen.getAllByText("Model").length).toBeGreaterThan(0);
-  expect(screen.getByLabelText("Effort")).toBeTruthy();
+  const dir = screen.getByLabelText(/^Working directory:/, { selector: "#spawn-cwd" });
+  const card = screen.getByTestId("spawn-prompt-card");
+  const controls = screen.getByTestId("spawn-controls");
+  expect(dir.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // Below-card model/effort fields are gone: the desktop field wrapper and the
+  // bordered Effort select no longer render.
+  expect(screen.queryByTestId("spawn-desktop-model")).toBeNull();
+  expect(screen.queryByLabelText("Effort")).toBeNull();
+  // Model + effort are the card's own controls, beside attach and Start.
+  expect(card.contains(controls)).toBe(true);
+  expect(card.contains(screen.getByTestId("spawn-attach"))).toBe(true);
+  expect(card.contains(modelTrigger())).toBe(true);
+  expect(card.contains(effortControl())).toBe(true);
+  expect(controls.querySelector("[data-testid='spawn-submit']")).toBeTruthy();
+  expect(screen.getByRole("textbox", { name: "Prompt" }).style.getPropertyValue("--textarea-min-lines")).toBe("6");
 });
 
-// Issue #198: the phone's attach button and model trigger are the composer's,
-// in the composer's place - the card's own control row - rather than a fixed
-// band at the foot of the viewport and a bespoke sheet in the settings list.
-// The row order below is the Treatment A list plus session-only Plugins. Model
-// left it when the card took the job.
-test("mobile Spawn sets attachments and the model from inside the prompt card, not from the settings rows", async () => {
+// Issue #198: the attach button, model trigger, and effort control are the
+// composer's, in the composer's place - the card's own control row - rather
+// than a fixed band at the foot of the viewport and bespoke rows in the
+// settings list. The row order below is the Treatment A list plus
+// session-only Plugins. Model AND effort left it when the card took the job.
+test("mobile Spawn sets attachments, the model, and effort from inside the prompt card", async () => {
   renderSpawn(readyClient());
   await settled();
 
   const mobileConfig = screen.getByTestId("spawn-mobile-config");
   expect(
     [...mobileConfig.querySelectorAll<HTMLElement>("[data-testid='mobile-spawn-row']")].map((row) => row.dataset.label),
-  ).toEqual(["Harness", "Working directory", "Branch", "Reasoning effort", "Access mode", "Plugins"]);
+  ).toEqual(["Harness", "Working directory", "Branch", "Access mode", "Plugins"]);
 
   const card = screen.getByTestId("spawn-prompt-card");
   const controls = screen.getByTestId("spawn-controls");
   expect(card.contains(controls)).toBe(true);
   expect(card.contains(screen.getByTestId("spawn-attach"))).toBe(true);
-  expect(card.contains(cardModelTrigger())).toBe(true);
+  expect(card.contains(modelTrigger())).toBe(true);
+  expect(card.contains(effortControl())).toBe(true);
   expect(controls.querySelector("[data-testid='spawn-submit']")).toBeTruthy();
   expect(screen.getByRole("textbox", { name: "Prompt" }).style.getPropertyValue("--textarea-min-lines")).toBe("6");
 });
 
-// The card's trigger is the phone's Model field, so it has to say what that
-// field says: "(default)" while the hub's own default will do, the chosen id
-// once someone picks one.
+// The card's trigger says what the Model field says: "(default)" while the
+// hub's own default will do, the chosen id once someone picks one.
 test("the card's model trigger reads (default) until a model is picked, then names it", async () => {
   const user = userEvent.setup();
   renderSpawn(readyClient());
   await settled();
 
-  expect(screen.getByTestId("spawn-model-value").textContent).toBe("(default)");
+  expect(modelValue().textContent).toBe("(default)");
 
-  await user.click(cardModelTrigger());
+  await user.click(modelTrigger());
   const combo = await screen.findByRole("combobox", { name: "Model" });
   await user.clear(combo);
   await user.type(combo, "gpt-5");
   await user.click(await screen.findByText("openai/gpt-5"));
 
-  await waitFor(() => expect(screen.getByTestId("spawn-model-value").textContent).toBe("openai/gpt-5"));
-  // One model, one state: the desktop field reads the pick too.
-  expect(modelTrigger().textContent).toContain("openai/gpt-5");
+  await waitFor(() => expect(modelValue().textContent).toBe("openai/gpt-5"));
 });
 
 // kata xgk8: a hub with no default to fall back on must not offer "(default)"
@@ -438,7 +490,7 @@ test("the card's model trigger names the required choice when the hub has no def
   await settled();
   await setWorkingDir(user, "/tmp/project");
 
-  await waitFor(() => expect(screen.getByTestId("spawn-model-value").textContent).toBe("Choose a model"));
+  await waitFor(() => expect(modelValue().textContent).toBe("Choose a model"));
 });
 
 test("mobile Spawn keeps the approved prompt hierarchy visible while the prompt is typed", async () => {
@@ -448,12 +500,30 @@ test("mobile Spawn keeps the approved prompt hierarchy visible while the prompt 
 
   await user.type(screen.getByRole("textbox", { name: "Prompt" }), "typed mobile work");
 
-  expect(screen.getByTestId("pane-title-mobile").textContent).toBe("new");
+  expect(screen.getByTestId("pane-title-mobile").textContent).toBe("New session");
   expect(screen.getByRole("heading", { name: "What should the agent do?" })).toBeTruthy();
   expect(screen.getByText("Leave blank to start a dormant session.")).toBeTruthy();
   expect((screen.getByRole("textbox", { name: "Prompt" }) as HTMLTextAreaElement).value).toBe("typed mobile work");
 });
 
+// The placeholder repeated the heading and subtitle standing right above it
+// almost word for word, so the field spent its one line saying what the page
+// had already said. The dormant-start rule it also carried stays on the page,
+// in that intro.
+test("the prompt placeholder does not repeat the heading", async () => {
+  renderSpawn(readyClient());
+  await settled();
+
+  const prompt = screen.getByRole("textbox", { name: "Prompt" }) as HTMLTextAreaElement;
+  expect(prompt.placeholder).toBe("Describe the task…");
+  expect(screen.getByText("Leave blank to start a dormant session.")).toBeTruthy();
+});
+
+// The card's control-row compression and touch floors are pinned by the
+// spawn-attach-in-card layoutguard case (geometric assertions against the
+// real cascade at phone width: containment, active ellipsis on a long model
+// id, the 44px effort tap floor), not by source-text matching here - a CSS
+// grep passes even when the rules are unused or overridden.
 test("mobile-only spawn hierarchy and row scale stay gated from desktop", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const spawnCss = readFileSync(join(here, "spawn.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -463,7 +533,11 @@ test("mobile-only spawn hierarchy and row scale stay gated from desktop", () => 
     "",
   );
 
-  expect(spawnCss).toContain(".mobilePromptIntro");
+  // The prompt heading shows at every width now (critique R7); only the
+  // settings-style rows stay phone-only.
+  expect(spawnCss).toContain(".promptIntro");
+  expect(spawnCss).not.toContain(".mobilePromptIntro");
+  expect(spawnCss).toContain(".mobileConfig");
   expect(spawnCss).toContain("@media (max-width: 899px)");
   expect(rowsCss).toContain("min-height: 48px");
   expect(rowsCss).toContain("font-size: var(--font-size-body)");
@@ -496,7 +570,7 @@ test("the primary verb is Start, in the card's own corner, and the page is title
 
   const start = screen.getByTestId("spawn-submit");
   expect(start.textContent).toBe("Start");
-  expect(screen.getByTestId("pane-title-desktop").textContent).toBe("Start an agent");
+  expect(screen.getByTestId("pane-title-desktop").textContent).toBe("New session");
   // Inside the card, not in a detached actions strip below it.
   expect(screen.getByTestId("spawn-prompt-card").contains(start)).toBe(true);
   expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
@@ -513,17 +587,6 @@ test("the Start button's word collapses to the glyph below the compact pane thre
   const css = readFileSync(join(here, "spawn.module.css"), "utf8");
   expect(css).toMatch(/\.form\s*\{[^}]*container-type:\s*inline-size/);
   expect(css).toMatch(/@container \(max-width: 559px\)[\s\S]*?\.submitLabel\s*\{[^}]*display:\s*none/);
-});
-
-// The dormant-start rule rides in the placeholder rather than a separate
-// instruction line above the form: it is a fact about THIS field.
-test("the dormant hint lives in the placeholder, not a standalone instruction line", async () => {
-  renderSpawn(readyClient());
-  await settled();
-
-  const prompt = screen.getByRole("textbox", { name: "Prompt" });
-  expect(prompt.getAttribute("placeholder")).toBe("What should the agent work on? Leave blank to start it dormant.");
-  expect(screen.queryByText(/leave the prompt blank/i)).toBeNull();
 });
 
 // Writing the prompt is what starting an agent IS, so the caret starts there
@@ -1579,7 +1642,7 @@ test("kata xgk8: an Advanced-options model override satisfies the requirement wi
 // "(default)": an unresolved answer must never be dressed up as a known one.
 
 function effortOptionLabels(): (string | null)[] {
-  const select = screen.getByLabelText("Effort") as HTMLSelectElement;
+  const select = screen.getByLabelText("Prompt reasoning effort") as HTMLSelectElement;
   return Array.from(select.options).map((o) => o.textContent);
 }
 
@@ -1597,22 +1660,39 @@ test("Effort, Model, and the mobile rows name the resolved default once launch/r
 
   // No working directory yet, so no resolve has run: plain "(default)".
   expect(effortOptionLabels()[0]).toBe("(default)");
-  expect(screen.getByTestId("spawn-model-value").textContent).toBe("(default)");
+  expect(modelValue().textContent).toBe("(default)");
 
   await setWorkingDir(user, "/tmp/project");
   await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/launch/resolve")).toBe(true));
 
   // Effort's empty option names the inherited effort.
   await waitFor(() => expect(effortOptionLabels()[0]).toBe("high (default)"));
-  // The desktop Model field's closed trigger names the inherited model.
+  // The card's Model trigger names the inherited model.
   expect(modelTrigger().textContent).toContain("anthropic/claude-sonnet-4-5 (default)");
-  // The card's phone trigger follows the same rule the desktop field does.
-  expect(screen.getByTestId("spawn-model-value").textContent).toBe("anthropic/claude-sonnet-4-5 (default)");
-  // The mobile Reasoning effort row derives its resting label from the same
-  // options list, so it inherits the resolved wording too.
-  const mobileConfig = screen.getByTestId("spawn-mobile-config");
-  const effortRow = mobileConfig.querySelector('[data-label="Reasoning effort"]');
-  expect(effortRow?.textContent).toContain("high (default)");
+  expect(modelValue().textContent).toBe("anthropic/claude-sonnet-4-5 (default)");
+});
+
+// The visible effort readout is the selected option's own label - including
+// the resolved default's ("high (default)"), not the bare "(default)" the
+// empty value renders before the resolve lands.
+test("the card's effort readout names the resolved default once launch/resolve lands", async () => {
+  const user = userEvent.setup();
+  const fake = readyClient((f) => {
+    f.on("evener/launch/resolve", () => ({
+      effective: { model: "anthropic/claude-sonnet-4-5", reasoningEffort: "high" },
+      layers: {},
+      provenance: {},
+    }));
+  });
+  renderSpawn(fake);
+  await settled();
+
+  expect(effortReadout().textContent).toBe("(default)");
+
+  await setWorkingDir(user, "/tmp/project");
+  await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/launch/resolve")).toBe(true));
+
+  await waitFor(() => expect(effortReadout().textContent).toBe("high (default)"));
 });
 
 // Access mode is the chip-level face of the launch-config sandbox field
@@ -1668,7 +1748,7 @@ test("the (default) labels stay plain when the resolve fails", async () => {
 
   expect(effortOptionLabels()[0]).toBe("(default)");
   expect(modelTrigger().textContent).not.toContain("claude");
-  expect(screen.getByTestId("spawn-model-value").textContent).toBe("(default)");
+  expect(modelValue().textContent).toBe("(default)");
 });
 
 // The Advanced panel's own unset labels resolve the same way, off the same
@@ -1856,7 +1936,7 @@ function scriptModelList(models: ModelDescriptor[]): void {
 }
 
 function effortSelect(): HTMLSelectElement {
-  return screen.getByLabelText("Effort") as HTMLSelectElement;
+  return screen.getByLabelText("Prompt reasoning effort") as HTMLSelectElement;
 }
 
 function effortOptionValues(): string[] {
@@ -1937,6 +2017,42 @@ test("a model the catalog says cannot reason disables the Effort select and clea
   await pickModel(user, "gpt-5", "openai/gpt-5");
   await waitFor(() => expect(effortSelect().disabled).toBe(true));
   expect(effortSelect().value).toBe("");
+});
+
+// A disabled effort control must LOOK disabled: the visible wrapper carries
+// the state (not just the transparent select inside it), so it drops its
+// hover face and pointer cursor like every other disabled control.
+test("a disabled effort control renders its disabled state on the visible wrapper", async () => {
+  const user = userEvent.setup();
+  scriptModelList([
+    {
+      provider: "openai",
+      model: "gpt-5",
+      displayName: "openai/gpt-5",
+      supportsReasoning: false,
+      reasoningEffortLevels: [],
+    },
+  ]);
+  renderSpawn(readyClient());
+  await settled();
+
+  await pickModel(user, "gpt-5", "openai/gpt-5");
+  await waitFor(() => expect(effortSelect().disabled).toBe(true));
+
+  const trigger = screen.getByTestId("spawn-effort");
+  expect(trigger.getAttribute("data-disabled")).toBe("true");
+});
+
+// The transparent overlay select is the topmost hittable layer, so it must
+// inherit the wrapper's cursor - its own `pointer` would otherwise win over
+// the wrapper's `not-allowed` on a disabled control. CSS gate: jsdom
+// evaluates no cascade, so the computed cursor is asserted on the source.
+test("the effort overlay select inherits the wrapper cursor", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const spawnCss = readFileSync(join(here, "spawn.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  expect(spawnCss).toMatch(/\.effortSelect\s*\{[^}]*cursor:\s*inherit/);
+  expect(spawnCss).toContain(".effortTrigger:not([data-disabled");
 });
 
 test("with Model left at '(default)', the Effort select follows the hub's resolved default model", async () => {

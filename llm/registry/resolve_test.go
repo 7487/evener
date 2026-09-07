@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -259,6 +260,37 @@ func TestResolve_TransportAssembly(t *testing.T) {
 	}
 	if res := mustResolve(t, r, "google-vertex-anthropic/claude-sonnet-4-6"); hasWarning(res, "regional") {
 		t.Fatal("Sonnet 4.6 and earlier are fine on regional endpoints")
+	}
+	// The warning is about the location the URL was built with: an instance
+	// whose own base_url carries no location placeholder reaches no regional
+	// endpoint, whatever the environment says.
+	r = fixtureLoad(t, map[string]string{"GOOGLE_VERTEX_PROJECT": "p", "GOOGLE_VERTEX_LOCATION": "europe-west1"},
+		"[providers.gw]\nbase = \"google-vertex-anthropic\"\nbase_url = \"https://gw.example.test/v1\"\n")
+	if res := mustResolve(t, r, "gw/claude-opus-5"); hasWarning(res, "regional") || res.Transport.BaseURL != "https://gw.example.test/v1" {
+		t.Fatalf("literal base_url must not warn about a location it does not use: %+v", res)
+	}
+	// A template that names only the host still reaches the regional endpoint:
+	// the vertex-location rule derives the host from the location, so the
+	// location counts as used, is exposed, and is warned about.
+	r = fixtureLoad(t, map[string]string{"GOOGLE_VERTEX_PROJECT": "p", "GOOGLE_VERTEX_LOCATION": "europe-west1"},
+		"[providers.hostonly]\nbase = \"google-vertex-anthropic\"\nbase_url = \"{GOOGLE_VERTEX_HOST}/v1/custom\"\n")
+	if res := mustResolve(t, r, "hostonly/claude-opus-5"); !hasWarning(res, "regional") || res.Transport.BaseURL != "https://europe-west1-aiplatform.googleapis.com/v1/custom" || res.Transport.Vars["GOOGLE_VERTEX_LOCATION"] != "europe-west1" {
+		t.Fatalf("host derived from the location must warn and expose the location: %+v", res)
+	}
+	// A row's own literal base_url replaces the provider template, so the
+	// provider template's location is neither used nor exposed nor warned about.
+	r = fixtureLoad(t, map[string]string{"GOOGLE_VERTEX_PROJECT": "p", "GOOGLE_VERTEX_LOCATION": "europe-west1"},
+		"[providers.rowgw]\nbase = \"google-vertex-anthropic\"\n[providers.rowgw.models.\"claude-opus-5\"]\nbase_url = \"https://gw.example.test/v1\"\n")
+	if res := mustResolve(t, r, "rowgw/claude-opus-5"); hasWarning(res, "regional") || res.Transport.BaseURL != "https://gw.example.test/v1" || res.Transport.Vars["GOOGLE_VERTEX_LOCATION"] != "" {
+		t.Fatalf("row base_url must not use, expose, or warn about the provider template's location: %+v", res)
+	}
+	// A host supplied directly (an instance var) is used as-is: the rule
+	// derives nothing from the location, so the location is neither exposed
+	// nor warned about.
+	r = fixtureLoad(t, map[string]string{"GOOGLE_VERTEX_PROJECT": "p", "GOOGLE_VERTEX_LOCATION": "europe-west1"},
+		"[providers.directhost]\nbase = \"google-vertex-anthropic\"\nbase_url = \"{GOOGLE_VERTEX_HOST}/v1/custom\"\n[providers.directhost.vars]\nGOOGLE_VERTEX_HOST = \"https://gw.example.test\"\n")
+	if res := mustResolve(t, r, "directhost/claude-opus-5"); hasWarning(res, "regional") || res.Transport.BaseURL != "https://gw.example.test/v1/custom" || res.Transport.Vars["GOOGLE_VERTEX_LOCATION"] != "" {
+		t.Fatalf("a directly supplied host must not expose or warn about the location: %+v", res)
 	}
 }
 
@@ -1030,5 +1062,76 @@ func TestStripDatedSuffix(t *testing.T) {
 		if got := StripDatedSuffix(id); got != want {
 			t.Errorf("StripDatedSuffix(%q) = %q, want %q", id, got, want)
 		}
+	}
+}
+
+// TestResolve_RowMappedVarsEnvReadsTheEnvironment: models.dev maps a
+// per-model api template's placeholders on the row alone (convertModel), so
+// google-vertex's OpenAI-compatible rows are the only place
+// GOOGLE_VERTEX_ENDPOINT is mapped. The lookup consults the row's mapping
+// when the provider has none, so the environment variable resolves the
+// row's URL (roborev PR #924 round 2). A user instance's own vars_env
+// remap wins, and when its variable is unset the URL stays unresolved with
+// a warning rather than silently reading the row's stock variable — the
+// user redirected that name on purpose.
+func TestResolve_RowMappedVarsEnvReadsTheEnvironment(t *testing.T) {
+	const remap = "[providers.mine]\nbase = \"google-vertex\"\nvars_env = { \"GOOGLE_VERTEX_ENDPOINT\" = \"MY_ENDPOINT\" }\n"
+	stock := map[string]string{
+		"GOOGLE_VERTEX_PROJECT":  "p",
+		"GOOGLE_VERTEX_LOCATION": "us-central1",
+		"GOOGLE_VERTEX_ENDPOINT": "us-central1-aiplatform.googleapis.com",
+	}
+	withRemap := maps.Clone(stock)
+	withRemap["MY_ENDPOINT"] = "my-endpoint.example.test"
+	for _, tt := range []struct {
+		name, ref string
+		env       map[string]string
+		host      string // empty: the endpoint stays unresolved
+	}{
+		{name: "row mapping reads the environment", ref: "google-vertex/meta/llama-3.3-70b-instruct-maas", env: stock, host: "us-central1-aiplatform.googleapis.com"},
+		{name: "instance remap wins", ref: "mine/meta/llama-3.3-70b-instruct-maas", env: withRemap, host: "my-endpoint.example.test"},
+		{name: "unset instance remap stays unresolved", ref: "mine/meta/llama-3.3-70b-instruct-maas", env: stock},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := fixtureLoad(t, tt.env, remap)
+			res, err := r.Resolve(tt.ref)
+			if err != nil {
+				t.Fatalf("Resolve(%q): %v", tt.ref, err)
+			}
+			if tt.host == "" {
+				if !strings.Contains(res.Transport.BaseURL, "{GOOGLE_VERTEX_ENDPOINT}") || !hasWarning(res, "unresolved variable GOOGLE_VERTEX_ENDPOINT") {
+					t.Fatalf("Resolve(%q) BaseURL = %q warnings %v, want the endpoint unresolved and warned", tt.ref, res.Transport.BaseURL, res.Warnings)
+				}
+				return
+			}
+			want := "https://" + tt.host + "/v1/projects/p/locations/us-central1/endpoints/openapi"
+			if res.Transport.BaseURL != want {
+				t.Fatalf("Resolve(%q) BaseURL = %q, want %q (warnings %v)", tt.ref, res.Transport.BaseURL, want, res.Warnings)
+			}
+			if got := res.Transport.Vars["GOOGLE_VERTEX_ENDPOINT"]; got != tt.host {
+				t.Fatalf("Resolve(%q) Vars[GOOGLE_VERTEX_ENDPOINT] = %q, want %q", tt.ref, got, tt.host)
+			}
+			if hasWarning(res, "unresolved variable GOOGLE_VERTEX_ENDPOINT") {
+				t.Fatalf("Resolve(%q) warned about the row-mapped variable: %v", tt.ref, res.Warnings)
+			}
+		})
+	}
+}
+
+// TestResolve_WebSearchCanonicalGateRowDefault: a curated row's own `vars`
+// default is curated data like the provider's, so the canonical first-party
+// resolution reads it for an authority placeholder the row's base URL
+// names, exactly as the actual resolution does; the two sides agree and the
+// vendor's hosted tool survives (roborev PR #924 round 5).
+func TestResolve_WebSearchCanonicalGateRowDefault(t *testing.T) {
+	overlay := "[providers.rowdefault]\nimplicit = true\nprotocol = \"openai-chat\"\nbase_url = \"https://{HOST}/v1\"\nvars = { \"HOST\" = \"provider.example.test\" }\nweb_search = true\n" +
+		"[providers.rowdefault.models.\"m\"]\nbase_url = \"https://{ROW_HOST}/v1\"\nvars = { \"ROW_HOST\" = \"row.example.test\" }\n"
+	r := fixtureLoad(t, nil, "", WithOverlay(overlayWith(overlay)))
+	res := mustResolve(t, r, "rowdefault/m")
+	if res.Transport.BaseURL != "https://row.example.test/v1" {
+		t.Fatalf("row default must resolve the row's own base URL: %+v", res.Transport)
+	}
+	if bp(res.Caps.WebSearch) != "true" || hasWarning(res, "web_search disabled") {
+		t.Fatalf("a row resolved from its curated default is first-party: web_search = %s, warnings %v", bp(res.Caps.WebSearch), res.Warnings)
 	}
 }

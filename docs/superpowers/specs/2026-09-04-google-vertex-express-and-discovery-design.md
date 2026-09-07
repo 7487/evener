@@ -355,6 +355,49 @@ naming the instance and "stored credential".
 None. The `evener providers` commands are untouched; the docs note that the
 same value can be placed in `credentials.toml` by hand.
 
+### 4.6 TUI (amended 2026-09-06)
+
+Originally out of scope: the credentials panel had no multi-line input, so
+Enter on a `credentialJson` instance showed a notice naming the web hub as
+the place to paste (roborev round 9 of PR #879). That notice is gone. Enter
+now opens a paste prompt and stores the document through the same
+`evener/auth/credentialJson/set` the hub calls.
+
+A terminal delivers a bracketed paste as one key message carrying every
+rune, newlines included, so a pretty-printed JSON document arrives whole and
+its newlines never reach the submit branch. Measured against bubbletea's own
+reader, that holds at every size tried, up to 100k runes.
+
+Without bracketing, the document arrives as ordinary keys, and the outcome
+turns on which byte the terminal sends for a line break: LF maps to
+`KeyCtrlJ`, CR to `KeyEnter`. The field keeps both LF and space (it dropped
+them before), so an LF paste still accumulates whole. A CR paste submits at
+each line and cannot work, which is one of two reasons for the second way in:
+`f` on the instance asks for the path to the file holding the document, read
+on the machine the user typed it on, not the hub's, with path completion.
+
+The other reason is that the two inputs cannot be told apart. Reading them
+through one prompt meant guessing whether a value was a path or the
+credential — by shape, or by whether the terminal marked it as a paste — and
+a terminal that marks no pastes leaves no signal to guess from. So the paste
+prompt echoes nothing at all: it renders a character count, whatever it is
+given. The file prompt shows its path, which is not secret, on any platform's
+path syntax.
+Control bytes are stripped from what is rendered, since clipboard content
+reaches the view. A value that is neither a document nor a readable path is
+reported by its reason alone: the error line is rendered and outlives the
+panel, so it repeats none of what was submitted. For the same reason
+`CheckCredentialJSON` bounds the two values its refusals quote back (an
+unsupported `type`, a foreign `token_uri`) to a short prefix.
+
+The file is read inside the command rather than while the key is handled, so
+a slow filesystem cannot hold up the interface. It is still opened without
+blocking, so a path naming a pipe cannot leave that command waiting forever
+either; what the open descriptor actually is decides whether it is read — a
+regular file, nothing else — and the read is bounded. Checking the path and
+then opening it by name again would leave a window for it to become
+something else in between.
+
 ## 5. End-to-end flows the hub must support after this change
 
 1. **Express key.** Settings → Credentials → Add provider instance → base
@@ -439,5 +482,12 @@ recorded per `docs/developing-evener/agentic-testing.md`.
   the sorted env-var-name list because the TUI decodes
   `evener/instance/list` through the shared types and `ProtocolVersion` is
   compared exactly, so no v3 wire shape may change.
+- **Resolved 2026-09-06, roborev round 19 (follow-up PR):** the add form
+  rendered a `GOOGLE_APPLICATION_CREDENTIALS` input for `google-vertex`
+  because models.dev's `env` list names it beside the project and location
+  and every entry became a `VarsEnv` input; instance `vars` only feed
+  template placeholders, so the value was persisted and ignored. The hub now
+  builds the descriptor from `Registry.TemplateVarsEnv`, the `vars_env`
+  entries a URL template reads or a host rule consumes.
 - User OAuth ("Sign in with Google") is the natural next spec if per-user
   credentials or remote hubs without pasteable JSON become a requirement.

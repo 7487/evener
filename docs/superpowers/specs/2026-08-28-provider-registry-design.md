@@ -1439,7 +1439,13 @@ them needs request signing or non-SSE framing.
 templates that may contain `{model}` and `{VAR}`; empty means the protocol
 default (§6.1), `-` means unsupported. Variables resolve in this order: the
 user layer's `Vars` (instance config), then the environment through
-`VarsEnv` (a user-layer `vars_env` merges key-wise like `vars`), then `Vars`
+`VarsEnv` (a user-layer `vars_env` merges key-wise like `vars`; the
+provider's mapping is consulted, or the resolved row's own when the
+provider has none for the name — a models.dev per-model `api` template maps
+its placeholders on the row alone, which is where `google-vertex`'s
+OpenAI-compatible rows carry `GOOGLE_VERTEX_ENDPOINT`; a provider mapping
+whose variable is unset does not fall back to the row's, since the user
+redirected that name on purpose), then `Vars`
 from the curated and upstream layers (defaults), then the variable is left
 unresolved with a warning and the error naming the variable and the
 instance fires at the first request (§4.2). That order is what makes
@@ -1868,7 +1874,9 @@ change shape (`appwire/types.go:2488-2523`): `InstanceEntry` drops `Type` and
 `APIKeyEnv` entry. `InstanceCreateParams` and `InstanceEditParams` follow;
 `InstanceListResponse.AvailableTypes` becomes `AvailableProviders` (registry
 ids with display names and `VarsEnv`, so the add form can render the right
-variable inputs). The credentials pane lists every curated implicit
+variable inputs — only the `VarsEnv` entries a URL template reads,
+`Registry.TemplateVarsEnv`, since a models.dev `env` list also names a
+credential's own variable that instance `vars` never feed). The credentials pane lists every curated implicit
 provider whether or not it currently has a credential (§5.2 resolves them
 regardless), which is where a fresh install signs in to `openai-codex` or
 enters its first key. That pane is fed by the `evener/auth/*` RPCs, which

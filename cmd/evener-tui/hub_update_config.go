@@ -1,13 +1,19 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/cmd/evener-tui/internal/launchconfig"
 	"primeradiant.com/evener/cmd/evener-tui/internal/tuipick"
+	"primeradiant.com/evener/envvars"
 )
 
 // Handlers for the auth / credentials / instance / launch-config domain of
@@ -141,6 +147,19 @@ func (m hubModel) handleCredentialsAction(msg launchconfig.CredentialsActionMsg)
 	switch msg.Action {
 	case "set":
 		modal := tuipick.NewTextInputModalMasked(fmt.Sprintf("API key for %s:", msg.Instance), "credential-set:"+msg.Instance)
+		m.followupModal = &modal
+		return m, nil
+	case "setCredentialJson":
+		modal := tuipick.NewCredentialPasteModal(
+			"Credential JSON for "+msg.Instance,
+			"Paste a service-account key or application_default_credentials.json.\nTo read it from a file instead, cancel and press f.",
+			"credential-json-set:"+msg.Instance)
+		m.followupModal = &modal
+		return m, nil
+	case "loadCredentialJson":
+		modal := tuipick.NewPathTextInputModal(
+			"Path to the credential JSON for "+msg.Instance+":",
+			"credential-json-file:"+msg.Instance, "")
 		m.followupModal = &modal
 		return m, nil
 	case "logout":
@@ -315,6 +334,34 @@ func (m hubModel) handleTextInputResult(msg tuipick.TextInputResultMsg) (tea.Mod
 		}
 		return m, nil
 	}
+	if provider, ok := strings.CutPrefix(msg.Tag, "credential-json-set:"); ok {
+		m.followupModal = nil
+		value := strings.TrimSpace(msg.Value)
+		if msg.Cancelled || value == "" || m.client == nil {
+			return m, nil
+		}
+		m.err = nil
+		return m, launchconfig.CmdAuthCredentialJsonSet(m.client, provider, value)
+	}
+	if provider, ok := strings.CutPrefix(msg.Tag, "credential-json-file:"); ok {
+		m.followupModal = nil
+		path := strings.TrimSpace(msg.Value)
+		if msg.Cancelled || path == "" || m.client == nil {
+			return m, nil
+		}
+		m.err = nil
+		client := m.client
+		// The read happens inside the command, off the update loop, so a slow
+		// or unreadable path cannot hold up the interface. Its failure takes
+		// the same route as the hub's own, so both reach the error line.
+		return m, func() tea.Msg {
+			document, err := readCredentialFile(path)
+			if err != nil {
+				return launchconfig.AuthApiKeySetResultMsg{Err: err}
+			}
+			return launchconfig.CmdAuthCredentialJsonSet(client, provider, document)()
+		}
+	}
 	if rest, ok := strings.CutPrefix(msg.Tag, "oauth-redirect:"); ok {
 		parts := strings.SplitN(rest, ":", 2)
 		m.followupModal = nil
@@ -363,6 +410,58 @@ func (m hubModel) handleTextInputResult(msg tuipick.TextInputResultMsg) (tea.Mod
 		return m, launchconfig.CmdSetLayer(m.client, panel.CWD(), layer, updatedLayer)
 	}
 	return m, nil
+}
+
+// readCredentialFile reads a credential document from a path the user gave,
+// on the machine they typed it on rather than the hub's. Its caller runs it
+// inside a command, off the update loop, so a slow filesystem cannot hold up
+// the interface; the file is still opened without blocking, so a path that
+// names a pipe cannot leave that command waiting forever either. What the
+// open descriptor actually is decides whether it is read, and the read is
+// bounded — checking the path and then opening it by name again would leave
+// a window for it to become something else. The hub validates the document,
+// so no parsing happens here.
+func readCredentialFile(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") || path == "~" {
+		path = filepath.Join(envvars.Home.Getenv(), strings.TrimPrefix(path, "~"))
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|nonblockingOpen, 0)
+	if err != nil {
+		return "", credentialPathError(err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return "", credentialPathError(err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("credential JSON: the path it was read as is not a regular file")
+	}
+	// One byte past the bound, so a file at exactly the bound still reads and
+	// anything longer is refused however it grew.
+	data, err := io.ReadAll(io.LimitReader(f, maxCredentialFileBytes+1))
+	if err != nil {
+		return "", credentialPathError(err)
+	}
+	if len(data) > maxCredentialFileBytes {
+		return "", fmt.Errorf("credential JSON: the file it was read as is too large (over %d bytes)", maxCredentialFileBytes)
+	}
+	return string(data), nil
+}
+
+// maxCredentialFileBytes bounds the file the prompt will read. The largest
+// real credential document is a service-account key of a few kilobytes.
+const maxCredentialFileBytes = 1 << 20
+
+// credentialPathError reports why a submitted value could not be read as a
+// path without repeating the value: it is either a mistyped path or a secret
+// pasted into the wrong prompt, and this error is rendered and outlives the
+// panel. A PathError's own message names the path, so only its reason is kept.
+func credentialPathError(err error) error {
+	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
+		err = pathErr.Err
+	}
+	return fmt.Errorf("credential JSON: it does not start with %q, and the path it was read as could not be opened: %w", "{", err)
 }
 
 func (m hubModel) handleAuthApiKeySetResult(msg launchconfig.AuthApiKeySetResultMsg) (tea.Model, tea.Cmd) {

@@ -426,6 +426,8 @@ type ModelListing struct {
 // a live model listing. An override that does not implement it cannot list
 // models under its instance name, even when the registry knows that name.
 type LiveModelLister interface {
+	// Implementations should use ModelListingTimeout(ctx) for their HTTP requests.
+	// Client.Models supplies the policy without imposing a total deadline by default.
 	LiveModels(ctx context.Context) ([]registry.Model, error)
 }
 
@@ -435,6 +437,8 @@ type LiveModelLister interface {
 // it, and every id the registry then knows for the instance is resolved and
 // filtered by the §5 visibility rule.
 func (c *Client) Models(ctx context.Context, instance string) (ModelListing, error) {
+	timeout := ModelListingTimeout(ctx)
+	ctx = WithModelListingTimeout(ctx, *timeout)
 	instance = normalizeProviderName(instance)
 	r := c.Registry()
 	c.overridesMu.RLock()
@@ -450,6 +454,11 @@ func (c *Client) Models(ctx context.Context, instance string) (ModelListing, err
 		if !ok {
 			return ModelListing{}, &ConfigurationError{Message: fmt.Sprintf("provider %s does not support listing models", instance)}
 		}
+		// Overrides have no protocol layer to apply their request deadline.
+		// Built-in protocols own it themselves, preserving the original caller
+		// context for canonical attempt timeout/cancellation attribution.
+		ctx, cancel := ApplyAdapterTimeout(ctx, timeout, false)
+		defer cancel()
 		opCtx, op := c.beginProviderOperation(ctx)
 		rows, err := lister.LiveModels(opCtx)
 		op.settle(opCtx, err)

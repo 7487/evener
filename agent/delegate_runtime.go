@@ -68,6 +68,10 @@ type delegateIsolation struct {
 	ownsFreshEnv    bool
 	worktreePath    string
 	worktreeProject identifier.Project
+	// laneAdmission is the spawn's close-fence admission, carried here so a
+	// rollback can rename it as it begins.
+	laneAdmission envWorkID
+	laneFenced    bool
 }
 
 type delegateQuietAttentionClaim struct {
@@ -336,12 +340,38 @@ func (s *Session) driveStableDelegateAttention(sub *subagent) bool {
 	if len(ids) == 0 {
 		return false
 	}
+	// Claim the child for the WHOLE start, not just for this check. Everything
+	// between here and launchAcceptedDelegateAttention is durable work
+	// (ReserveAttention, acceptDelegateAttention's transcript append,
+	// CommitStart, the delegate update emit), and the run goroutine only sets
+	// running at the far end of it. Without the claim a wake-edge drive landing
+	// in that gap reads an idle child: the reservation is already consumed and
+	// the attention is no longer pending, so driveStableDelegateAttention itself
+	// declines, and driveChildIfNotStopGated falls through to
+	// driveSubagentNotificationTurn, which starts a second, UNLEASED turn on the
+	// session this generation is about to run. The two turns then share one
+	// drain ladder and the unleased one can pop the run's follow-up, leaving the
+	// generation to settle attention-only instead of report-required. The claim
+	// is the drive flag every other guard already reads, and it is handed over
+	// under the same sub.mu hold that sets running.
 	sub.mu.Lock()
 	blocked := sub.closed || sub.running || sub.driving || sub.disposeGated || sub.fatalRunGated || sub.finalizing
+	if !blocked {
+		sub.driving = true
+	}
 	sub.mu.Unlock()
 	if blocked {
 		return true
 	}
+	launched := false
+	defer func() {
+		if launched {
+			return
+		}
+		sub.mu.Lock()
+		sub.driving = false
+		sub.mu.Unlock()
+	}()
 	s.mu.Lock()
 	closed := s.closingOrClosedLocked()
 	s.mu.Unlock()
@@ -367,8 +397,13 @@ func (s *Session) driveStableDelegateAttention(sub *subagent) bool {
 		s.delegateController.retryDelegateAttentionLater()
 		return true
 	}
+	if observer := s.cfg.testOnly.delegateAttentionStartCommitted; observer != nil {
+		observer(sub)
+	}
 	s.delegateController.emitDelegateUpdate(started.plan)
-	if launchErr := s.launchAcceptedDelegateAttention(sub, started); launchErr != nil {
+	launchErr := s.launchAcceptedDelegateAttention(sub, started)
+	launched = launchErr == nil
+	if launchErr != nil {
 		plans, finishErr := s.delegateController.FailCommittedRestart(started.lease, delegatePermanentStartFailure(launchErr, "launch_failed"))
 		if executeErr := s.executeDelegateMutationPlans(plans); finishErr == nil {
 			finishErr = executeErr
@@ -395,6 +430,12 @@ func (s *Session) launchAcceptedDelegateAttention(sub *subagent, started delegat
 	sub.mu.Lock()
 	sub.fatalRunGated = false
 	resetSubagentForRunLocked(sub, runCancel, started.startedAt)
+	// Hand the start claim over to the run under one hold, so the child never
+	// reads idle between the committed start and the run that owns it. The
+	// clear is unconditional: the owed-attention bootstrap reaches here
+	// without having taken the claim, and clearing a flag it never set is
+	// harmless because running is already true under this same hold.
+	sub.driving = false
 	sub.mu.Unlock()
 	bindStableDelegateActivity(sub.sess, s.delegateController, started.lease)
 	s.launchSubagentRun(runCtx, sub, runCancel, "", descriptorProvenance(started.descriptor))
@@ -1215,6 +1256,38 @@ func (runtime delegateRuntime) create(ctx context.Context, args delegateArgs) de
 	if err != nil {
 		return delegateStartFailed(err)
 	}
+	// The lane this spawn is about to cut is taken back by every failure below,
+	// and each of those rollbacks forks git on the PARENT's environment, whose
+	// process table a close reaps. prepareIsolation admits its own create, but
+	// that admission dies with it, and the rollbacks that matter run long after
+	// it returns: CommitStart's failure, failCommittedStart's arms, and
+	// failAdoptedStart. An admission asked for where one of those rollbacks
+	// starts would be refused by the very close that caused it, so it is taken
+	// HERE, before the lane exists, and released once by this defer — every exit
+	// from this function passes through it, including the arms that retain a
+	// candidate and roll nothing back, so no path leaks it.
+	//
+	// It overlaps prepareIsolation's create admission for the length of the
+	// create. Two live admissions on the same fence are just two things the
+	// close waits for; this one is named for the spawn, not the rollback: a
+	// healthy spawn holds it for its whole run, and a fence warning printed
+	// during that ordinary run must not read as a rollback in progress, which
+	// is why worktreeCreate and prepareIsolation both rename theirs only once
+	// an undo actually starts.
+	//
+	// A refusal needs no answer of its own: `closing` only ever goes false to
+	// true, so prepareIsolation's own admission is refused too and the spawn
+	// fails with no lane cut and nothing to take back.
+	var (
+		laneAdmission envWorkID
+		laneFenced    bool
+	)
+	if reservation.worktreePath != "" {
+		laneAdmission, laneFenced = s.beginEnvWork("delegate start on lane " + reservation.worktreePath)
+		if laneFenced {
+			defer s.endEnvWork(laneAdmission)
+		}
+	}
 	isolation, err := runtime.prepareIsolation(ctx, reservation, worktreeProject, requestedSandbox)
 	if err != nil {
 		err = delegateSandboxFallbackHint(s, args, err)
@@ -1222,6 +1295,9 @@ func (runtime delegateRuntime) create(ctx context.Context, args delegateArgs) de
 		isolation.cleanup(s, reservation.delegateID)
 		return delegateStartFailed(errors.Join(err, abortErr))
 	}
+	// The arms reached from here own the rename, because they are where a
+	// rollback actually starts.
+	isolation.laneAdmission, isolation.laneFenced = laneAdmission, laneFenced
 	started, err := s.delegateController.CommitStart(reservation)
 	if err != nil {
 		isolation.cleanup(s, reservation.delegateID)
@@ -1526,7 +1602,20 @@ func delegateSandboxFallbackHint(s *Session, args delegateArgs, err error) error
 	)
 }
 
+// cleanup runs every rollback the isolation step owes: prepareIsolation's own
+// rollback, and the four arms reached after it returns (CommitStart's
+// failure, failCommittedStart's arms, and failAdoptedStart). Every one of
+// those callers runs inside the lane admission delegateRuntime.create holds
+// across the whole spawn, so this takes none of its own.
+//
+// The rename lives here because every post-prepareIsolation arm funnels
+// through this method, and the retain arms that roll nothing back never
+// reach it, so the admission reads "rollback" only when one is actually
+// running.
 func (isolation delegateIsolation) cleanup(s *Session, delegateID string) {
+	if isolation.laneFenced && isolation.worktreePath != "" {
+		s.relabelEnvWork(isolation.laneAdmission, "delegate lane rollback for "+isolation.worktreePath)
+	}
 	if isolation.ownsFreshEnv {
 		// prepareSubagentRunFromSelection leaves a PREPARED environment alone (it
 		// belongs to this isolation step), so this is the only rollback for the
@@ -1712,7 +1801,7 @@ func (runtime delegateRuntime) restoreIdle(started delegateStartCommit) (*subage
 	if err != nil {
 		return nil, false, err
 	}
-	child.ownsEnv = ownsFresh
+	child.recordEnvironmentOwnership(childEnv, ownsFresh)
 	discardEnv = false
 	if child.delegateController != s.delegateController || child.owningDelegateID != started.lease.delegateID {
 		child.discardRestoredCandidate()

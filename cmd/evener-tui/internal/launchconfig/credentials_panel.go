@@ -56,12 +56,6 @@ type CredentialsPanel struct {
 	testPending    map[string]bool
 	testResults    map[string]appwire.AuthTestResponse
 	testGeneration uint64
-
-	// notice is an explanation shown under noticeFor's row when Enter has
-	// no action to run for that instance; any other key, or a list refresh,
-	// clears it.
-	notice    string
-	noticeFor string
 }
 
 func NewCredentialsPanel() CredentialsPanel {
@@ -143,7 +137,6 @@ func (p CredentialsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p.testGeneration++
 		p.testPending = nil
 		p.testResults = nil
-		p.notice, p.noticeFor = "", ""
 		p.loading = false
 		p.err = m.Err
 		if m.Err == nil {
@@ -192,10 +185,6 @@ func (p CredentialsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (p CredentialsPanel) updateList(m tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// The notice answers one Enter; any other key moves on from it.
-	if m.Type != tea.KeyEnter {
-		p.notice, p.noticeFor = "", ""
-	}
 	switch m.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		p.cancelled = true
@@ -221,15 +210,11 @@ func (p CredentialsPanel) updateList(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if strings.Contains(modes, "oauth") {
 			return p, func() tea.Msg { return CredentialsActionMsg{Action: "oauth", Instance: cur.Name} }
 		}
-		// A gcp-adc instance is configured by application-default
-		// credentials or a pasted credential JSON; the TUI has no multiline
-		// paste, so say where the paste lives instead of doing nothing.
+		// A gcp-adc instance takes a pasted service-account key or
+		// application-default JSON, into the same store the web hub's
+		// Providers & credentials writes.
 		if strings.Contains(modes, "credentialJson") {
-			// Pre-broken into lines that fit the overlay under the row's
-			// indent, so the wrap never splits "credential JSON" or the
-			// section name.
-			p.notice = "Uses application-default credentials. To store a\ncredential JSON, paste it in the web hub under\nProviders & credentials."
-			p.noticeFor = cur.Name
+			return p, func() tea.Msg { return CredentialsActionMsg{Action: "setCredentialJson", Instance: cur.Name} }
 		}
 	case tea.KeyRunes:
 		s := string(m.Runes)
@@ -259,6 +244,15 @@ func (p CredentialsPanel) updateList(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return p, nil
 			}
 			return p, func() tea.Msg { return CredentialsActionMsg{Action: "oauth", Instance: cur.Name} }
+		case "f":
+			// Reading the document from a file is its own action, so neither
+			// prompt has to guess whether what it was handed is a path or the
+			// credential itself.
+			cur := p.selectedInstance()
+			if cur == nil || !strings.Contains(strings.Join(cur.AuthModes, ","), "credentialJson") {
+				return p, nil
+			}
+			return p, func() tea.Msg { return CredentialsActionMsg{Action: "loadCredentialJson", Instance: cur.Name} }
 		case "*":
 			cur := p.selectedInstance()
 			if cur == nil {
@@ -510,11 +504,6 @@ func (p CredentialsPanel) View() string {
 			} else if result, ok := p.testResults[inst.Name]; ok {
 				rows = append(rows, "    "+result.Status+": "+result.Message)
 			}
-			if p.notice != "" && p.noticeFor == inst.Name {
-				for line := range strings.SplitSeq(p.notice, "\n") {
-					rows = append(rows, "    "+lipgloss.NewStyle().Foreground(th.TextDim).Render(line))
-				}
-			}
 		}
 		body = strings.Join(rows, "\n")
 	}
@@ -524,7 +513,8 @@ func (p CredentialsPanel) View() string {
 		footer = tuiprim.ActionBarForWidth(width, tuiprim.KbdHint("enter", "next/submit"), tuiprim.KbdHint("esc", "cancel"))
 	} else {
 		footer = tuiprim.ActionBarForWidth(width,
-			tuiprim.KbdHint("enter", "set key"),
+			tuiprim.KbdHint("enter", "set credential"),
+			tuiprim.KbdHint("f", "credential from file"),
 			tuiprim.KbdHint("t", "test credentials"),
 			tuiprim.KbdHint("o", "OAuth"),
 			tuiprim.KbdHint("c", "clear"),

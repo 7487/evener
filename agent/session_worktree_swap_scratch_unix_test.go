@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -826,6 +827,214 @@ func TestParentCloseAfterExitRetainsEachAbandonedEnvironmentAndNotTheLaunchOne(t
 		}
 		if scratchLeaseHeld(t, dir) {
 			t.Errorf("%s's scratch %s lease is still held after the close", name, dir)
+		}
+	}
+}
+
+// A shared child (no working dir of its own) can exit a worktree it entered
+// while its own close races that very exit. The exit's swap runs on the
+// child's own environment, and its rollback installs nothing when the child
+// is closing — but next, the environment the exit is swapping BACK ONTO, is
+// the live parent's own object (shared == next: a shared child's exit is
+// exempt from the scratch move, see swapEnvAndRefresh's step 0). The
+// rollback's RetainSessionScratch must not run on that object: the parent is
+// still working in it, and retaining releases a lease nothing adopted.
+//
+// The hook releases as soon as the child's own close has BEGUN, never waiting
+// for it to return: the exit runs inside the manage_worktree dispatch, which
+// holds the close fence, so waiting would deadlock the two against each other
+// — the same deadlock TestWorktreeSwap_CloseDuringTheSwapLeavesNoOwnerlessLease
+// avoids, here between a child and its own close instead of a root and its own.
+func TestWorktreeSwap_CloseDuringASharedChildExitKeepsTheParentScratchLease(t *testing.T) {
+	r := newWorktreeRepo(t)
+	parent := r.s
+	shared := currentLocalEnv(t, parent)
+	if _, err := shared.ExecCommand(context.Background(), "true", 5000, "", nil); err != nil {
+		t.Fatalf("root command on the parent's environment: %v", err)
+	}
+	parentScratch := heldParentScratch(t, shared)
+	sibling := r.addSiblingWorktree(t, "child-lane", "child-branch")
+
+	ctx := context.WithValue(context.Background(), ctxDelegationAllowance, 2)
+	prepared, err := parent.prepareSubagentRun(ctx, "child task", "", "", 0, "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("prepareSubagentRun: %v", err)
+	}
+	t.Cleanup(func() { releasePreparedTreeSlot(prepared) })
+	child := prepared.sub.sess
+	if child.currentEnv() != parent.currentEnv() {
+		t.Fatal("the spawned child did not land on the parent's environment; this test would prove nothing")
+	}
+	if child.ownsEnv {
+		t.Fatal("the spawned child recorded that it owns the parent's environment; this test would prove nothing")
+	}
+	child.mu.Lock()
+	child.worktreeGitVersionOK = true
+	child.stateDir = r.stateDir
+	child.mu.Unlock()
+
+	rt := child.reg.Get("manage_worktree")
+	if rt == nil {
+		t.Fatal("registry is missing manage_worktree")
+	}
+	if _, err := rt.Exec(t.Context(), child.currentEnv(), map[string]any{"operation": "switch", "path": sibling}); err != nil {
+		t.Fatalf("switch by path onto the sibling worktree: %v", err)
+	}
+	clone := currentLocalEnv(t, child)
+	if clone == shared {
+		t.Fatal("the switch left the child on the parent's environment; this test would prove nothing")
+	}
+	if _, err := clone.ExecCommand(context.Background(), "true", 5000, "", nil); err != nil {
+		t.Fatalf("ExecCommand on the entered clone: %v", err)
+	}
+	cloneScratch := clone.SessionScratchDir()
+	if cloneScratch == "" {
+		t.Fatal("the entered clone minted no session scratch, so there is nothing to settle")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cloneScratch) })
+
+	closeBegun := make(chan struct{})
+	closeDone := make(chan struct{})
+	child.cfg.testOnly.closeAfterDisposeSweepJoin = func() { close(closeBegun) }
+	child.cfg.testOnly.swapEnvAfterAdopt = func(context.Context) {
+		go func() {
+			defer close(closeDone)
+			teardownChildSession(context.Background(), child, retainChildScratch)
+		}()
+		<-closeBegun
+	}
+
+	_, exitErr := rt.Exec(t.Context(), child.currentEnv(), map[string]any{"operation": "exit"})
+	<-closeDone
+
+	if exitErr == nil {
+		t.Error("the exit succeeded while the child's own close began under it, want a refusal")
+	}
+	assertParentScratchUntouched(t, "the exit refused under the child's close", parentScratch)
+	if _, err := os.Stat(cloneScratch); err != nil {
+		t.Errorf("the child's teardown removed its entered clone's scratch %s, want it retained for the handoff: %v", cloneScratch, err)
+	}
+	if scratchLeaseHeld(t, cloneScratch) {
+		t.Errorf("the entered clone's scratch %s lease is still held after the child's teardown", cloneScratch)
+	}
+}
+
+// A shared child (no working dir of its own) can enter a worktree while its own
+// close races that very enter. Step 0 moves nothing on such a child's enter —
+// its current environment IS the parent's own object — but step 1's git
+// snapshot runs real git on next, the clone the enter built, and running a
+// command is what mints a scratch, with a lease, on an environment that owns
+// none. When the close wins before step 2 installs next, nothing will ever
+// reference that clone again, so the refused enter leaves the scratch base
+// exactly as it found it: the clone's directory goes with the clone, lease and
+// all. The control enter below is what makes that an assertion about disposal
+// rather than about a scratch no one minted.
+//
+// The hook releases as soon as the child's own close has BEGUN, never waiting
+// for it to return: the enter runs inside the manage_worktree dispatch, which
+// holds the close fence, so waiting would deadlock the two against each other
+// — the same deadlock TestWorktreeSwap_CloseDuringASharedChildExitKeepsTheParentScratchLease
+// avoids, there for a shared child's exit instead of its enter.
+func TestWorktreeSwap_CloseDuringASharedChildEnterDropsTheRefreshScratch(t *testing.T) {
+	// The shared base repo is built once per package run under the temp dir
+	// current at that moment; build it before this test redirects TMPDIR to a
+	// directory it will delete. (Same discipline as
+	// TestWorktreeSwap_SnapshotOnTheEnteredCloneUsesTheSessionScratch.)
+	worktreeBaseRepo(t)
+	isolated := t.TempDir()
+	t.Setenv("TMPDIR", isolated)
+	cfg := worktreeTestSessionConfig()
+	cfg.testOnly.skipGitSnapshot = false
+	r := newWorktreeRepoWithConfig(t, cfg)
+	parent := r.s
+	sibling := r.addSiblingWorktree(t, "child-lane", "child-branch")
+
+	ctx := context.WithValue(context.Background(), ctxDelegationAllowance, 2)
+	prepared, err := parent.prepareSubagentRun(ctx, "child task", "", "", 0, "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("prepareSubagentRun: %v", err)
+	}
+	t.Cleanup(func() { releasePreparedTreeSlot(prepared) })
+	child := prepared.sub.sess
+	if child.currentEnv() != parent.currentEnv() {
+		t.Fatal("the spawned child did not land on the parent's environment; this test would prove nothing")
+	}
+	if child.ownsEnv {
+		t.Fatal("the spawned child recorded that it owns the parent's environment; this test would prove nothing")
+	}
+	child.mu.Lock()
+	child.worktreeGitVersionOK = true
+	child.stateDir = r.stateDir
+	child.mu.Unlock()
+
+	// The control: the same enter with no close under it. The refresh alone
+	// mints the entered clone's scratch — nothing runs a command on that clone
+	// — which is the directory the racing arm below has to dispose.
+	controlPrepared, err := parent.prepareSubagentRun(ctx, "control task", "", "", 0, "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("prepareSubagentRun for the control: %v", err)
+	}
+	control := controlPrepared.sub.sess
+	control.mu.Lock()
+	control.worktreeGitVersionOK = true
+	control.stateDir = r.stateDir
+	control.mu.Unlock()
+	controlTool := control.reg.Get("manage_worktree")
+	if controlTool == nil {
+		t.Fatal("registry is missing manage_worktree on the control child")
+	}
+	if _, err := controlTool.Exec(t.Context(), control.currentEnv(), map[string]any{"operation": "switch", "path": sibling}); err != nil {
+		t.Fatalf("control switch by path onto the sibling worktree: %v", err)
+	}
+	controlScratch := currentLocalEnv(t, control).SessionScratchDir()
+	if controlScratch == "" {
+		t.Fatal("the enter's refresh minted no scratch on the entered clone, so the racing arm below would prove nothing")
+	}
+	if !scratchLeaseHeld(t, controlScratch) {
+		t.Fatal("the scratch the enter's refresh minted holds no lease, so the racing arm below would prove nothing")
+	}
+	teardownChildSession(context.Background(), control, retainChildScratch)
+	releasePreparedTreeSlot(controlPrepared)
+
+	before := scratchDirsIn(t, isolated)
+
+	closeBegun := make(chan struct{})
+	closeDone := make(chan struct{})
+	child.cfg.testOnly.closeAfterDisposeSweepJoin = func() { close(closeBegun) }
+	child.cfg.testOnly.swapEnvAfterAdopt = func(context.Context) {
+		go func() {
+			defer close(closeDone)
+			teardownChildSession(context.Background(), child, retainChildScratch)
+		}()
+		<-closeBegun
+	}
+
+	rt := child.reg.Get("manage_worktree")
+	if rt == nil {
+		t.Fatal("registry is missing manage_worktree")
+	}
+	_, enterErr := rt.Exec(t.Context(), child.currentEnv(), map[string]any{"operation": "switch", "path": sibling})
+	<-closeDone
+
+	if enterErr == nil {
+		t.Error("the enter succeeded while the child's own close began under it, want a refusal")
+	}
+	after := scratchDirsIn(t, isolated)
+	slices.Sort(before)
+	slices.Sort(after)
+	if !slices.Equal(before, after) {
+		t.Errorf("scratch dirs under %s changed from %v to %v; a refused enter must leave the scratch base exactly as it found it", isolated, before, after)
+	}
+	beforeSet := make(map[string]bool, len(before))
+	for _, dir := range before {
+		beforeSet[dir] = true
+	}
+	for _, dir := range after {
+		if beforeSet[dir] {
+			continue
+		}
+		if scratchLeaseHeld(t, dir) {
+			t.Errorf("the refused enter left %s behind with its lease still held", dir)
 		}
 	}
 }

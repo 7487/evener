@@ -513,7 +513,7 @@ base_url = "{BASE_URL}"
 vars = { "BASE_URL" = "https://api.moonshot.ai/v1" }
 vars_env = { "BASE_URL" = "MOONSHOTAI_BASE_URL" }
 default_model = "kimi-k3"
-cheap_model = "kimi-k2.5"
+cheap_model = "kimi-k2.6"
 structured_output = false
 tool_choice_forcing = false
 fields = { temperature = false, top_p = false, frequency_penalty = false, presence_penalty = false }

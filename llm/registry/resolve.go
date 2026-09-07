@@ -457,7 +457,9 @@ func (r *Registry) resolveOn(rec *record, ref Ref, warnings []string) (Resolved,
 	}
 	warnings = append(warnings, rec.notes...)
 	if transport.HostRule == HostRuleVertexLocation {
-		if loc, ok := r.varLookup(rec)("GOOGLE_VERTEX_LOCATION"); ok && loc != "global" && loc != "us" && loc != "eu" {
+		// The location the URL was actually built with (buildTransport's
+		// Vars), whichever mapping supplied it.
+		if loc, ok := transport.Vars["GOOGLE_VERTEX_LOCATION"]; ok && loc != "global" && loc != "us" && loc != "eu" {
 			for _, p := range vertexGlobalOnly {
 				if strings.Contains(hit.wireID, p) {
 					warnings = append(warnings, fmt.Sprintf("regional Vertex location %q supports Claude Sonnet 4.6 and earlier; use global, us, or eu for %s", loc, hit.wireID))
@@ -638,20 +640,19 @@ func (r *Registry) transportShape(rec *record, row Model, proto string) Transpor
 // protocol defaults, and variable substitution (spec §9.1).
 func (r *Registry) buildTransport(rec *record, row Model, proto string) (Transport, []string) {
 	t := r.transportShape(rec, row, proto)
-	// The templates, captured before substitution, are the authoritative list
-	// of variables Resolved may expose (URL parts such as a region, resource,
-	// or project). Resolved is serialized by `evener models inspect`, so no
-	// vars_env value that a template does not reference is ever exposed.
-	templates := []string{rec.head.Transport.BaseURL, t.Endpoint, t.StreamEndpoint, t.ModelsEndpoint, t.CountTokensEndpoint}
-	if row.Transport != nil && row.Transport.BaseURL != "" {
-		templates = append(templates, row.Transport.BaseURL)
-	}
+	// The templates the URL is built from, captured before substitution, are
+	// the authoritative list of variables Resolved may expose (URL parts such
+	// as a region, resource, or project): the effective base URL template —
+	// the row's own when it has one, else the provider's — and the endpoint
+	// templates. Resolved is serialized by `evener models inspect`, so no
+	// vars_env value that the URL does not use is ever exposed.
+	templates := []string{t.BaseURL, t.Endpoint, t.StreamEndpoint, t.ModelsEndpoint, t.CountTokensEndpoint}
 
 	var warnings, varWarnings []string
 	// One lookup serves the base URL, the endpoint templates, and the Vars
 	// scan, so a user `vars` entry with an unset $ENV reference is reported
 	// once however many templates read it (spec §10).
-	lookup := r.varLookupWith(rec, func(w string) { varWarnings = append(varWarnings, w) })
+	lookup := r.varLookupWith(rec, t, func(w string) { varWarnings = append(varWarnings, w) })
 	url, missing, hostWarnings := r.resolveBaseURLWith(rec, t, lookup)
 	t.BaseURL = url
 	warnings = append(warnings, hostWarnings...)
@@ -667,10 +668,23 @@ func (r *Registry) buildTransport(rec *record, row Model, proto string) (Transpo
 	slices.Sort(varWarnings)
 	warnings = append(warnings, slices.Compact(varWarnings)...)
 	resolved := map[string]string{}
+	referenced := map[string]bool{}
 	for _, tpl := range templates {
 		for _, m := range placeholderRe.FindAllStringSubmatch(tpl, -1) {
+			referenced[m[1]] = true
 			if v, ok := lookup(m[1]); ok {
 				resolved[m[1]] = v
+			}
+		}
+	}
+	// A host the vertex-location rule derived from the location used the
+	// location as surely as a path placeholder would have, so it is exposed
+	// too (and the regional warning reads it). A host supplied directly used
+	// no location.
+	if t.HostRule == HostRuleVertexLocation && referenced["GOOGLE_VERTEX_HOST"] {
+		if _, direct := lookup("GOOGLE_VERTEX_HOST"); !direct {
+			if loc, ok := lookup("GOOGLE_VERTEX_LOCATION"); ok {
+				resolved["GOOGLE_VERTEX_LOCATION"] = loc
 			}
 		}
 	}

@@ -429,11 +429,32 @@ func NewServer(cfg ServerConfig) *Server {
 		replaySize = 1000
 	}
 
+	var runtime *Server
 	s := &Server{
 		mux: http.NewServeMux(),
 		appServer: appserver.NewServer(appserver.ServerConfig{
 			ServerName: "evener-serve",
 			SourceID:   "local",
+			SubscriptionAdmissionResolver: func(msg appwire.Message) (string, bool) {
+				if msg.Request == nil || (msg.Request.Method != appwire.MethodThreadRead && msg.Request.Method != appwire.MethodThreadUnsubscribe) {
+					return "", false
+				}
+				var params appwire.ThreadReadParams
+				if msg.Request.Method == appwire.MethodThreadUnsubscribe {
+					var unsubscribe appwire.ThreadUnsubscribeParams
+					if json.Unmarshal(msg.Request.Params, &unsubscribe) != nil {
+						return "", false
+					}
+					params.ThreadID, params.Ref = unsubscribe.ThreadID, unsubscribe.Ref
+				} else if json.Unmarshal(msg.Request.Params, &params) != nil || !params.Subscribe {
+					return "", false
+				}
+				threadID, target := runtime.appReadTarget(params)
+				if threadID == "" {
+					return "", false
+				}
+				return target, true
+			},
 			Features: appwire.FeatureSet{
 				ThreadList:        true,
 				ThreadTurnsList:   true,
@@ -462,6 +483,7 @@ func NewServer(cfg ServerConfig) *Server {
 		hubToken:            strings.TrimSpace(cfg.HubToken),
 		sameOrigin:          httpguard.NewSameOriginPolicy(cfg.AllowedHost),
 	}
+	runtime = s
 	s.clearRecords, s.clearJournalErr = loadThreadClearJournal(s.clearJournalPath)
 	if s.clearRecords == nil {
 		s.clearRecords = make(map[string]threadClearRecord)

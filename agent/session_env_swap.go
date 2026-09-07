@@ -36,10 +36,14 @@ var errSwapWhileClosing = errors.New("manage_worktree: the session is closing; e
 // still holds the OLD environment, which owns nothing any more: a close in that
 // window would leave next's lease with no teardown owner. So the swap refuses
 // to start once the session is closing, and re-checks under s.mu before
-// installing; a close that began meanwhile rolls the move back by retaining
-// what next adopted (lease released, directory kept, the handoff a close makes)
-// and returns errSwapWhileClosing for the op to surface. Both `closing` and the
-// install are written under s.mu, so one of the two always sees the other.
+// installing; a close that began meanwhile undoes step 0 and returns
+// errSwapWhileClosing for the op to surface. What the undo is follows what step
+// 0 did: a swap that moved the scratch retains it on next (lease released,
+// directory kept, the handoff a close makes); an exempt ENTER drops what the
+// refresh minted on next, a clone nothing will reach again; an exempt EXIT
+// leaves next alone, because next is the live parent's own environment. Both
+// `closing` and the install are written under s.mu, so one of the two always
+// sees the other.
 //
 // A swap that passes that first check is ADMITTED: it registers on envWorkWG
 // under the same s.mu hold that read `closing` (the beginDispose idiom), so the
@@ -65,9 +69,27 @@ func (s *Session) swapEnvAndRefresh(next *execenv.LocalExecutionEnvironment, rec
 	// after them would find next already owning a fresh one, keep it, and retain
 	// the session's original — a silently changed $EVENER_SCRATCH_DIR and an
 	// extra retained directory per enter.
+	//
+	// A session running on its parent's own environment object (parentSharedEnv)
+	// is exempt from the move in both directions: it neither takes the scratch
+	// the parent is working in (current == shared, an enter) nor hands its own
+	// clone's scratch off to the parent (next == shared, an exit). The clone
+	// provisions its own scratch on its first command instead, and the child's
+	// own teardown is what settles it — moving it here would either steal the
+	// live parent's scratch out from under it or leave the parent holding a
+	// lease that belongs to a session already gone.
+	//
+	// Inside a kernel box the exemption costs the clone nothing: the box's
+	// session tmp is the scratch the wrapper carries across a re-root
+	// (sandbox.Wrapper.ReRoot), so the clone reports and works in the same one
+	// with no move at all, and its lease belongs to the parent's environment —
+	// the one the live parent closes. Moving it would hand that lease to a
+	// session whose teardown then releases it under a parent still working in
+	// the directory.
 	s.mu.Lock()
 	closing := s.closing
 	current, _ := s.env.(*execenv.LocalExecutionEnvironment)
+	shared := s.parentSharedEnv
 	var admission envWorkID
 	if !closing {
 		admission = s.registerEnvWorkLocked("environment swap to " + next.WorkingDirectory())
@@ -77,7 +99,8 @@ func (s *Session) swapEnvAndRefresh(next *execenv.LocalExecutionEnvironment, rec
 		return errSwapWhileClosing
 	}
 	defer s.endEnvWork(admission)
-	if current != nil {
+	moved := current != nil && !sameEnvironment(shared, current) && !sameEnvironment(shared, next)
+	if moved {
 		next.AdoptSessionScratch(current)
 	}
 	// Step 0b — the context step 1's git runs under. Every command below forks
@@ -124,7 +147,25 @@ func (s *Session) swapEnvAndRefresh(next *execenv.LocalExecutionEnvironment, rec
 	s.mu.Lock()
 	if s.closing {
 		s.mu.Unlock()
-		next.RetainSessionScratch()
+		// Roll back exactly what step 0 moved: the session's own scratch, whose
+		// directory is kept for the handoff its close would have made.
+		//
+		// A swap exempt from the move has no adopted lease to release, and what
+		// it must do instead depends on what next is. On a shared child's exit
+		// next is the live parent's own environment, whose scratch the parent is
+		// still working in: hands off entirely. On that child's enter next is a
+		// clone this session built and is now abandoning, and step 1's git
+		// snapshot mints a scratch on an environment that owns none — so the
+		// clone leaves with a directory and a lease nothing else will ever
+		// reference. It goes with the clone, the decision every other discarded
+		// clone's scratch takes (the re-entry probes, the worktree control env,
+		// a spawn that failed before adoption).
+		switch {
+		case moved:
+			next.RetainSessionScratch()
+		case shared != nil && !sameEnvironment(shared, next):
+			next.DisposeUnadoptedScratch()
+		}
 		return errSwapWhileClosing
 	}
 	ei.KnowledgeCutoff = s.envInfo.KnowledgeCutoff // profile-derived, not env-derived; swap must not clobber it

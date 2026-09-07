@@ -56,6 +56,32 @@ func CredentialJSONType(raw []byte) string {
 // resolves; the tokenauth authenticator and the hub's
 // evener/auth/credentialJson/set run the identical check, so a value the
 // registry resolves is one the authenticator will accept.
+//
+// A refusal that quotes the value it refused bounds what it quotes
+// (clipEcho): the document may be anything a user pasted, and callers render
+// the message.
+//
+// clipEcho shows enough of a refused value to identify it and no more, with
+// nothing in it a terminal would obey. The TUI's credential prompt keeps such
+// a message on screen after the prompt closes, so an unbounded echo would put
+// a mistakenly pasted secret there; and JSON carries control characters raw
+// above U+001F, C1 among them (U+009B is CSI), which a terminal reads as the
+// start of a command rather than as text.
+func clipEcho(s string) string {
+	const limit = 40
+	safe := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+	r := []rune(safe)
+	if len(r) <= limit {
+		return safe
+	}
+	return string(r[:limit]) + "…"
+}
+
 func CheckCredentialJSON(raw []byte) error {
 	if !json.Valid(raw) {
 		return errors.New("not valid JSON")
@@ -65,7 +91,7 @@ func CheckCredentialJSON(raw []byte) error {
 		return errors.New(`credential JSON has no "type" field`)
 	}
 	if !AllowedCredentialJSONTypes[t] {
-		return fmt.Errorf("credential type %q is not supported: paste a service-account key or an authorized_user file", t)
+		return fmt.Errorf("credential type %q is not supported: paste a service-account key or an authorized_user file", clipEcho(t))
 	}
 	// Every field the gate reads is decoded through a tagged field, the way
 	// Google's library reads it: key names match case-insensitively and the
@@ -113,7 +139,7 @@ func CheckCredentialJSON(raw []byte) error {
 	if isJSONValue(cred.TokenURL) {
 		var s string
 		if json.Unmarshal(cred.TokenURL, &s) != nil || !googleTokenEndpoints[s] {
-			return fmt.Errorf("token_uri %s is not Google's OAuth token endpoint", string(cred.TokenURL))
+			return fmt.Errorf("token_uri %s is not Google's OAuth token endpoint", clipEcho(string(cred.TokenURL)))
 		}
 	}
 	// Google's parser decodes its whole credential file, every type's fields

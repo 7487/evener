@@ -151,6 +151,10 @@ func selectStrategy(cfg SessionConfig, cm *contextmgr.Manager, sess *Session) (c
 // the initial SessionStart envelope. It returns an error if any input is nil or
 // if initialization fails.
 func NewSession(client *llm.Client, profile *provider.Profile, env execenv.ExecutionEnvironment, cfg SessionConfig) (*Session, error) {
+	idleTimeout, err := ParseProviderIdleTimeout(cfg.ProviderIdleTimeout)
+	if err != nil {
+		return nil, err
+	}
 	if client == nil {
 		return nil, errors.New("llm client is nil")
 	}
@@ -195,7 +199,7 @@ func NewSession(client *llm.Client, profile *provider.Profile, env execenv.Execu
 			_ = client.ReleaseSessionAPILog(sessionID)
 		}
 	}()
-	resolvedProfile, selectedModels, err := resolveLiveModelProfileValidated(client, profile, sessionID)
+	resolvedProfile, selectedModels, err := resolveLiveModelProfileValidated(client, profile, sessionID, llm.AdapterTimeout{Connect: 10 * time.Second, StreamRead: idleTimeout})
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +535,7 @@ func (s *Session) captureModelAvailability(selectedModels liveModelEnumeration) 
 		// result rather than asking the provider a second time.
 		listing, err := selectedModels.listing, selectedModels.err
 		if name != s.profile.ID() {
-			listing, err = s.client.Models(ctx, name)
+			listing, err = s.client.Models(llm.WithModelListingTimeout(ctx, *s.providerAdapterTimeout()), name)
 		}
 		if err != nil {
 			return nil, err
@@ -585,6 +589,7 @@ type RestoreSessionConfig struct {
 	OwnershipAlreadyAcquired    bool
 	ModelFallbacks              []string
 	OpenAIResponsesContinuation string
+	ProviderIdleTimeout         string
 	LLMRetryPolicy              *llm.RetryPolicy
 	LLMSleep                    llm.SleepFunc
 	spawn                       spawnConfig
@@ -703,6 +708,12 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	}
 	if restoreCfg.ModelFallbacks != nil {
 		cfg.ModelFallbacks = append([]string(nil), restoreCfg.ModelFallbacks...)
+	}
+	if strings.TrimSpace(restoreCfg.ProviderIdleTimeout) != "" {
+		cfg.ProviderIdleTimeout = restoreCfg.ProviderIdleTimeout
+	}
+	if _, err := ParseProviderIdleTimeout(cfg.ProviderIdleTimeout); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(restoreCfg.OpenAIResponsesContinuation) != "" {
 		cfg.OpenAIResponsesContinuation = strings.TrimSpace(restoreCfg.OpenAIResponsesContinuation)
@@ -904,7 +915,7 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	// s.id is already known (meta.ID, set above), unlike a fresh NewSession
 	// call: attribute this listing's canonical API-log attempt to it instead
 	// of letting it fall into the shared unattributed bucket.
-	profile, selectedModels := resolveLiveModelProfileWithEnumerationTimeout(client, profile, s.id)
+	profile, selectedModels := resolveLiveModelProfileWithEnumerationTimeout(client, profile, s.id, *s.providerAdapterTimeout())
 	s.profile = profile
 	s.captureModelAvailability(selectedModels)
 	closeDelegateStoreOnError := true
@@ -1012,7 +1023,7 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	// nothing was re-rooted, that one is the caller's to dispose or to keep.
 	reenteredEnv := s.env
 	defer func() {
-		if restoreComplete || reenteredEnv == env {
+		if restoreComplete || sameEnvironment(reenteredEnv, env) {
 			return
 		}
 		disposeUnadoptedScratch(reenteredEnv)
@@ -1268,6 +1279,7 @@ func cacheReadPtr(n int64) *int {
 // Returns the prompt sources so the caller can emit events after SessionStart.
 func (s *Session) initSessionState(sessionStartKind plugin.SessionStartKind, runSessionStartHooks bool) ([]promptSource, error) {
 	s.cheap = cheapmodel.New(s.client)
+	s.cheap.AdapterTimeout = s.providerAdapterTimeout()
 	env := s.currentEnv()
 	ei := s.snapshotEnvironmentInfo(env)
 	ei.KnowledgeCutoff = s.profile.KnowledgeCutoff()
@@ -1355,6 +1367,7 @@ func (s *Session) initSessionState(sessionStartKind plugin.SessionStartKind, run
 	}
 
 	s.contextMgr = contextmgr.NewManager(s.profile, s.client, s.cheap)
+	s.contextMgr.AdapterTimeout = s.providerAdapterTimeout()
 	s.contextMgr.ResultToolName = s.resultToolName()
 
 	var reg *tool.Registry
@@ -1587,6 +1600,7 @@ func (s *Session) initPlugins(sessionStartKind plugin.SessionStartKind, runSessi
 	s.plugins = plugins
 
 	runner := hooks.NewRunner(s.client, s.profile.Model())
+	runner.AdapterTimeout = s.providerAdapterTimeout()
 	runner.SetSandboxWrapper(s.sandboxWrapper())
 	allAgents := map[string]plugin.Agent{}
 

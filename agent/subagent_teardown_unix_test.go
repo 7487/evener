@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"primeradiant.com/evener/agent/execenv"
+	"primeradiant.com/evener/agent/sandbox"
 	"primeradiant.com/evener/llm"
 )
 
@@ -598,5 +599,293 @@ func TestDiscardedRestoreCandidateDisposesItsCloneScratch(t *testing.T) {
 	r.release()
 	if err := <-r.done; err != nil {
 		t.Fatalf("the root's process after release: %v", err)
+	}
+}
+
+// A delegate spawned with neither a working dir nor a box of its own runs on
+// its parent's very environment object, and it keeps manage_worktree, so it can
+// enter a worktree from there. The environment it enters is a clone the child
+// built for itself, whatever it started on, and the scratch that clone
+// provisions is the child's own: its teardown is the only thing that will ever
+// reach that lease. It has to release it — while leaving the parent's own
+// environment alone, scratch and process table alike.
+func TestSharedEnvChildTeardownReleasesTheEnteredWorktreeScratch(t *testing.T) {
+	r := newWorktreeRepo(t)
+	parent := r.s
+	shared := currentLocalEnv(t, parent)
+	pid, done, release := startInFlightProcess(t, shared)
+	sharedScratch := heldParentScratch(t, shared)
+	sibling := r.addSiblingWorktree(t, "child-lane", "child-branch")
+
+	ctx := context.WithValue(context.Background(), ctxDelegationAllowance, 2)
+	prepared, err := parent.prepareSubagentRun(ctx, "child task", "", "", 0, "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("prepareSubagentRun: %v", err)
+	}
+	t.Cleanup(func() { releasePreparedTreeSlot(prepared) })
+	child := prepared.sub.sess
+	if child.currentEnv() != parent.currentEnv() {
+		t.Fatal("the spawned child did not land on the parent's environment; this test would prove nothing")
+	}
+	if child.ownsEnv {
+		t.Fatal("the spawned child recorded that it owns the parent's environment; this test would prove nothing")
+	}
+	child.mu.Lock()
+	child.worktreeGitVersionOK = true
+	child.stateDir = r.stateDir
+	child.mu.Unlock()
+
+	rt := child.reg.Get("manage_worktree")
+	if rt == nil {
+		t.Fatal("registry is missing manage_worktree")
+	}
+	if _, err := rt.Exec(t.Context(), child.currentEnv(), map[string]any{"operation": "switch", "path": sibling}); err != nil {
+		t.Fatalf("switch by path onto the sibling worktree: %v", err)
+	}
+	clone := currentLocalEnv(t, child)
+	if clone == shared {
+		t.Fatal("the switch left the child on the parent's environment; this test would prove nothing")
+	}
+	if _, err := clone.ExecCommand(context.Background(), "true", 5000, "", nil); err != nil {
+		t.Fatalf("ExecCommand on the entered clone: %v", err)
+	}
+	scratch := clone.SessionScratchDir()
+	if scratch == "" {
+		t.Fatal("the entered clone minted no session scratch, so there is nothing to release")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	if !scratchLeaseHeld(t, scratch) {
+		t.Fatal("the entered clone's scratch lease is not held before the child's teardown")
+	}
+
+	teardownChildSession(context.Background(), child, retainChildScratch)
+
+	if _, err := os.Stat(scratch); err != nil {
+		t.Errorf("the child's teardown removed the entered clone's scratch %s, want it retained for the handoff: %v", scratch, err)
+	}
+	if scratchLeaseHeld(t, scratch) {
+		t.Errorf("the entered clone's scratch %s lease is still held after the shared child's teardown", scratch)
+	}
+	assertParentScratchUntouched(t, "the shared child's teardown", sharedScratch)
+	assertInFlightProcessSurvived(t, "the shared child's teardown", pid, done)
+
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("the parent's process after release: %v", err)
+	}
+}
+
+// The same shared-environment child must not take the scratch OFF the
+// environment it shares with its still-working parent: the parent is working in
+// that directory, and a child that carried it into a worktree would silently
+// change the parent's scratch and then release a lease the parent still needs.
+// The entered clone provisions one of its own, an exit hands it to nobody, and
+// the child's teardown settles the clone it left behind — the parent's scratch
+// is the parent's throughout.
+func TestSharedEnvChildKeepsItsWorktreeScratchAcrossExit(t *testing.T) {
+	r := newWorktreeRepo(t)
+	parent := r.s
+	shared := currentLocalEnv(t, parent)
+	if _, err := shared.ExecCommand(context.Background(), "true", 5000, "", nil); err != nil {
+		t.Fatalf("ExecCommand to mint the parent's scratch: %v", err)
+	}
+	parentScratch := heldParentScratch(t, shared)
+	sibling := r.addSiblingWorktree(t, "child-lane", "child-branch")
+
+	ctx := context.WithValue(context.Background(), ctxDelegationAllowance, 2)
+	prepared, err := parent.prepareSubagentRun(ctx, "child task", "", "", 0, "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("prepareSubagentRun: %v", err)
+	}
+	t.Cleanup(func() { releasePreparedTreeSlot(prepared) })
+	child := prepared.sub.sess
+	if child.currentEnv() != parent.currentEnv() {
+		t.Fatal("the spawned child did not land on the parent's environment; this test would prove nothing")
+	}
+	if child.ownsEnv {
+		t.Fatal("the spawned child recorded that it owns the parent's environment; this test would prove nothing")
+	}
+	child.mu.Lock()
+	child.worktreeGitVersionOK = true
+	child.stateDir = r.stateDir
+	child.mu.Unlock()
+
+	rt := child.reg.Get("manage_worktree")
+	if rt == nil {
+		t.Fatal("registry is missing manage_worktree")
+	}
+	if _, err := rt.Exec(t.Context(), child.currentEnv(), map[string]any{"operation": "switch", "path": sibling}); err != nil {
+		t.Fatalf("switch by path onto the sibling worktree: %v", err)
+	}
+	clone := currentLocalEnv(t, child)
+	if clone == shared {
+		t.Fatal("the switch left the child on the parent's environment; this test would prove nothing")
+	}
+	if _, err := clone.ExecCommand(context.Background(), "true", 5000, "", nil); err != nil {
+		t.Fatalf("ExecCommand on the entered clone: %v", err)
+	}
+	cloneScratch := clone.SessionScratchDir()
+	if cloneScratch == "" {
+		t.Fatal("the entered clone minted no session scratch, so there is nothing to settle")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cloneScratch) })
+	if cloneScratch == parentScratch {
+		t.Errorf("the entered clone's scratch is the parent's own %s, want a scratch of its own", parentScratch)
+	}
+
+	if _, err := rt.Exec(t.Context(), child.currentEnv(), map[string]any{"operation": "exit"}); err != nil {
+		t.Fatalf("exit back to the parent's environment: %v", err)
+	}
+	if got := shared.SessionScratchDir(); got != parentScratch {
+		t.Errorf("the child's exit changed the parent's environment scratch to %q, want its own %q", got, parentScratch)
+	}
+	assertParentScratchUntouched(t, "the child's exit", parentScratch)
+
+	teardownChildSession(context.Background(), child, retainChildScratch)
+
+	if _, err := os.Stat(cloneScratch); err != nil {
+		t.Errorf("the child's teardown removed the entered clone's scratch %s, want it retained for the handoff: %v", cloneScratch, err)
+	}
+	if scratchLeaseHeld(t, cloneScratch) {
+		t.Errorf("the entered clone's scratch %s lease is still held after the child's teardown", cloneScratch)
+	}
+	assertParentScratchUntouched(t, "the shared child's teardown", parentScratch)
+}
+
+// A shared child spawned inside its parent's kernel box (a bwrap-backed
+// sandbox) enters a second worktree the same way any shared child does — no
+// working dir of its own, so it starts on its parent's very environment
+// object, and manage_worktree's own re-root swaps it onto a clone. The
+// parent's wrapper carries the box's session tmp, and WithWorkingDirectory
+// re-roots the wrapper while carrying that same tmp forward (see
+// agent/sandbox/reroot.go's Wrapper.ReRoot), so the entered clone works in the
+// box's tmp without any scratch move — and the LEASE stays the parent's the
+// whole time: the clone never records itself as owning it, so the child's
+// teardown settles nothing on the box.
+func TestSharedEnvChildInsideTheParentBoxKeepsTheParentScratchLease(t *testing.T) {
+	_, laneA, laneB, home := sbxMainAndLanes(t)
+	facts := sbxBwrapFacts(home)
+	parent := sbxWorktreeSession(t)
+	boxed := execenv.NewLocalExecutionEnvironment(laneA)
+	if err := boxed.EnableSandbox(sbxResolve(t, facts, laneA, sandbox.ModeWorkspaceWrite)); err != nil {
+		t.Fatalf("EnableSandbox: %v", err)
+	}
+	parent.mu.Lock()
+	parent.env = boxed
+	parent.mu.Unlock()
+	boxTmp := boxed.SessionScratchDir()
+	if boxTmp == "" {
+		t.Fatal("EnableSandbox minted no session scratch for the box")
+	}
+	if !scratchLeaseHeld(t, boxTmp) {
+		t.Fatal("the box's scratch lease is not held")
+	}
+
+	ctx := context.WithValue(context.Background(), ctxDelegationAllowance, 2)
+	prepared, err := parent.prepareSubagentRun(ctx, "child task", "", "", 0, "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("prepareSubagentRun: %v", err)
+	}
+	t.Cleanup(func() { releasePreparedTreeSlot(prepared) })
+	child := prepared.sub.sess
+	if child.currentEnv() != parent.currentEnv() {
+		t.Fatal("the spawned child did not land on the parent's boxed environment; this test would prove nothing")
+	}
+	if child.ownsEnv {
+		t.Fatal("the spawned child recorded that it owns the parent's boxed environment; this test would prove nothing")
+	}
+
+	// Enter with the env-swap primitive, not the manage_worktree tool: a
+	// wrappered env would try to spawn /usr/bin/bwrap for the tool's own git
+	// commands, and there is no real bwrap on this host. The tool surface for a
+	// shared child entering a worktree is covered by the unsandboxed tests
+	// above in this file.
+	if err := child.enterWorktree(laneB, true); err != nil {
+		t.Fatalf("enterWorktree: %v", err)
+	}
+	clone := currentLocalEnv(t, child)
+	if clone == boxed {
+		t.Fatal("the enter left the child on the parent's own environment object; this test would prove nothing")
+	}
+	if got := clone.SessionScratchDir(); got != boxTmp {
+		t.Errorf("entered clone scratch = %q, want the box's own %q carried by the re-rooted wrapper", got, boxTmp)
+	}
+
+	teardownChildSession(context.Background(), child, retainChildScratch)
+
+	if _, err := os.Stat(boxTmp); err != nil {
+		t.Errorf("the child's teardown removed the box's scratch %s, want it retained for the live parent: %v", boxTmp, err)
+	}
+	if !scratchLeaseHeld(t, boxTmp) {
+		t.Errorf("the child's teardown released the box's scratch %s lease while the parent is still working in it", boxTmp)
+	}
+}
+
+// A child's teardown settles the environments it swapped away from under the
+// same disposition as the environment it still holds: a handoff keeps the
+// directories with their leases released, a discard drops both. The scratch of
+// a child being dropped is dropped wherever it sits.
+//
+// No production caller reaches the discard side with a swapped child — an
+// abandoned environment is recorded only by a manage_worktree op, which takes a
+// turn, and every teardown that discards fires before the child's run loop
+// starts — so this drives teardownChildSession directly rather than faking a
+// production path into it.
+func TestChildTeardownSettlesAbandonedEnvironmentsByDisposition(t *testing.T) {
+	client := llm.NewClient()
+	client.Register(&fakeAdapter{name: "openai"})
+	parent := newSession(t, withClient(client), withDir(t.TempDir()), withoutGitSnapshot())
+	parentLocal, ok := parent.currentEnv().(*execenv.LocalExecutionEnvironment)
+	if !ok {
+		t.Fatalf("parent env = %T, want a local environment", parent.currentEnv())
+	}
+
+	// A child holding one environment it swapped away from, with the scratch a
+	// command minted there while it was still the child's own.
+	childWithAbandonedScratch := func(t *testing.T) (*Session, string) {
+		t.Helper()
+		child, err := NewSession(client, parent.currentProfile(), parentLocal.WithWorkingDirectory(t.TempDir()), SessionConfig{
+			MaxSubagentDepth: 1,
+			testOnly:         testConfig{skipGitSnapshot: true},
+		})
+		if err != nil {
+			t.Fatalf("NewSession on the child's clone: %v", err)
+		}
+		child.ownsEnv = true
+		abandoned := parentLocal.WithWorkingDirectory(t.TempDir())
+		if _, err := abandoned.ExecCommand(context.Background(), "true", 5000, "", nil); err != nil {
+			t.Fatalf("ExecCommand on the abandoned environment: %v", err)
+		}
+		scratch := abandoned.SessionScratchDir()
+		if scratch == "" {
+			t.Fatal("the abandoned environment minted no session scratch, so there is nothing to settle")
+		}
+		if !scratchLeaseHeld(t, scratch) {
+			t.Fatal("the abandoned environment's scratch lease is not held before the teardown")
+		}
+		child.mu.Lock()
+		child.abandonedEnvs = append(child.abandonedEnvs, abandoned)
+		child.mu.Unlock()
+		return child, scratch
+	}
+
+	discarded, discardedScratch := childWithAbandonedScratch(t)
+	t.Cleanup(func() { _ = os.RemoveAll(discardedScratch) })
+
+	teardownChildSession(context.Background(), discarded, disposeChildScratch)
+
+	if _, err := os.Stat(discardedScratch); !os.IsNotExist(err) {
+		t.Errorf("a discarded child's abandoned scratch %s survived its teardown (stat: %v), want it dropped with its lease", discardedScratch, err)
+	}
+
+	handed, handedScratch := childWithAbandonedScratch(t)
+	t.Cleanup(func() { _ = os.RemoveAll(handedScratch) })
+
+	teardownChildSession(context.Background(), handed, retainChildScratch)
+
+	if _, err := os.Stat(handedScratch); err != nil {
+		t.Errorf("a handed-off child's abandoned scratch %s was removed, want it kept for the handoff: %v", handedScratch, err)
+	} else if scratchLeaseHeld(t, handedScratch) {
+		t.Errorf("the handed-off child's abandoned scratch %s lease is still held after its teardown", handedScratch)
 	}
 }

@@ -1779,21 +1779,19 @@ func TestNamedInstanceKeepsItsIdentity(t *testing.T) {
 	if rebuilt.ID() != "work-kimi" || rebuilt.ProviderID() != "moonshotai" || rebuilt.Model() != "kimi-k3" {
 		t.Fatalf("after WithModel = %s/%s/%s", rebuilt.ID(), rebuilt.ProviderID(), rebuilt.Model())
 	}
-	// A named instance inherits its base's auxiliary route as the catalog evolves.
-	for _, tc := range []struct {
-		name        string
-		named, base *provider.Profile
-	}{
-		{"moonshotai", work, newOpenAICompatProfile("kimi", "kimi-k2.5", 0)},
-		{"google", namedInstanceProfile("work-google", "google", "gemini-2.5-pro"), newGeminiProfile("gemini-2.5-pro")},
-		{"anthropic", namedInstanceProfile("work-anthropic", "anthropic", "claude-opus-4-6"), newAnthropicProfile("claude-opus-4-6")},
+	// The base's curated cheap_model rides along with the name.
+	for _, tc := range []struct{ name, base, model string }{
+		{"work-kimi", "moonshotai", "kimi-k2.5"},
+		{"work-google", "google", "gemini-2.5-pro"},
+		{"work-anthropic", "anthropic", "claude-opus-4-6"},
 	} {
-		want := tc.base.Resolved().CheapModel
-		if want == "" {
-			t.Fatalf("%s fixture has no curated cheap model", tc.name)
+		want := baseProviderProfile(tc.base, tc.model).CheapModel()
+		if want == "" || want == tc.model {
+			t.Fatalf("%s curates no cheap model distinct from %q; the fixture proves nothing",
+				tc.base, tc.model)
 		}
-		if got := tc.named.CheapModel(); got != want {
-			t.Errorf("%s named CheapModel() = %q, base = %q", tc.name, got, want)
+		if got := namedInstanceProfile(tc.name, tc.base, tc.model).CheapModel(); got != want {
+			t.Fatalf("%s CheapModel() = %q, want %s's curated %q", tc.name, got, tc.base, want)
 		}
 	}
 }
