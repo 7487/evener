@@ -9184,6 +9184,67 @@ func TestHubRPCThreadResumeSpawnsAndReadsDaemon(t *testing.T) {
 	}
 }
 
+func TestHubRPCThreadResumeVerifiesExistingOwnerWhenDiscoveryFails(t *testing.T) {
+	for _, state := range []string{"healthy", "unreachable", "absent"} {
+		t.Run(state, func(t *testing.T) {
+			const sessionID = "confirmed-owner"
+			daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
+			thread := appwire.Thread{ID: sessionID, SessionID: sessionID, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}
+			appserver.HandleTyped(daemon.Router(), appwire.MethodThreadList, func(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+				return appwire.ThreadListResponse{Data: []appwire.Thread{thread}}, nil
+			})
+			appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(context.Context, appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+				return appwire.ThreadReadResponse{Thread: thread}, nil
+			})
+			peer := httptest.NewServer(http.HandlerFunc(daemon.ServeWebSocket))
+			defer peer.Close()
+			runDir := t.TempDir()
+			roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+			if state != "absent" {
+				writeRendezvous(t, runDir, rendezvous.Entry{PID: os.Getpid(), Protocol: appwire.ProtocolVersion, Endpoint: "ws" + strings.TrimPrefix(peer.URL, "http"), SourceID: "local", ThreadID: sessionID, SessionID: sessionID})
+				roster.Refresh()
+				if _, ok := roster.Find(sessionID); !ok {
+					t.Fatal("owner was not confirmed")
+				}
+			}
+			if state == "unreachable" {
+				peer.Close()
+			}
+			if err := os.WriteFile(filepath.Join(runDir, "1.json"), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			spawned := false
+			hub := newHubRPCTestServer(t, hubcore.WebConfig{RunDir: runDir, Roster: roster, ResumeLocks: hubcore.NewResumeLocks(), Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				spawned = true
+				return rendezvous.Entry{}, errors.New("unexpected replacement")
+			}}})
+			defer hub.Close()
+			client := dialHubRPC(t, hub)
+			defer client.Close()
+			if _, err := client.Initialize(context.Background(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.ThreadResume(context.Background(), appwire.ThreadResumeParams{Session: sessionID})
+			if spawned {
+				t.Fatal("spawned despite incomplete ownership discovery")
+			}
+			if state == "healthy" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if response.Thread.ID != sessionID {
+					t.Fatalf("thread=%+v", response.Thread)
+				}
+			} else if err == nil {
+				t.Fatal("resume succeeded without a verified owner")
+			}
+			if roster.OwnershipError() == nil {
+				t.Fatal("partial confirmation cleared the discovery failure")
+			}
+		})
+	}
+}
+
 func TestHubRPCThreadResumeReplacesIncompatibleRosterDaemon(t *testing.T) {
 	const sessionID = "sess_old"
 

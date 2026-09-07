@@ -326,13 +326,24 @@ func hubThreadResume(ctx context.Context, cfg hubcore.WebConfig, sources *appsou
 	if err := deletionFenceError(cfg, params.Ref, sessionID, ""); err != nil {
 		return appwire.ThreadResumeResponse{}, err
 	}
+	var discoveryErr error
 	if cfg.Roster != nil {
-		if err := hubRosterRefresh(ctx, cfg.Roster); err != nil {
-			return appwire.ThreadResumeResponse{}, appwire.Unavailable(err.Error())
-		}
+		discoveryErr = hubRosterRefresh(ctx, cfg.Roster)
 	}
 	if err := daemonRestartRequiredError(ctx, cfg, params.Ref, sessionID, ""); err != nil {
 		return appwire.ThreadResumeResponse{}, err
+	}
+	if discoveryErr != nil {
+		// Incomplete discovery cannot authorize a replacement, but a direct
+		// probe can establish that a previously confirmed owner still serves
+		// this session. Keep the global discovery failure for other owners.
+		if owner, ok := liveDaemonForThread(cfg.Roster, sessionID); ok && owner.Protocol == appwire.ProtocolVersion {
+			if err := cfg.Roster.RefreshEntry(ctx, owner.Entry); err != nil {
+				return appwire.ThreadResumeResponse{}, appwire.Unavailable(errors.Join(discoveryErr, err).Error())
+			}
+			return hubResumedThreadResponse(ctx, sources, owner.SessionID, owner.ThreadID)
+		}
+		return appwire.ThreadResumeResponse{}, appwire.Unavailable(discoveryErr.Error())
 	}
 	if cfg.Spawner == nil {
 		return appwire.ThreadResumeResponse{}, appwire.Unavailable("spawner not configured")
