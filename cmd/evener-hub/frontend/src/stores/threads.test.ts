@@ -8528,6 +8528,64 @@ test.each(["daemonRestartRequired", "persistenceUnavailable"])(
   },
 );
 
+test.each([true, false])(
+  "discovery reconciles another tab's blocked send with cached authority, accepted=%s",
+  async (accepted) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const storage = new MutationOutboxIndexedDB({ createMutationId: () => "other-tab-blocked" });
+    const otherTab = new MutationOutboxIndexedDB({ createMutationId: () => "other-tab-blocked" });
+    const settled = deferred<void>();
+    const settleApplied = storage.settleApplied.bind(storage);
+    vi.spyOn(storage, "settleApplied").mockImplementation(async (...args) => {
+      const result = await settleApplied(...args);
+      settled.resolve();
+      return result;
+    });
+    const settleReceipt = storage.settleReceipt.bind(storage);
+    vi.spyOn(storage, "settleReceipt").mockImplementation(async (...args) => {
+      const result = await settleReceipt(...args);
+      settled.resolve();
+      return result;
+    });
+    try {
+      setMutationStorageForTests(storage);
+      const fake = connectFakeClient("connecting");
+      let reads = 0;
+      fake.on("thread/read", () => {
+        reads++;
+        const response = readResponse("ref_a", { status: { type: "idle" } });
+        if (reads > 1 && accepted)
+          response.thread.evener.queue = { revision: 1, clientMutationIds: ["other-tab-blocked"] };
+        return response;
+      });
+      let sends = 0;
+      fake.on("turn/queue", (params) => {
+        if (++sends === 1) throw new RequestTimeoutError("response lost");
+        return { receipt: mutationReceipt(params.clientMutationId) };
+      });
+      fake.emitReady();
+      await threadsStore.getState().ensureThread("ref_a");
+      expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(true);
+      await threadsStore.getState().queue("ref_a", "sentinel");
+      await flushIndexedDBUntil(() => sends === 1);
+      await settleCallerContinuations();
+      await otherTab.markUnknown("other-tab-blocked", "blockedUnknown");
+      otherTab.close();
+      expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(true);
+      await vi.advanceTimersByTimeAsync(2000);
+      await flushIndexedDBUntil(() => reads > 1);
+      expect(reads).toBe(2);
+      await flushIndexedDBUntil(() => accepted || sends === 2);
+      expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(accepted ? 1 : 2);
+      await settled.promise;
+      expect(await storage.getOutbox("other-tab-blocked")).toBeUndefined();
+    } finally {
+      otherTab.close();
+      vi.useRealTimers();
+    }
+  },
+);
+
 test("persistent journal failures wait for periodic recovery between attempts", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {

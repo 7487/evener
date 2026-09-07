@@ -712,11 +712,11 @@ function handleDiscoveredMutations(runtime: MutationRuntime, targetRefs: Iterabl
       dispatchableMutationRefs.has(targetRef) &&
       !threadsStore.getState().mutationReconciliationFailures.has(targetRef)
     ) {
-      if (!threadsStore.getState().mutationAuthorityRefs.has(targetRef)) {
-        void refreshUncertainMutationAuthority(runtime, client, epoch, targetRef).catch(() => {
-          // The next discovery pass retries after storage or transport recovers.
-        });
-      }
+      // Another tab can block a shared record after this tab's snapshot.
+      // Cached authority cannot settle that newly uncertain send.
+      void refreshUncertainMutationAuthority(runtime, client, epoch, targetRef).catch(() => {
+        // The next discovery pass retries after storage or transport recovers.
+      });
       continue;
     }
     const pending = pendingThreadHydrations.get(targetRef);
