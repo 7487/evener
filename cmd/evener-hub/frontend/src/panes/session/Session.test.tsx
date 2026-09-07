@@ -2520,3 +2520,61 @@ test.each(["pending", "failed"])(
     }
   },
 );
+
+test("recovery rejection blocks durable dispatch and refreshes the Resume control", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    const fake = connectFakeClient();
+    const ref = "local:failed-stop-recovery";
+    let fenced = false;
+    let reads = 0;
+    let mutationId = "";
+    fake.on("thread/read", () => {
+      reads++;
+      const response = readResponse(ref, { status: { type: "idle" } });
+      response.thread.evener.resumeRequired = fenced;
+      response.thread.evener.capabilities = { ...CAPABILITIES, send: !fenced };
+      response.thread.evener.instanceId = "known-instance";
+      response.thread.evener.mutationStateAuthoritative = true;
+      return response;
+    });
+    fake.on("turn/queue", (params) => {
+      mutationId = params.clientMutationId;
+      fenced = true;
+      throw new WireError("session recovery requires Resume on a fresh connection", -32014, {
+        evenerErrorInfo: "actionUnavailable",
+        clientMutationId: params.clientMutationId,
+        mutationOutcome: "unknown",
+        retryDisposition: "blocked",
+      });
+    });
+    render(
+      <ClientProvider client={fake}>
+        <Session params={{ ref }} paneId="p1" focused={true} />
+      </ClientProvider>,
+    );
+    await waitFor(() => expect(threadsStore.getState().mutationAuthorityRefs.has(ref)).toBe(true));
+    await act(async () => {
+      await threadsStore.getState().refreshThread(ref);
+    });
+    await act(async () => {
+      await threadsStore.getState().queue(ref, "preserve this uncertain message");
+    });
+    await waitFor(async () => expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown"));
+    expect(threadsStore.getState().mutationAuthorityRefs.has(ref)).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(await screen.findByRole("button", { name: "Resume session" })).toBeTruthy();
+    expect(reads).toBeGreaterThan(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect((await mutationStorage.getOutbox(mutationId))?.composerText).toBe("preserve this uncertain message");
+    expect(threadsStore.getState().restartBlockingObligations.has(ref)).toBe(true);
+    expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});

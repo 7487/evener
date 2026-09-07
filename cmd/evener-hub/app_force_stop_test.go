@@ -1136,3 +1136,68 @@ func TestConnectionRecoveryFenceIncludesUnreadActionsAndConnectionsBornDuringSto
 		t.Fatal("fresh connection automatically cleared explicit resume requirement")
 	}
 }
+
+func TestRecoveryAdmissionNamesBlockedDurableMutation(t *testing.T) {
+	for _, recovery := range []string{"active", "completed", "failed"} {
+		t.Run(recovery, func(t *testing.T) {
+			cfg := hubcore.WebConfig{ResumeLocks: hubcore.NewResumeLocks()}
+			ctx := admitSessionConnection(t.Context(), cfg)
+			hub := newHubRPCTestServer(t, cfg)
+			defer hub.Close()
+			client := dialHubRPC(t, hub)
+			defer client.Close()
+			if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+				t.Fatal(err)
+			}
+			finish := cfg.ResumeLocks.BeginForceStop([]string{"owner"})
+			if recovery == "active" {
+				defer finish(false)
+			} else {
+				finish(recovery == "completed")
+			}
+			server := newHubAppServer(cfg, appsource.NewRegistry())
+			params := appwire.TurnStartParams{Ref: "local:owner", ClientMutationID: "preserved-intent", ExpectedInstanceID: "known-instance", Input: []appwire.InputItem{{Type: "text", Text: "keep this input"}}}
+			_, err := exactDispatch(ctx, t, server, appwire.MethodTurnStart, params)
+			if !isSessionRecoveryAdmissionError(err) {
+				t.Fatalf("lost terminal admission classification: %v", err)
+			}
+			wireErr := client.Request(t.Context(), appwire.MethodTurnStart, params, nil)
+			for boundary, rejection := range map[string]error{"handler": err, "WebSocket": wireErr} {
+				wire := appserver.WireError(rejection)
+				raw, marshalErr := json.Marshal(wire.Data)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				var data appwire.ErrorData
+				if err := json.Unmarshal(raw, &data); err != nil {
+					t.Fatal(err)
+				}
+				if wire.Code != appwire.CodeUnavailable || data.EvenerErrorInfo != appwire.ErrorActionUnavailable || data.ClientMutationID != params.ClientMutationID || data.MutationOutcome != appwire.MutationOutcomeUnknown || data.RetryDisposition != appwire.RetryDispositionBlocked {
+					t.Fatalf("%s recovery rejection cannot settle dispatcher state: %+v", boundary, wire)
+				}
+			}
+		})
+	}
+}
+
+func TestBlockedAdmissionMetadataPreservesWrappedRecoveryCause(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		original := map[string]any{"evenerErrorInfo": string(appwire.ErrorActionUnavailable), "cause": "sessionRecovery", "detail": "retained"}
+		var rejection error = sessionRecoveryAdmissionError{appwire.WireError{Code: appwire.CodeUnavailable, Message: "resume required", Data: original}}
+		if wrapped {
+			rejection = errors.Join(errors.New("request context"), rejection)
+		}
+		blocked := blockedAdmissionMutationError(rejection, "mutation-owner")
+		if !isSessionRecoveryAdmissionError(blocked) {
+			t.Fatalf("wrapped=%v lost terminal marker", wrapped)
+		}
+		wire := appserver.WireError(blocked)
+		data, ok := wire.Data.(map[string]any)
+		if !ok || wire.Code != appwire.CodeUnavailable || wire.Message != "resume required" || data["cause"] != "sessionRecovery" || data["detail"] != "retained" || data["clientMutationId"] != "mutation-owner" || data["mutationOutcome"] != string(appwire.MutationOutcomeUnknown) || data["retryDisposition"] != string(appwire.RetryDispositionBlocked) {
+			t.Fatalf("wrapped=%v metadata=%+v", wrapped, wire.Data)
+		}
+		if _, changed := original["clientMutationId"]; changed {
+			t.Fatal("annotation mutated original error data")
+		}
+	}
+}

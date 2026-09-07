@@ -173,7 +173,7 @@ func refreshDaemonRestartRequiredError(ctx context.Context, cfg hubcore.WebConfi
 		if err := hubRosterRefresh(ctx, cfg.Roster); err != nil {
 			wire := appwire.Unavailable(err.Error())
 			if mutationID != "" {
-				return restartRequiredMutationError(wire, mutationID)
+				return blockedAdmissionMutationError(wire, mutationID)
 			}
 			return wire
 		}
@@ -192,7 +192,7 @@ func daemonRestartRequiredError(ctx context.Context, cfg hubcore.WebConfig, ref,
 	if err != nil {
 		wire := appwire.Unavailable(err.Error())
 		if mutationID != "" {
-			return restartRequiredMutationError(wire, mutationID)
+			return blockedAdmissionMutationError(wire, mutationID)
 		}
 		return wire
 	}
@@ -201,7 +201,7 @@ func daemonRestartRequiredError(ctx context.Context, cfg hubcore.WebConfig, ref,
 	}
 	wire := appwire.WireError{Code: appwire.CodeConflict, Message: fmt.Sprintf("Session restart required: daemon pid %d uses an incompatible protocol; this hub requires %s. Stop the daemon, then resume this session. Stopping interrupts active work.", entry.PID, appwire.ProtocolVersion), Data: appwire.ErrorData{EvenerErrorInfo: appwire.ErrorConflict, Cause: "daemonRestartRequired"}}
 	if mutationID != "" {
-		return restartRequiredMutationError(wire, mutationID)
+		return blockedAdmissionMutationError(wire, mutationID)
 	}
 	return wire
 }
@@ -221,9 +221,9 @@ func isDaemonRestartRequiredError(err error) bool {
 	}
 }
 
-// A retry may name a mutation accepted before the protocol upgrade. Without
-// its daemon's receipt history, the hub cannot claim that ID was rejected.
-func restartRequiredMutationError(err error, mutationID string) error {
+// Admission fences cannot resolve an earlier acceptance of the same mutation.
+// Preserve the original cause and block retries until receipt reconciliation.
+func blockedAdmissionMutationError(err error, mutationID string) error {
 	var wire appwire.WireError
 	if !errors.As(err, &wire) {
 		return err
@@ -240,6 +240,9 @@ func restartRequiredMutationError(err error, mutationID string) error {
 		updated["mutationOutcome"] = string(appwire.MutationOutcomeUnknown)
 		updated["retryDisposition"] = string(appwire.RetryDispositionBlocked)
 		wire.Data = updated
+	}
+	if isSessionRecoveryAdmissionError(err) {
+		return sessionRecoveryAdmissionError{wire}
 	}
 	return wire
 }

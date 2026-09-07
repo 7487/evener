@@ -157,7 +157,7 @@ func listItemTurns(
 
 func blockedUnknownMutationError(clientMutationID string, err error) error {
 	if isDaemonRestartRequiredError(err) {
-		return restartRequiredMutationError(err, clientMutationID)
+		return blockedAdmissionMutationError(err, clientMutationID)
 	}
 	return appwire.WireError{
 		Code:    appwire.CodeInternalError,

@@ -59,7 +59,7 @@ func withDeletionTargetOwnership[R any](
 	if clientMutationID != "" {
 		if err := sessionActionRecoveryError(ctx, cfg, ref, threadID, epoch); err != nil {
 			var zero R
-			return zero, err
+			return zero, blockedAdmissionMutationError(err, clientMutationID)
 		}
 		if err := daemonRestartRequiredError(ctx, cfg, ref, threadID, clientMutationID); err != nil {
 			var zero R
