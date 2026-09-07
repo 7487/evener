@@ -759,7 +759,12 @@ function getMutationRuntime(): MutationRuntime | null {
       threadsStore.setState((state) => {
         const mutationAuthorityRefs = new Set(state.mutationAuthorityRefs);
         mutationAuthorityRefs.delete(targetRef);
-        return { mutationAuthorityRefs };
+        // The durable blocking write may have failed, leaving a submitting
+        // record. New enqueues must wait for successful reconciliation too.
+        return {
+          mutationAuthorityRefs,
+          mutationReconciliationFailures: new Set(state.mutationReconciliationFailures).add(targetRef),
+        };
       });
       // Let the periodic discovery pass refresh and reconcile. An immediate
       // read can prove absence while journal writes still fail, creating a

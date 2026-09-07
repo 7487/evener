@@ -8582,3 +8582,46 @@ test("persistent journal failures wait for periodic recovery between attempts", 
     vi.useRealTimers();
   }
 });
+
+test("failed blocking persistence prevents a new enqueue from retrying uncertain work", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    let nextID = 0;
+    const storage = new MutationOutboxIndexedDB({ createMutationId: () => `blocking-write-${++nextID}` });
+    const failed = deferred<void>();
+    vi.spyOn(storage, "markUnknown").mockImplementationOnce(async () => {
+      failed.resolve();
+      throw new DOMException("IndexedDB transaction aborted", "AbortError");
+    });
+    setMutationStorageForTests(storage);
+    const fake = connectFakeClient("connecting");
+    const fresh = deferred<ThreadReadResponse>();
+    let reads = 0;
+    fake.on("thread/read", () => (++reads === 1 ? readResponse("ref_a", { status: { type: "idle" } }) : fresh.promise));
+    fake.on("turn/queue", (params) => {
+      throw new WireError("owner unavailable", -32014, {
+        evenerErrorInfo: "mutationOutcome",
+        clientMutationId: params.clientMutationId,
+        mutationOutcome: "unknown",
+        retryDisposition: "blocked",
+      });
+    });
+    fake.emitReady();
+    await threadsStore.getState().ensureThread("ref_a");
+    await threadsStore.getState().queue("ref_a", "first");
+    await failed.promise;
+    await settleCallerContinuations();
+    expect((await storage.getOutbox("blocking-write-1"))?.state).toBe("submitting");
+    await threadsStore.getState().queue("ref_a", "second");
+    await settleCallerContinuations();
+    await storage.listOutbox("ref_a");
+    expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
+    fake.on("turn/queue", (params) => ({ receipt: mutationReceipt(params.clientMutationId) }));
+    fresh.resolve(readResponse("ref_a", { status: { type: "idle" } }));
+    await vi.advanceTimersByTimeAsync(2000);
+    await flushIndexedDBUntil(() => fake.calls.filter((call) => call.method === "turn/queue").length === 3);
+    expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(3);
+  } finally {
+    vi.useRealTimers();
+  }
+});
