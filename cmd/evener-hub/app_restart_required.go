@@ -16,6 +16,10 @@ import (
 // restartRequiredDaemon only uses an authenticated probe's mismatch verdict.
 // A rendezvous file or a live PID alone cannot establish daemon identity.
 func restartRequiredDaemon(ctx context.Context, cfg hubcore.WebConfig, ref, threadID string) (hubcore.LiveEntry, bool, error) {
+	return lookupDaemonOwner(ctx, cfg, ref, threadID, false)
+}
+
+func lookupDaemonOwner(ctx context.Context, cfg hubcore.WebConfig, ref, threadID string, verifyCompatibleAncestry bool) (hubcore.LiveEntry, bool, error) {
 	if ref != "" {
 		parsed, err := appwire.ParseRef(ref)
 		if err != nil {
@@ -35,7 +39,7 @@ func restartRequiredDaemon(ctx context.Context, cfg hubcore.WebConfig, ref, thre
 	}
 	var edges []ownershipEdge
 	verifyOwner := func(entry hubcore.LiveEntry, unconfirmed bool) (hubcore.LiveEntry, bool, error) {
-		if entry.Status != appwire.ThreadStatusRestartRequired && !unconfirmed {
+		if entry.Status != appwire.ThreadStatusRestartRequired && !unconfirmed && !verifyCompatibleAncestry {
 			return entry, false, nil
 		}
 		for _, edge := range edges {
@@ -53,7 +57,7 @@ func restartRequiredDaemon(ctx context.Context, cfg hubcore.WebConfig, ref, thre
 		if unconfirmed {
 			return hubcore.LiveEntry{}, false, fmt.Errorf("cannot verify daemon ownership for session %s", entry.SessionID)
 		}
-		return entry, true, nil
+		return entry, entry.Status == appwire.ThreadStatusRestartRequired, nil
 	}
 	var jobTreeRootID string
 	var subagentAncestry, reachedRoot bool

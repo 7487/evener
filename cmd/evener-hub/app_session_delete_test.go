@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"primeradiant.com/evener/agent/schema"
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
 	"primeradiant.com/evener/identifier"
@@ -683,5 +687,122 @@ func TestFailedInitialRosterScanBlocksNavigationAndDeletion(t *testing.T) {
 	response, err := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(webTestSessionID)})
 	if err != nil || len(response.Deleted) != 1 {
 		t.Fatalf("recovered deletion=%+v error=%v", response, err)
+	}
+}
+
+func TestSessionDeletePreservesDaemonOwnedDelegates(t *testing.T) {
+	for _, status := range []string{appwire.ThreadStatusActive, appwire.ThreadStatusRestartRequired, "unconfirmed"} {
+		for _, nested := range []bool{false, true} {
+			name := status + "/direct"
+			if nested {
+				name = status + "/nested"
+			}
+			t.Run(name, func(t *testing.T) {
+				root := t.TempDir()
+				projectDir := filepath.Join(root, "project")
+				if err := os.MkdirAll(projectDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				stateDir := filepath.Join(root, "projects", "session-delete-0123456789")
+				rootID, parentID, childID := projectDeleteCanonicalSessionIDs[0], projectDeleteCanonicalSessionIDs[1], projectDeleteCanonicalSessionIDs[2]
+				writeSession(t, stateDir, rootID, projectDir)
+				events := []map[string]any{}
+				addChild := func(id, parent, parentDelegate, delegate string) {
+					writeSession(t, stateDir, id, projectDir)
+					meta, err := schema.LoadSessionMeta(stateDir, id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					meta.ParentSessionID, meta.JobTreeRootSessionID, meta.IsSubagent = parent, rootID, true
+					if err := schema.SaveSessionMeta(stateDir, meta); err != nil {
+						t.Fatal(err)
+					}
+					descriptor := map[string]any{"owner_session_id": rootID, "child_session_id": id, "parent_delegate_id": parentDelegate, "transcript_ref": localAppRef(id), "task": "delete ownership", "agent_type": "explorer", "tool_name_ceiling": []string{"communicate"}, "resumable": true, "config": map[string]any{}}
+					events = append(events, map[string]any{"kind": "delegate_created", "seq": len(events) + 1, "delegate_id": delegate, "created": map[string]any{"descriptor": descriptor}})
+				}
+				if nested {
+					addChild(parentID, rootID, "", "dlg_parent")
+					addChild(childID, parentID, "dlg_parent", "dlg_child")
+				} else {
+					addChild(childID, rootID, "", "dlg_child")
+				}
+				batch, err := json.Marshal(map[string]any{"events": events})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stateDir, "sessions", rootID, "delegates.jsonl"), append(append([]byte("{\"version\":1}\n"), batch...), '\n'), 0600); err != nil {
+					t.Fatal(err)
+				}
+				past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+				if _, err := past.Rebuild(); err != nil {
+					t.Fatal(err)
+				}
+				roster := hubcore.NewRosterWithEntries(hubcore.LiveEntry{SessionID: rootID, Status: status})
+				if status == "unconfirmed" {
+					peer := httptest.NewServer(http.NotFoundHandler())
+					defer peer.Close()
+					runDir := t.TempDir()
+					writeRendezvous(t, runDir, rendezvous.Entry{PID: os.Getpid(), SessionID: rootID, ThreadID: rootID, Protocol: appwire.ProtocolVersion, Endpoint: "ws" + strings.TrimPrefix(peer.URL, "http")})
+					roster = hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+					roster.Refresh()
+					if !unconfirmedDaemonForThread(roster, rootID) {
+						t.Fatal("fixture has no unresolved owner")
+					}
+				}
+				web := NewWebServer(hubcore.WebConfig{Past: past, Roster: roster})
+				response, err := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(childID)})
+				if len(response.Deleted) != 0 {
+					t.Errorf("deleted owned child: %+v", response)
+				}
+				if err == nil && len(response.Skipped) != 1 {
+					t.Errorf("missing ownership refusal: %+v", response)
+				}
+				if status != "unconfirmed" && (err != nil || len(response.Skipped) != 1 || response.Skipped[0].Reason != "resumed live") {
+					t.Errorf("verified owner not classified live: response=%+v error=%v", response, err)
+				}
+				for _, suffix := range []string{".meta.json", ".transcript.jsonl", ".api.jsonl"} {
+					if _, err := os.Stat(filepath.Join(stateDir, "sessions", childID+suffix)); err != nil {
+						t.Errorf("owned child artifact %s: %v", suffix, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSessionDeleteAllowsIndependentForkOfLiveDaemon(t *testing.T) {
+	for _, status := range []string{appwire.ThreadStatusActive, appwire.ThreadStatusRestartRequired} {
+		t.Run(status, func(t *testing.T) {
+			root := t.TempDir()
+			projectDir := filepath.Join(root, "project")
+			if err := os.MkdirAll(projectDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			stateDir := filepath.Join(root, "projects", "session-delete-0123456789")
+			rootID, forkID := projectDeleteCanonicalSessionIDs[0], projectDeleteCanonicalSessionIDs[1]
+			writeSession(t, stateDir, rootID, projectDir)
+			writeSession(t, stateDir, forkID, projectDir)
+			meta, err := schema.LoadSessionMeta(stateDir, forkID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			meta.ParentSessionID = rootID
+			if err := schema.SaveSessionMeta(stateDir, meta); err != nil {
+				t.Fatal(err)
+			}
+			past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+			if _, err := past.Rebuild(); err != nil {
+				t.Fatal(err)
+			}
+			roster := hubcore.NewRosterWithEntries(hubcore.LiveEntry{SessionID: rootID, Status: status})
+			web := NewWebServer(hubcore.WebConfig{Past: past, Roster: roster})
+			response, err := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(forkID)})
+			if err != nil || len(response.Deleted) != 1 || response.Deleted[0] != forkID {
+				t.Fatalf("fork deletion=%+v error=%v", response, err)
+			}
+			if _, err := os.Stat(filepath.Join(stateDir, "sessions", rootID+".meta.json")); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

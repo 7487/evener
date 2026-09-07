@@ -56,6 +56,19 @@ var (
 	}
 )
 
+// projectSessionOwnership checks direct ownership and persisted delegate
+// ancestry. Independent forks do not inherit their ancestor's live ownership.
+func projectSessionOwnership(ctx context.Context, cfg hubcore.WebConfig, id string) (bool, error) {
+	if cfg.Roster == nil {
+		return false, nil
+	}
+	if projectSessionLive(cfg.Roster, id) {
+		return true, nil
+	}
+	owner, _, err := lookupDaemonOwner(ctx, cfg, "", id, true)
+	return owner.SessionID != "" || owner.ThreadID != "", err
+}
+
 // projectDelete removes every session file under a project and scrubs only the
 // decision rows for artifacts it removed. It validates both the project key
 // and working directory and refuses the whole operation when anything is live
@@ -84,7 +97,7 @@ func (s *WebServer) projectDelete(ctx context.Context, params appwire.ProjectDel
 		return appwire.ProjectDeleteResponse{}, appwire.InternalError("load deletion state: " + s.deletionStoreErr.Error())
 	}
 	if record, ok := s.cfg.DeletionStore.DeletingProject(project.ID); ok {
-		releaseOwnership, ownerErr := s.acquireProjectDeletionOwnership(record, nil)
+		releaseOwnership, ownerErr := s.acquireProjectDeletionOwnership(ctx, record, nil)
 		if ownerErr != nil {
 			skipped := []projectDeleteSkip{{ID: ownerErr.ThreadID, Reason: ownerErr.Error()}}
 			if errors.Is(ownerErr.Err, llm.ErrAPILogTargetLocked) || ownerErr.Live {
@@ -149,7 +162,11 @@ func (s *WebServer) projectDelete(ctx context.Context, params appwire.ProjectDel
 		}
 		var liveNames []string
 		for _, e := range entries {
-			if projectSessionLive(s.cfg.Roster, e.ID) {
+			live, err := projectSessionOwnership(ctx, s.cfg, e.ID)
+			if err != nil {
+				return appwire.ProjectDeleteResponse{}, appwire.Unavailable(err.Error())
+			}
+			if live {
 				liveNames = append(liveNames, hubcore.ShortID(e.ID))
 			}
 		}
@@ -177,7 +194,7 @@ func (s *WebServer) projectDelete(ctx context.Context, params appwire.ProjectDel
 		})
 		stateDirs[entry.ID] = entry.StateDir
 	}
-	ownedTargets, skipped, releaseOwnership := s.acquireProjectDeletionCandidates(targets, stateDirs)
+	ownedTargets, skipped, releaseOwnership := s.acquireProjectDeletionCandidates(ctx, targets, stateDirs)
 	defer func() {
 		if releaseOwnership != nil {
 			releaseOwnership()
@@ -225,6 +242,7 @@ type projectDeletionCleanupResult struct {
 }
 
 func (s *WebServer) acquireProjectDeletionCandidates(
+	ctx context.Context,
 	targets []hubcore.DeletionTarget,
 	stateDirs map[string]string,
 ) ([]hubcore.DeletionTarget, []projectDeleteSkip, func()) {
@@ -241,7 +259,7 @@ func (s *WebServer) acquireProjectDeletionCandidates(
 	for _, target := range targets {
 		record := hubcore.DeletionRecord{ProjectID: "", Targets: []hubcore.DeletionTarget{target}}
 		stateDir := stateDirs[target.ThreadID]
-		releaseTarget, err := s.acquireProjectDeletionOwnership(record, map[string]string{target.ThreadID: stateDir})
+		releaseTarget, err := s.acquireProjectDeletionOwnership(ctx, record, map[string]string{target.ThreadID: stateDir})
 		if err == nil {
 			owned = append(owned, target)
 			releases = append(releases, releaseTarget)
@@ -262,7 +280,7 @@ func (s *WebServer) resumeProjectDeletions() error {
 	}
 	var firstErr error
 	for _, record := range s.cfg.DeletionStore.Deleting() {
-		release, err := s.acquireProjectDeletionOwnership(record, nil)
+		release, err := s.acquireProjectDeletionOwnership(context.Background(), record, nil)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -281,6 +299,7 @@ func (s *WebServer) resumeProjectDeletions() error {
 }
 
 func (s *WebServer) acquireProjectDeletionOwnership(
+	ctx context.Context,
 	record hubcore.DeletionRecord,
 	stateDirs map[string]string,
 ) (func(), *projectDeletionOwnershipError) {
@@ -306,9 +325,10 @@ func (s *WebServer) acquireProjectDeletionOwnership(
 				return nil, &projectDeletionOwnershipError{ThreadID: target.ThreadID, Err: err}
 			}
 		}
-		if s.cfg.Roster != nil && projectSessionLive(s.cfg.Roster, target.ThreadID) {
+		live, ownershipErr := projectSessionOwnership(ctx, s.cfg, target.ThreadID)
+		if live || ownershipErr != nil {
 			release()
-			return nil, &projectDeletionOwnershipError{ThreadID: target.ThreadID, Live: true}
+			return nil, &projectDeletionOwnershipError{ThreadID: target.ThreadID, Live: live, Err: ownershipErr}
 		}
 		stateDir := s.projectDeletionStateDir(record.ProjectID, target.ThreadID, stateDirs)
 		if stateDir == "" {

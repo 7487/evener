@@ -53,7 +53,7 @@ func (s *WebServer) sessionDelete(ctx context.Context, params appwire.SessionDel
 	target := hubcore.DeletionTarget{Ref: localAppRef(threadID), ThreadID: threadID}
 	record := hubcore.DeletionRecord{Targets: []hubcore.DeletionTarget{target}}
 	stateDirs := map[string]string{threadID: pe.StateDir}
-	release, ownerErr := s.acquireProjectDeletionOwnership(record, stateDirs)
+	release, ownerErr := s.acquireProjectDeletionOwnership(ctx, record, stateDirs)
 	if ownerErr != nil {
 		var skipped []projectDeleteSkip
 		if errors.Is(ownerErr.Err, llm.ErrAPILogTargetLocked) || ownerErr.Live {
