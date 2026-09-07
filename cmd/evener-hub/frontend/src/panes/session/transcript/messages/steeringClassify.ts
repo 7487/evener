@@ -293,14 +293,21 @@ function jobNotificationTone(
   return "neutral";
 }
 
-function titleForJobNotification(attrs: Record<string, string>, type: string): string {
+function titleForJobNotification(attrs: Record<string, string>, type: string, prose?: string): string {
   if (type === "watch-send") return "Watch delivered";
   if (type === "watch") {
-    // A job-targeted condition fire names its job ("Output matched on
-    // job_a1b2"); a job-less timer names what happened ("Timer fired" is
-    // the prose's own lead — keep the title short, the prose carries it).
+    // Derive the title from the trigger, not from job presence (RoboRev PR
+    // #954): only an output_match fire is an "Output matched on …". A timer
+    // prose lead ("Timer fired …") keeps a timer title; an event fire
+    // ("event: …" reason) names the event.
+    const reason = (attrs.reason ?? "").trim();
     const jobId = (attrs.job_id ?? "").trim();
-    if (jobId) return `Output matched on ${jobId}`;
+    const outputMatch = /^output_match:\s*(.+)$/.exec(reason)?.[1]?.trim();
+    if (outputMatch && jobId) return `Output matched on ${jobId}`;
+    if (/^timer fired/i.test(prose ?? "")) return "Timer fired";
+    const eventFire = /^event:\s*(.+)$/.exec(reason)?.[1]?.trim();
+    if (eventFire && jobId) return `Event on ${jobId}: ${eventFire}`;
+    if (jobId) return `Watch fired on ${jobId}`;
     return "Watch triggered";
   }
   const status = (attrs.status || attrs.event || "notification").trim();
@@ -367,7 +374,7 @@ function parseJobNotification(block: string): ParsedNotification | null {
   const tone = jobNotificationTone(attrs, communicate, analysis);
   return {
     type,
-    title: titleForJobNotification(attrs, type),
+    title: titleForJobNotification(attrs, type, type === "watch" ? bodyText : undefined),
     tone,
     secondary: notificationSecondary(attrs, tone, description, analysis, type),
     jobId: attrs.job_id?.trim() || undefined,

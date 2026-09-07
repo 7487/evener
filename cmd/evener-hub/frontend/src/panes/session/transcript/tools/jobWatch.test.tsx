@@ -298,6 +298,81 @@ test("list rows humanize repeating timers and event conditions (RoboRev PR #954)
   expect(body).not.toContain("where tool_name=");
 });
 
+test("the every throttle survives in create summaries and bodies (RoboRev PR #954, review 3)", () => {
+  const d = toolRendererFor("job_watch");
+  const args = { operation: "create", source: "dlg_7Hk2", events: ["communicate"], every: 3 };
+  const raw = {
+    watch_id: "watch_ev3",
+    source: "dlg_7Hk2",
+    watching: true,
+    events: ["communicate"],
+    replaced_existing: false,
+    fired: false,
+  };
+  expect(d.summary(watchItem(args, raw))).toContain("(every 3)");
+  const Body = d.body!;
+  render(<Body item={watchItem(args, raw)} live={false} />);
+  expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("(every 3)");
+});
+
+test("a successful-calls filter reads explicitly, not as a bare tool name (RoboRev PR #954, review 3)", () => {
+  const d = toolRendererFor("job_watch");
+  const args = { operation: "create", source: "dlg_7Hk2" };
+  const raw = {
+    watch_id: "watch_ok",
+    source: "dlg_7Hk2",
+    watching: true,
+    events: ["assistant.tool"],
+    event_filter: { tool_name: "read_file", status: "ok" },
+    replaced_existing: false,
+    fired: false,
+  };
+  expect(d.summary(watchItem(args, raw))).toContain("successful tool calls");
+  const Body = d.body!;
+  render(<Body item={watchItem(args, raw)} live={false} />);
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("ok");
+  expect(body).toContain("read_file");
+});
+
+test("every list row form expands a detail sentence; no expandable row is a no-op (RoboRev PR #954, review 3)", async () => {
+  const user = userEvent.setup();
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "list" },
+        {
+          watches: [
+            { watch_id: "watch_evonly", source: "self", watching: true, condition: "events: [communicate]" },
+            {
+              watch_id: "watch_okf",
+              source: "dlg_7Hk2",
+              watching: true,
+              condition: "events: [assistant.tool] where tool_name=read_file, status=ok",
+            },
+            { watch_id: "watch_hb", source: "job_a1b2", watching: true, condition: "progress_interval_ms: 120000" },
+          ],
+          count: 3,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const rows = screen.getAllByTestId("job-watch-row");
+  expect(rows).toHaveLength(3);
+  for (const [index, row] of rows.entries()) {
+    await user.click(row);
+    const details = screen.getAllByTestId("job-watch-row-detail");
+    expect(details).toHaveLength(index + 1);
+  }
+  const text = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(text).toContain("communicate");
+  expect(text).toContain("successful tool calls");
+  expect(text).toContain("every 2m");
+});
+
 test("absent structured state falls back to the raw footer text (RoboRev PR #954)", () => {
   const d = toolRendererFor("job_watch");
   const Body = d.body!;

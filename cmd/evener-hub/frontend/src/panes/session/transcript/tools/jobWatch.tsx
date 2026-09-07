@@ -138,28 +138,38 @@ function timerSpec(raw: JsonObject): TimerSpec | undefined {
 }
 
 // A condition watch's trigger: the output pattern, the heartbeat cadence
-// (progress_interval_ms from the wire), and the event-filter shape
+// (progress_interval_ms from the wire), the event list plus its every-Nth
+// throttle (RoboRev PR #954: `every: 3` fires on every third event, and
+// dropping it claims every event fires), and the event-filter shape
 // (assistant.tool errors on a delegate). Empty when the result names no
 // condition at all — a bare source watch the summary still names.
 interface ConditionSpec {
   outputMatch?: string;
   progressIntervalMS?: number;
   events: string[];
+  every?: number;
   filterToolName?: string;
   filterStatus?: string;
 }
 
-function conditionSpec(raw: JsonObject): ConditionSpec | undefined {
+function numArg(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+function conditionSpec(raw: JsonObject, args?: JsonObject): ConditionSpec | undefined {
   const outputMatch = strField(raw, "output_match");
   const progressIntervalMS = numField(raw, "progress_interval_ms");
   const events = strArrayField(raw, "events");
+  // `every` rides the create ARGS (DefJobWatch), not the result state —
+  // read args first, falling back to the raw in case a producer echoes it.
+  const every = (args ? numArg(args.every) : undefined) ?? numField(raw, "every");
   const filter = asJsonObject(raw.event_filter);
   const filterToolName = filter ? strField(filter, "tool_name") : undefined;
   const filterStatus = filter ? strField(filter, "status") : undefined;
   if (outputMatch === undefined && progressIntervalMS === undefined && events.length === 0 && !filter) {
     return undefined;
   }
-  return { outputMatch, progressIntervalMS, events, filterToolName, filterStatus };
+  return { outputMatch, progressIntervalMS, events, every, filterToolName, filterStatus };
 }
 
 // The heartbeat phrase a condition sentence ends with, if the watch carries
@@ -216,7 +226,7 @@ function jobWatchOperation(item: ItemModel, raw: JsonObject | undefined): string
   return "";
 }
 
-function summarizeCreate(raw: JsonObject): string {
+function summarizeCreate(raw: JsonObject, item: ItemModel): string {
   if (isTerminalCatchup(raw)) {
     const source = strField(raw, "source") ?? "";
     const status = strField(raw, "status");
@@ -246,7 +256,7 @@ function summarizeCreate(raw: JsonObject): string {
     return head ? `Reminds every ${cadence} · ${head}` : `Reminds every ${cadence}`;
   }
   const source = sourceLabel(strField(raw, "source"));
-  const condition = conditionSpec(raw);
+  const condition = conditionSpec(raw, asJsonObject(parseArgs(item.argumentsJSON)));
   if (!condition) return `Watch ${source}`;
   if (condition.outputMatch) {
     const suffix = cadenceSuffix(condition);
@@ -255,19 +265,28 @@ function summarizeCreate(raw: JsonObject): string {
       : `Watch ${source} for “${condition.outputMatch}”`;
   }
   if (condition.filterStatus || condition.filterToolName) {
-    // An event-filter watch names the failing shape in words ("failed tool
-    // calls"), never the raw filter keys.
-    const what =
-      condition.filterStatus === "error" ? "failed tool calls" : (condition.filterToolName ?? "matching events");
+    // An event-filter watch names the watched shape in words — both
+    // statuses explicitly (RoboRev PR #954: status "ok" was discarded).
+    // Never the raw filter keys.
+    const what = filterSummaryPhrase(condition);
     return `Watch ${source} for ${what}`;
   }
   if (condition.events.length > 0) {
     const suffix = cadenceSuffix(condition);
-    return suffix
-      ? `Watch ${source} for ${condition.events.join(", ")} ${suffix}`
-      : `Watch ${source} for ${condition.events.join(", ")}`;
+    const throttle = condition.every !== undefined ? ` (every ${condition.every})` : "";
+    const named = `${condition.events.join(", ")}${throttle}`;
+    return suffix ? `Watch ${source} for ${named} ${suffix}` : `Watch ${source} for ${named}`;
   }
   return `Watch ${source}`;
+}
+
+// filterSummaryPhrase names an event-filter watch's shape in words for
+// summaries: error and ok both explicit, tool named when present.
+function filterSummaryPhrase(condition: ConditionSpec): string {
+  const tool = condition.filterToolName ? ` on ${condition.filterToolName}` : "";
+  if (condition.filterStatus === "error") return `failed tool calls${tool}`;
+  if (condition.filterStatus === "ok") return `successful tool calls${tool}`;
+  return condition.filterToolName ?? "matching events";
 }
 
 interface WatchRow {
@@ -459,7 +478,7 @@ function jobWatchSummary(item: ItemModel): string {
       return id ? `Cleared ${clipJobID(id)}` : "Cleared watch";
     }
     default:
-      return summarizeCreate(raw);
+      return summarizeCreate(raw, item);
   }
 }
 
@@ -506,15 +525,26 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
     );
   }
   if (spec.filterStatus || spec.filterToolName) {
-    const ending =
+    // Both filter statuses read explicitly (RoboRev PR #954: status "ok"
+    // was discarded into a bare tool name). The tool rides along when
+    // present; the event name disambiguates in list/inspect context.
+    const tool = spec.filterToolName ? (
+      <>
+        {" "}
+        on <span className={CLASS.mono}>{spec.filterToolName}</span>
+      </>
+    ) : null;
+    const outcome =
       spec.filterStatus === "error" ? (
         <span>
           ending in <span className={CLASS.mono}>error</span>
         </span>
-      ) : spec.filterToolName ? (
+      ) : spec.filterStatus === "ok" ? (
         <span>
-          on <span className={CLASS.mono}>{spec.filterToolName}</span>
+          ending in <span className={CLASS.mono}>ok</span>
         </span>
+      ) : spec.filterToolName ? (
+        "matching"
       ) : (
         "matching"
       );
@@ -530,15 +560,18 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
       ) : null;
     return (
       <span>
-        Wakes you when <span className={CLASS.mono}>{source}</span> makes a tool call {ending}
+        Wakes you when <span className={CLASS.mono}>{source}</span> makes a tool call {outcome}
+        {tool}
         {eventName}.
       </span>
     );
   }
   if (spec.events.length > 0) {
+    const throttle = spec.every !== undefined ? ` (every ${spec.every})` : "";
     return (
       <span>
         Wakes you on <span className={CLASS.mono}>{spec.events.join(", ")}</span>
+        {throttle}
         {heartbeat ? `, ${heartbeat}` : ""}.
       </span>
     );
@@ -557,13 +590,13 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
   );
 }
 
-function CreateBody({ raw }: { raw: JsonObject }) {
+function CreateBody({ raw, item }: { raw: JsonObject; item: ItemModel }) {
   if (isTerminalCatchup(raw)) return null;
   const timer = timerSpec(raw);
   if (timer?.note) return <NoteSection note={timer.note} />;
   if (timer) return null;
   const source = sourceLabel(strField(raw, "source"));
-  const condition = conditionSpec(raw);
+  const condition = conditionSpec(raw, asJsonObject(parseArgs(item.argumentsJSON)));
   if (!condition) return null;
   return (
     <div className={CLASS.section}>
@@ -608,23 +641,40 @@ function WatchRow({ row }: { row: WatchRow }) {
 }
 
 // rowDetailPhrase renders the expanded sentence behind a tapped list row:
-// the row's condition plus its deliveries/created context when the raw
-// carries them (inspect-equivalent detail; list entries may omit them).
+// the row's condition plus its deliveries context when the raw carries it.
+// Every supported form renders — an expandable row must never be a no-op
+// (RoboRev PR #954).
 function rowDetailPhrase(row: WatchRow): string | undefined {
   if (!row.watching || !row.condition) return undefined;
   const parsed = parseConditionText(row.condition);
   const source = sourceLabel(row.source);
+  const deliveries =
+    row.deliveries !== undefined ? ` — ${row.deliveries} of ${WATCH_DELIVERY_BUDGET} deliveries used` : "";
   if (parsed.outputMatch) {
     const heartbeat =
       parsed.progressIntervalMS !== undefined
         ? `, heartbeat ${humanizeInterval(parsed.progressIntervalMS / 1000)}`
         : "";
-    const deliveries =
-      row.deliveries !== undefined ? ` — ${row.deliveries} of ${WATCH_DELIVERY_BUDGET} deliveries used` : "";
     return `Watching ${source} for “${parsed.outputMatch}”${heartbeat}${deliveries}.`;
   }
-  if (parsed.afterSeconds !== undefined) return `Reminds ${humanizeSeconds(parsed.afterSeconds)}.`;
-  if (parsed.repeatSeconds !== undefined) return `Reminds ${humanizeInterval(parsed.repeatSeconds)}.`;
+  if (parsed.afterSeconds !== undefined) return `Reminds ${humanizeSeconds(parsed.afterSeconds)}${deliveries}.`;
+  if (parsed.repeatSeconds !== undefined) return `Reminds ${humanizeInterval(parsed.repeatSeconds)}${deliveries}.`;
+  const bits: string[] = [];
+  if (parsed.events.length > 0) {
+    const names = parsed.events.includes("*") ? "any event" : parsed.events.join(", ");
+    bits.push(parsed.every !== undefined ? `${names} every ${parsed.every}` : names);
+  }
+  if (parsed.filterToolName || parsed.filterStatus) {
+    if (parsed.filterStatus === "error")
+      bits.push(`failed tool calls${parsed.filterToolName ? ` on ${parsed.filterToolName}` : ""}`);
+    else if (parsed.filterStatus === "ok")
+      bits.push(`successful tool calls${parsed.filterToolName ? ` on ${parsed.filterToolName}` : ""}`);
+    else bits.push(`calls on ${parsed.filterToolName ?? "?"}`);
+  }
+  if (parsed.progressIntervalMS !== undefined) {
+    bits.push(`heartbeat ${humanizeInterval(parsed.progressIntervalMS / 1000)}`);
+  }
+  if (bits.length > 0) return `Watches ${source}: ${bits.join(" · ")}${deliveries}.`;
   return undefined;
 }
 
@@ -744,6 +794,7 @@ function InspectBody({ raw }: { raw: JsonObject }) {
             source={source}
             spec={{
               events: parsed.events,
+              every: parsed.every,
               progressIntervalMS: parsed.progressIntervalMS,
               filterToolName: parsed.filterToolName,
               filterStatus: parsed.filterStatus,
@@ -800,7 +851,7 @@ function JobWatchBody(props: ToolRenderProps) {
       if (timer && !timer.note) return null;
       return (
         <div className={CLASS.card} data-testid="job-watch-body">
-          <CreateBody raw={raw} />
+          <CreateBody raw={raw} item={item} />
         </div>
       );
     }
