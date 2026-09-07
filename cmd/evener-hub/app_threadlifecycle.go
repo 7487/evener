@@ -375,14 +375,25 @@ func hubThreadResume(ctx context.Context, cfg hubcore.WebConfig, sources *appsou
 		return appwire.ThreadResumeResponse{}, appwire.HubLaunchError(resumeFailureError(ctx, cfg, sessionID, err).Error())
 	}
 	if cfg.Roster != nil {
-		if err := hubRosterRefresh(ctx, cfg.Roster); err != nil {
-			if entry.Protocol != appwire.ProtocolVersion || entry.Endpoint == "" || entry.ThreadID == "" {
-				return appwire.ThreadResumeResponse{}, appwire.Unavailable(err.Error())
+		refreshErr := hubRosterRefresh(ctx, cfg.Roster)
+		if entry.Protocol == appwire.ProtocolVersion && entry.Endpoint != "" && entry.ThreadID != "" && !cfg.Roster.HasConfirmedEntry(entry) {
+			// A successful scan can still miss an owner whose status probe
+			// failed. Confirm the exact spawned endpoint through its read before
+			// relying on the shared roster for subsequent requests.
+			source := appsource.NewLocalDaemonSource("local", func() []rendezvous.Entry {
+				return []rendezvous.Entry{entry}
+			}, nil)
+			read, err := cfg.Roster.ReadSpawnedThread(ctx, entry, func(ctx context.Context) (appwire.ThreadReadResponse, error) {
+				return source.ReadThread(ctx, appwire.ThreadReadParams{Ref: localSpawnWorkspaceRef(entry)})
+			})
+			if err != nil {
+				return appwire.ThreadResumeResponse{}, appwire.Unavailable(errors.Join(refreshErr, err).Error())
 			}
-			if confirmErr := cfg.Roster.RefreshEntry(ctx, entry); confirmErr != nil {
-				return appwire.ThreadResumeResponse{}, appwire.Unavailable(errors.Join(err, confirmErr).Error())
-			}
-			fmt.Fprintf(os.Stderr, "[hub] resumed session %s; roster refresh failed: %v\n", entry.ThreadID, err)
+			annotateThreadProjects([]appwire.Thread{read.Thread})
+			return appwire.ThreadResumeResponse{Thread: read.Thread}, nil
+		}
+		if refreshErr != nil && !cfg.Roster.HasConfirmedEntry(entry) {
+			return appwire.ThreadResumeResponse{}, appwire.Unavailable(refreshErr.Error())
 		}
 	}
 	return hubResumedThreadResponse(ctx, sources, entry.SessionID, entry.ThreadID)

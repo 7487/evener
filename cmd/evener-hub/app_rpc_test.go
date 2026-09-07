@@ -9184,6 +9184,83 @@ func TestHubRPCThreadResumeSpawnsAndReadsDaemon(t *testing.T) {
 	}
 }
 
+func TestHubRPCThreadResumeConfirmsSpawnAfterDiscoveryFailure(t *testing.T) {
+	for _, fault := range []string{"status", "listing", "confirmed", "read", "identity"} {
+		t.Run(fault, func(t *testing.T) {
+			const sessionID = "resumed-owner"
+			daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
+			appserver.HandleTyped(daemon.Router(), appwire.MethodThreadList, func(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+				if fault == "confirmed" {
+					return appwire.ThreadListResponse{Data: []appwire.Thread{{ID: sessionID, SessionID: sessionID, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}}}, nil
+				}
+				return appwire.ThreadListResponse{}, appwire.Unavailable("inventory unavailable")
+			})
+			appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(context.Context, appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+				if fault == "read" {
+					return appwire.ThreadReadResponse{}, appwire.Unavailable("read unavailable")
+				}
+				id := sessionID
+				if fault == "identity" {
+					id = "different-owner"
+				}
+				return appwire.ThreadReadResponse{Thread: appwire.Thread{ID: id, SessionID: id, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}}, nil
+			})
+			appserver.HandleTyped(daemon.Router(), appwire.MethodTurnStart, func(context.Context, appwire.TurnStartParams) (appwire.TurnStartResponse, error) {
+				return appwire.TurnStartResponse{Turn: appwire.Turn{ID: "delivered"}}, nil
+			})
+			peer := httptest.NewServer(http.HandlerFunc(daemon.ServeWebSocket))
+			defer peer.Close()
+			runDir := t.TempDir()
+			roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+			entry := rendezvous.Entry{PID: os.Getpid(), Protocol: appwire.ProtocolVersion, Endpoint: "ws" + strings.TrimPrefix(peer.URL, "http"), SourceID: "local", ThreadID: sessionID, SessionID: sessionID}
+			spawns := 0
+			spawner := &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				spawns++
+				writeRendezvous(t, runDir, entry)
+				if fault == "confirmed" {
+					roster.Refresh()
+				}
+				if fault == "listing" || fault == "confirmed" {
+					if err := os.WriteFile(filepath.Join(runDir, "1.json"), []byte("{"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return entry, nil
+			}}
+			hub := newHubRPCTestServer(t, hubcore.WebConfig{RunDir: runDir, Roster: roster, Spawner: spawner, ResumeLocks: hubcore.NewResumeLocks()})
+			defer hub.Close()
+			client := dialHubRPC(t, hub)
+			defer client.Close()
+			if _, err := client.Initialize(context.Background(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.ThreadResume(context.Background(), appwire.ThreadResumeParams{Session: sessionID})
+			if spawns != 1 {
+				t.Fatalf("spawns=%d", spawns)
+			}
+			if fault == "read" || fault == "identity" {
+				if err == nil || roster.HasConfirmedEntry(entry) {
+					t.Fatalf("unverified owner admitted: error=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Thread.ID != sessionID || !roster.HasConfirmedEntry(entry) {
+				t.Fatalf("resume did not publish owner: %+v", response.Thread)
+			}
+			if _, err := client.ThreadRead(context.Background(), appwire.ThreadReadParams{Ref: "local:" + sessionID}); err != nil {
+				t.Fatal(err)
+			}
+			turn, err := client.TurnStart(context.Background(), appwire.TurnStartParams{Ref: "local:" + sessionID, ClientMutationID: "resume-followup", ExpectedInstanceID: sessionID, Input: []appwire.InputItem{{Type: "text", Text: "continue"}}})
+			if err != nil || turn.Turn.ID != "delivered" {
+				t.Fatalf("followup=%+v error=%v", turn, err)
+			}
+		})
+	}
+}
+
 func TestHubRPCSubscribedReadRefreshesReplacedDaemonOwnership(t *testing.T) {
 	root := t.TempDir()
 	sessionID := buildRPCParentSession(t, filepath.Join(root, "projects", "upgrade-0000000000"))
