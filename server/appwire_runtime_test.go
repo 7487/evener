@@ -1429,6 +1429,26 @@ func TestDescendantReadDoesNotClaimDurableMutationAuthority(t *testing.T) {
 	srv.RecordDescendantAppEvent("root", events.SessionEvent{
 		Kind: events.EventUserInput, SessionID: "child", Data: events.UserInputData{Text: "child work"},
 	})
+	srv.RecordDescendantAppEvent("root", events.SessionEvent{
+		Kind: events.EventSessionStart, SessionID: "child", Data: events.SessionStartData{},
+	})
+	started := false
+	for _, notification := range srv.AppNotificationsAfter(0, "child") {
+		if notification.Notification.Method != appwire.NotifyThreadStarted {
+			continue
+		}
+		var params appwire.ThreadStartedParams
+		if err := json.Unmarshal(notification.Notification.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		if params.Thread.Evener.ParentRef != "local:root" {
+			t.Fatalf("started owner = %q", params.Thread.Evener.ParentRef)
+		}
+		started = true
+	}
+	if !started {
+		t.Fatal("child start was not published")
+	}
 	peer := httptest.NewServer(http.HandlerFunc(srv.AppServer().ServeWebSocket))
 	defer peer.Close()
 	transport, err := appwire.DialWebSocket(t.Context(), "ws"+strings.TrimPrefix(peer.URL, "http"), peer.Client())
@@ -1446,6 +1466,9 @@ func TestDescendantReadDoesNotClaimDurableMutationAuthority(t *testing.T) {
 			response, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: "local:child", IncludeTurns: includeTurns, Subscribe: subscribe, ItemLimit: 1})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if response.Thread.Evener.ParentRef != "local:root" {
+				t.Fatalf("descendant owner = %q", response.Thread.Evener.ParentRef)
 			}
 			if response.Thread.ID != "child" || response.Thread.Evener.MutationStateAuthoritative {
 				t.Fatalf("descendant subscribe=%v turns=%v thread=%+v", subscribe, includeTurns, response.Thread)

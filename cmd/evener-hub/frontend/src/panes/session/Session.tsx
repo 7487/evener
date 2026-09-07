@@ -109,10 +109,12 @@ function RestartRequiredNotice({
   sessionRef,
   resumeRequired = false,
   unloaded,
+  ownerRef,
 }: {
   sessionRef: string;
   resumeRequired?: boolean;
   unloaded: boolean;
+  ownerRef?: string;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,15 +136,20 @@ function RestartRequiredNotice({
   };
   return (
     <div role="alert">
-      {resumeRequired
-        ? "Resume this session before continuing. Any uncertain messages will be checked before sending."
-        : "Session restart required. Stop the older daemon, then refresh this session. Stopping interrupts active work."}
+      {ownerRef
+        ? "This session is retained by its owning session. Its uncertain messages cannot be checked here until the owner releases it."
+        : resumeRequired
+          ? "Resume this session before continuing. Any uncertain messages will be checked before sending."
+          : "Session restart required. Stop the older daemon, then refresh this session. Stopping interrupts active work."}
+      {ownerRef && <a href={paneToURL("session", { ref: ownerRef }) ?? undefined}>Open owning session</a>}
       <Button disabled={refreshing} onClick={() => void refresh()}>
         {resumeRequired ? "Resume session" : "Refresh session"}
       </Button>
-      {sessionRef.startsWith("local:") && (!resumeRequired || (unloaded && (refreshing || error !== null))) && (
-        <SessionForceStopRecovery sessionRef={sessionRef} />
-      )}
+      {!ownerRef &&
+        sessionRef.startsWith("local:") &&
+        (!resumeRequired || (unloaded && (refreshing || error !== null))) && (
+          <SessionForceStopRecovery sessionRef={sessionRef} />
+        )}
       {error && <span>{error}</span>}
     </div>
   );
@@ -381,6 +388,14 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
     );
   }
 
+  const recoveryOwnerRef =
+    !mutationStateAuthoritative &&
+    model.status.type !== "notLoaded" &&
+    model.status.type !== "restartRequired" &&
+    model.parentRef?.startsWith("local:")
+      ? model.parentRef
+      : undefined;
+
   const cadence = <Cadence state={cadenceStateForStatus(model.status.type)} frameTimes={frameTimes} now={now} />;
 
   const transcriptContent = (
@@ -472,19 +487,19 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
               (blockedMutations.length > 0 && (model.status.type === "notLoaded" || !mutationStateAuthoritative))) && (
               <RestartRequiredNotice
                 sessionRef={ref}
-                resumeRequired={model.status.type !== "restartRequired"}
+                ownerRef={recoveryOwnerRef}
+                resumeRequired={model.status.type !== "restartRequired" && !recoveryOwnerRef}
                 unloaded={model.status.type === "notLoaded"}
               />
             )}
             {ref.startsWith("local:") &&
+              !recoveryOwnerRef &&
               !navigationSummaryFor(ref, navigation) &&
               model.status.type !== "restartRequired" &&
               model.status.type !== "notLoaded" &&
               model.status.type !== "closed" && <SessionForceStopRecovery sessionRef={ref} />}
             {reconciliationFailed && (
-              <div role="alert">
-                Message recovery is waiting for browser storage. Sending will resume after recovery succeeds.
-              </div>
+              <div role="alert">Message recovery has not completed. Sending will resume after recovery succeeds.</div>
             )}
             <PendingChips sessionRef={ref} />
             <Composer ref={ref} />

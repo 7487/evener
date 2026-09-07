@@ -2329,7 +2329,7 @@ test.each(["notLoaded", "active", "idle"])(
   },
 );
 
-test("keeps storage recovery failure visible on a compatible session until reconciliation succeeds", async () => {
+test("keeps recovery failure visible on a compatible session until reconciliation succeeds", async () => {
   const fake = connectFakeClient();
   fake.on("thread/read", () => readResponse("ref_a", { status: { type: "idle" } }));
   render(
@@ -2339,52 +2339,60 @@ test("keeps storage recovery failure visible on a compatible session until recon
   );
   await waitFor(() => expect(threadsStore.getState().threads.get("ref_a")?.status.type).toBe("idle"));
   act(() => threadsStore.setState({ mutationReconciliationFailures: new Set(["ref_a"]) }));
-  expect((await screen.findByRole("alert")).textContent).toContain("Message recovery is waiting for browser storage");
+  expect(await screen.findByRole("alert")).toBeTruthy();
   act(() => threadsStore.setState({ mutationReconciliationFailures: new Set() }));
-  expect(screen.queryByText(/Message recovery is waiting for browser storage/)).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 
-test.each(["active", "idle"])(
-  "reload of a %s delegate offers recovery for a persisted uncertain send",
-  async (status) => {
-    const mutationId = await seedPendingSend();
-    await mutationStorage.markUnknown(mutationId, "blockedUnknown");
-    const fake = connectFakeClient();
-    let resumed = false;
-    fake.on("thread/read", () =>
-      readResponse("ref_a", {
-        status: { type: status },
-        evener: {
-          ref: "ref_a",
-          capabilities: CAPABILITIES,
-          kind: "subagent",
-          mutationStateAuthoritative: resumed,
-          queue: { revision: 1, clientMutationIds: resumed ? [mutationId] : [] },
-        },
-      }),
-    );
-    fake.on("thread/resume", () => {
-      resumed = true;
-      return readResponse("ref_a", { status: { type: status } });
-    });
-    render(
-      <ClientProvider client={fake}>
-        <Session params={{ ref: "ref_a" }} paneId="p1" focused={true} />
-      </ClientProvider>,
-    );
-    const resume = await screen.findByRole("button", { name: "Resume session" });
-    expect(threadsStore.getState().restartBlockingObligations.size).toBe(0);
-    expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(false);
-    expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown");
-    expect(fake.calls.filter((call) => call.method === "thread/resume" || call.method === "turn/start")).toHaveLength(
-      0,
-    );
-    fireEvent.click(resume);
-    await waitFor(async () => expect(await mutationStorage.getOutbox(mutationId)).toBeUndefined());
-    expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
-    expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
-  },
-);
+test.each(["active", "idle"])("retained %s child preserves uncertainty until its owner releases it", async (status) => {
+  const mutationId = await seedPendingSend("local:retained-child");
+  await mutationStorage.markUnknown(mutationId, "blockedUnknown");
+  const fake = connectFakeClient();
+  let resumed = false;
+  let owned = true;
+  fake.on("thread/read", () =>
+    readResponse("local:retained-child", {
+      status: { type: resumed ? "idle" : owned ? status : "notLoaded" },
+      evener: {
+        ref: "local:retained-child",
+        capabilities: CAPABILITIES,
+        kind: "subagent",
+        parentRef: owned ? "local:parent" : undefined,
+        mutationStateAuthoritative: resumed,
+        queue: { revision: 1, clientMutationIds: resumed ? [mutationId] : [] },
+      },
+    }),
+  );
+  fake.on("thread/resume", () => {
+    resumed = true;
+    return readResponse("local:retained-child", { status: { type: status } });
+  });
+  render(
+    <ClientProvider client={fake}>
+      <Session params={{ ref: "local:retained-child" }} paneId="p1" focused={true} />
+    </ClientProvider>,
+  );
+  const refresh = await screen.findByRole("button", { name: "Refresh session" });
+  expect(screen.queryByRole("button", { name: "Resume session" })).toBeNull();
+  expect(screen.getByRole("link", { name: "Open owning session" }).getAttribute("href")).toContain("parent");
+  expect(threadsStore.getState().restartBlockingObligations.size).toBe(0);
+  expect(threadsStore.getState().mutationAuthorityRefs.has("local:retained-child")).toBe(false);
+  expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown");
+  expect(fake.calls.filter((call) => call.method === "thread/resume" || call.method === "turn/start")).toHaveLength(0);
+  fireEvent.click(refresh);
+  await waitFor(() => expect((refresh as HTMLButtonElement).disabled).toBe(false));
+  expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown");
+  expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+  expect(screen.queryByRole("button", { name: /Force stop/ })).toBeNull();
+  owned = false;
+  fireEvent.click(refresh);
+  const resume = await screen.findByRole("button", { name: "Resume session" });
+  await waitFor(() => expect((resume as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(resume);
+  await waitFor(async () => expect(await mutationStorage.getOutbox(mutationId)).toBeUndefined());
+  expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+  expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
+});
 
 test.each(["idle", "active"])(
   "hydrated %s session keeps recovery when subsequent reads stall without navigation",

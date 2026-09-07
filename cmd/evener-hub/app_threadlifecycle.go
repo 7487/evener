@@ -371,6 +371,15 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 		}
 		return appwire.ThreadResumeResponse{}, appwire.Unavailable(discoveryErr.Error())
 	}
+	owner, _, err := lookupDaemonOwner(ctx, cfg, "", sessionID, true)
+	if err != nil {
+		return appwire.ThreadResumeResponse{}, appwire.Unavailable(err.Error())
+	}
+	if owner.SessionID != "" {
+		if _, directlyOwned := liveDaemonForThread(cfg.Roster, sessionID); !directlyOwned {
+			return appwire.ThreadResumeResponse{}, appwire.Unavailable("session is retained by " + localAppRef(owner.SessionID) + "; open the owning session or refresh after it stops")
+		}
+	}
 	if cfg.Spawner == nil {
 		return appwire.ThreadResumeResponse{}, appwire.Unavailable("spawner not configured")
 	}
