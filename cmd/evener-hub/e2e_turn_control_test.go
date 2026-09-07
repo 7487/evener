@@ -619,8 +619,9 @@ func startHubStackOnProvider(t *testing.T, providersTOML, model string) hubStack
 }
 
 // startHubStackOnProviderWithEvener is startHubStackOnProvider with the
-// evener binary left to the caller, so a test can run the hub from an
-// installed snapshot (e.g. from install.sh) instead of a repo build.
+// evener binary left to the caller, so a test can run the hub from a
+// purpose-built binary (e.g. a snapshot-channel build of this branch)
+// instead of the repo build liveStackBinaries produces.
 func startHubStackOnProviderWithEvener(t *testing.T, providersTOML, model, evenerBin string) hubStack {
 	t.Helper()
 
