@@ -1141,7 +1141,7 @@ func (p *changedOwnershipProber) Probe(rendezvous.Entry) hubcore.ProbeResult {
 func TestHubRPCListShowsIncompatibleDaemonWithoutPastIndex(t *testing.T) {
 	const sessionID = "unindexed-owner"
 	runDir := t.TempDir()
-	entry := rendezvous.Entry{PID: os.Getpid(), Protocol: "evener-appwire-v4", Endpoint: protocolMismatchPeer(t), SourceID: "local", ThreadID: sessionID, SessionID: sessionID}
+	entry := rendezvous.Entry{PID: os.Getpid(), Protocol: "evener-appwire-v4", Endpoint: protocolMismatchPeer(t), SourceID: "local", ThreadID: sessionID, SessionID: sessionID, WorkspaceRef: "local:unindexed-saved"}
 	writeRendezvous(t, runDir, entry)
 	roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
 	roster.Refresh()
@@ -1162,6 +1162,19 @@ func TestHubRPCListShowsIncompatibleDaemonWithoutPastIndex(t *testing.T) {
 	thread := list.Data[0]
 	if thread.ID != sessionID || thread.Status.Type != appwire.ThreadStatusRestartRequired || thread.Evener.Capabilities != (appwire.ThreadCapabilities{}) {
 		t.Fatalf("thread=%+v", thread)
+	}
+	for _, params := range []appwire.ThreadReadParams{
+		{Ref: "local:" + sessionID, IncludeTurns: true},
+		{Ref: entry.WorkspaceRef, IncludeTurns: true, Subscribe: true},
+		{ThreadID: sessionID, IncludeTurns: true, Subscribe: true},
+	} {
+		read, err := client.ThreadRead(t.Context(), params)
+		if err != nil {
+			t.Fatalf("read visible incompatible owner (%+v): %v", params, err)
+		}
+		if read.Thread.ID != sessionID || read.Thread.Evener.Ref != entry.WorkspaceRef || read.Thread.Status.Type != appwire.ThreadStatusRestartRequired || read.Thread.Evener.Capabilities != (appwire.ThreadCapabilities{}) || len(read.Thread.Turns) != 0 {
+			t.Fatalf("read=%+v", read)
+		}
 	}
 	if err := client.ThreadShutdown(t.Context(), appwire.ThreadShutdownParams{Ref: "local:" + sessionID}); !isDaemonRestartRequiredError(err) {
 		t.Fatalf("shutdown error=%v", err)

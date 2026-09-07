@@ -260,6 +260,13 @@ func newHubAppServerWithNavigationAndTrace(cfg hubcore.WebConfig, sources *appso
 					if past, pastOK := pastEntryForRead(cfg, params); pastOK && past.ID != "" {
 						return appserver.SubscriptionAdmissionResolution{Key: "local:" + past.ID, Intent: appserver.SubscriptionAdmissionResolved}
 					}
+					if owner, required, ownershipErr := restartRequiredDaemon(context.Background(), cfg, params.Ref, params.ThreadID); ownershipErr == nil && required {
+						key := localSpawnWorkspaceRef(owner.Entry)
+						if key == "" {
+							key = localAppRef(owner.SessionID)
+						}
+						return appserver.SubscriptionAdmissionResolution{Key: key, Intent: appserver.SubscriptionAdmissionResolved}
+					}
 				}
 				if err != nil {
 					if msg.Request.Method == appwire.MethodThreadUnsubscribe {
@@ -398,7 +405,7 @@ func registerThreadHandlers(
 			if isTargetDeletedError(err) {
 				return appwire.ThreadReadResponse{}, err
 			}
-			resp, ok, pastErr := pastThreadReadResponse(ctx, cfg, params)
+			resp, ok, pastErr := unavailableThreadReadResponse(ctx, cfg, sources, params)
 			if pastErr != nil {
 				return appwire.ThreadReadResponse{}, pastErr
 			}
@@ -423,7 +430,7 @@ func registerThreadHandlers(
 				}
 			}
 			if allowPast {
-				saved, ok, pastErr := pastThreadReadResponse(ctx, cfg, params)
+				saved, ok, pastErr := unavailableThreadReadResponse(ctx, cfg, sources, params)
 				if pastErr != nil {
 					return appwire.ThreadReadResponse{}, pastErr
 				}
