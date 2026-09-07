@@ -8406,6 +8406,19 @@ test.each(["active", "idle"].flatMap((status) => [true, false].map((accepted) =>
         attachments: [],
         optimisticDisplay: { text: "sentinel" },
       });
+      const settled = deferred<void>();
+      const settleApplied = storage.settleApplied.bind(storage);
+      vi.spyOn(storage, "settleApplied").mockImplementation(async (...args) => {
+        const result = await settleApplied(...args);
+        if (args[0] === record.clientMutationId && result) settled.resolve();
+        return result;
+      });
+      const settleReceipt = storage.settleReceipt.bind(storage);
+      vi.spyOn(storage, "settleReceipt").mockImplementation(async (...args) => {
+        const result = await settleReceipt(...args);
+        if (args[0] === record.clientMutationId) settled.resolve();
+        return result;
+      });
       setMutationStorageForTests(storage);
       const fake = connectFakeClient("connecting");
       let recovered = false;
@@ -8422,9 +8435,8 @@ test.each(["active", "idle"].flatMap((status) => [true, false].map((accepted) =>
       expect((await storage.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
       recovered = true;
       await vi.advanceTimersByTimeAsync(2000);
-      await flushIndexedDBUntil(() => threadsStore.getState().mutationAuthorityRefs.has("ref_a"));
-      await settleCallerContinuations();
-      if (!accepted) await flushIndexedDBUntil(() => fake.calls.some((call) => call.method === "turn/queue"));
+      await settled.promise;
+      expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(true);
       expect(await storage.getOutbox(record.clientMutationId)).toBeUndefined();
       expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(accepted ? 0 : 1);
     } finally {
