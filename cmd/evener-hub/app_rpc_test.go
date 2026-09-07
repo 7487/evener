@@ -9275,6 +9275,10 @@ func TestHubRPCSessionActionsRefreshReplacedDaemonOwnership(t *testing.T) {
 	}
 }
 
+func TestHubRPCTurnStartRefreshesReplacedDaemonBeforeRelay(t *testing.T) {
+	testHubSubscribedReadReplacedOwner(t, true, appwire.MethodTurnStart)
+}
+
 func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool, method string) {
 	root := t.TempDir()
 	sessionID := buildRPCParentSession(t, filepath.Join(root, "projects", "upgrade-0000000000"))
@@ -9326,6 +9330,10 @@ func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool, method 
 	if method != appwire.MethodThreadRead {
 		params := map[string]any{"ref": "local:" + sessionID}
 		switch method {
+		case appwire.MethodTurnStart:
+			params["clientMutationId"] = "replacement-send"
+			params["expectedInstanceId"] = sessionID
+			params["input"] = []appwire.InputItem{{Type: "text", Text: "keep this message"}}
 		case appwire.MethodThreadModelSet:
 			params["modelProvider"], params["model"] = "test", "test-model"
 		case appwire.MethodThreadVisionModelSet:
@@ -9337,6 +9345,16 @@ func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool, method 
 		err := client.Request(context.Background(), method, params, &response)
 		if !isDaemonRestartRequiredError(err) {
 			t.Fatalf("error=%v", err)
+		}
+		if method == appwire.MethodTurnStart {
+			var wire appwire.WireError
+			if !errors.As(err, &wire) {
+				t.Fatal(err)
+			}
+			data, ok := wire.Data.(map[string]any)
+			if !ok || data["clientMutationId"] != "replacement-send" || data["mutationOutcome"] != "unknown" || data["retryDisposition"] != "blocked" {
+				t.Fatalf("mutation outcome=%+v", wire.Data)
+			}
 		}
 		return
 	}

@@ -1698,6 +1698,11 @@ func newHubRelayFunctions(server *appserver.Server, cfg hubcore.WebConfig, sourc
 					return appwire.TurnStartResponse{}, fenceErr
 				}
 			}
+			if daemonOwnershipMayHaveChanged(err) {
+				if restartErr := refreshDaemonRestartRequiredError(ctx, cfg, params.Ref, params.ThreadID, params.ClientMutationID); restartErr != nil {
+					return appwire.TurnStartResponse{}, restartErr
+				}
+			}
 			return appwire.TurnStartResponse{}, err
 		}
 		return withDeletionTargetOwnership(ctx, cfg, params.Ref, params.ThreadID, params.ClientMutationID, func() (appwire.TurnStartResponse, error) {
