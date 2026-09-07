@@ -5,6 +5,7 @@ package selfupdate
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -24,20 +25,8 @@ func TestRestartHelper(t *testing.T) {
 			os.Exit(3)
 		}
 	}
-	os.Stdout.WriteString("pid=" + itoa(os.Getpid()) + " argv=" + strings.Join(os.Args[1:], " ") + "\n")
+	os.Stdout.WriteString("pid=" + strconv.Itoa(os.Getpid()) + " argv=" + strings.Join(os.Args[1:], " ") + "\n")
 	os.Exit(0)
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 func TestRestartKeepsPIDAndPassesArgs(t *testing.T) {
@@ -50,7 +39,7 @@ func TestRestartKeepsPIDAndPassesArgs(t *testing.T) {
 	if cmd.Process == nil {
 		t.Fatal("no process")
 	}
-	want := "pid=" + itoa(cmd.Process.Pid) + " argv=-test.run=TestRestartHelper hub -addr 127.0.0.1:0\n"
+	want := "pid=" + strconv.Itoa(cmd.Process.Pid) + " argv=-test.run=TestRestartHelper hub -addr 127.0.0.1:0\n"
 	if string(out) != want {
 		t.Fatalf("helper output = %q, want %q", out, want)
 	}
