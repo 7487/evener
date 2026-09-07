@@ -106,6 +106,22 @@ func TestCheckRejectsUnknownChannel(t *testing.T) {
 	}
 }
 
+func TestCheckReleaseEmptyTagNameErrors(t *testing.T) {
+	server, _ := fakeGitHub(t, "", "0123456789abcdef0123456789abcdef01234567", http.StatusOK)
+	_, err := Check(t.Context(), CheckOptions{Channel: "release", CurrentSHA: "0123456", APIURL: server.URL})
+	if err == nil || !strings.Contains(err.Error(), "tag_name") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCheckEmptyCommitSHAErrors(t *testing.T) {
+	server, _ := fakeGitHub(t, "", "", http.StatusOK)
+	_, err := Check(t.Context(), CheckOptions{Channel: "snapshot", CurrentSHA: "abc", APIURL: server.URL})
+	if err == nil || !strings.Contains(err.Error(), "resolved to no commit") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestCheckUsesRepoURLOwnerAndName(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
