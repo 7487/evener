@@ -975,10 +975,11 @@ func (s *LocalDaemonSource) threadFromEntry(item LocalDaemonEntry) appwire.Threa
 		thread.Evener.Diagnostics = &appwire.EvenerDiagnostics{Jobs: cloneLocalDaemonJobs(jobs)}
 	}
 	if item.ReadOnlyAlias {
+		thread.Evener.Ref = appwire.Ref{SourceID: s.sourceID, ThreadID: threadID}.String()
 		thread.Evener.Capabilities = appwire.ThreadCapabilities{}
 		thread.Evener.Kind = "subagent"
 		if item.OwnerSessionID != "" {
-			thread.Evener.ParentRef = appwire.Ref{SourceID: s.sourceID, ThreadID: item.OwnerSessionID}.String()
+			thread.Evener.ParentRef = localDaemonWorkspaceRef(s.sourceID, item.Entry, item.OwnerSessionID)
 		}
 	}
 	return thread
