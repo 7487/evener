@@ -604,3 +604,45 @@ func TestSessionDeleteRefreshesRosterAndBustsTreeMemo(t *testing.T) {
 		t.Fatalf("events=%v, want the roster refreshed before PokeAttention", events)
 	}
 }
+
+func TestSessionDeletePreservesUnconfirmedDaemonState(t *testing.T) {
+	for _, identity := range []string{"known", "unidentified"} {
+		t.Run(identity, func(t *testing.T) {
+			root := t.TempDir()
+			stateDir := filepath.Join(root, "projects", "delete-uncertain-0123456789")
+			writeSession(t, stateDir, webTestSessionID, root)
+			past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+			if _, err := past.Rebuild(); err != nil {
+				t.Fatal(err)
+			}
+			runDir := t.TempDir()
+			entry := rendezvous.Entry{PID: os.Getpid(), SessionID: webTestSessionID, ThreadID: webTestSessionID}
+			if identity == "unidentified" {
+				entry.SessionID = ""
+				entry.ThreadID = ""
+			}
+			writeRendezvous(t, runDir, entry)
+			roster := hubcore.NewRoster(runDir, &fakeProber{shouldFail: true})
+			roster.Refresh()
+			if len(roster.UnconfirmedEntries()) != 1 {
+				t.Fatal("missing unconfirmed claim")
+			}
+			web := NewWebServer(hubcore.WebConfig{Past: past, Roster: roster, RunDir: runDir})
+			response, err := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(webTestSessionID)})
+			if len(response.Deleted) > 0 {
+				t.Fatalf("deleted an unconfirmed live session: %+v", response)
+			}
+			if _, statErr := os.Stat(filepath.Join(stateDir, "sessions", webTestSessionID+".meta.json")); statErr != nil {
+				t.Fatalf("session state removed despite unconfirmed owner: %v (response error: %v)", statErr, err)
+			}
+			if err := rendezvous.Remove(runDir, entry.PID); err != nil {
+				t.Fatal(err)
+			}
+			roster.Refresh()
+			response, err = dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(webTestSessionID)})
+			if err != nil || len(response.Deleted) != 1 {
+				t.Fatalf("deletion stayed blocked after ownership cleared: response=%+v error=%v", response, err)
+			}
+		})
+	}
+}

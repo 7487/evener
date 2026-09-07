@@ -43,13 +43,16 @@ var (
 	// 8at6): a retained crash marker (LiveEntry.Crashed=true, written by
 	// hubcore.Roster.Refresh only once a daemon's PID is confirmed gone) is
 	// historical error state, not a live daemon, and must not block deletion.
-	// A reachable daemon and a live PID whose status probe merely timed out
-	// both carry Crashed=false, so they still block it. Used at both the
+	// Confirmed live daemons and unresolved live-process claims block it;
+	// a failed first probe cannot authorize deletion. Used at both the
 	// whole-project entry preflight and the per-session ownership re-check
 	// below, so the TOCTOU protection applies the same rule at both sites.
 	projectSessionLive = func(roster *hubcore.Roster, id string) bool {
-		entry, ok := roster.Find(id)
-		return ok && !entry.Crashed
+		if unconfirmedDaemonForThread(roster, id) {
+			return true
+		}
+		_, live := liveDaemonForThread(roster, id)
+		return live
 	}
 )
 
