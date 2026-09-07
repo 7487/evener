@@ -3,12 +3,18 @@ package hub
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/buildinfo"
+	"primeradiant.com/evener/cmd/evener-hub/internal/appsource"
+	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
 	"primeradiant.com/evener/internal/selfupdate"
 )
 
@@ -79,7 +85,9 @@ func stubScheduleRestart(t *testing.T) *[]restartCall {
 	t.Helper()
 	var calls []restartCall
 	previous := scheduleHubRestart
-	scheduleHubRestart = func(binary string, args []string) { calls = append(calls, restartCall{binary, args}) }
+	scheduleHubRestart = func(_ context.Context, binary string, args []string) {
+		calls = append(calls, restartCall{binary, args})
+	}
 	t.Cleanup(func() { scheduleHubRestart = previous })
 	return &calls
 }
@@ -389,8 +397,9 @@ func TestHubUpdateApplyReleasesLockWhenRestartExecFails(t *testing.T) {
 		return selfupdate.Result{Release: "snapshot", Channel: "snapshot", Installed: []string{"/x/evener"}}, nil
 	})
 
-	// This test exercises the real scheduleHubRestartAfterResponse goroutine,
-	// not the stub other tests install for scheduleHubRestart.
+	// This test exercises the real scheduleHubRestartAfterResponse on a
+	// context with no appserver connection -- the fallback that restarts
+	// straight away because there is no response frame to wait for.
 	if _, err := hubUpdateApply(context.Background(), appwire.UpdateApplyParams{}); err != nil {
 		t.Fatalf("hubUpdateApply: %v", err)
 	}
@@ -405,5 +414,59 @@ func TestHubUpdateApplyReleasesLockWhenRestartExecFails(t *testing.T) {
 	}
 	if *upgrades != 1 {
 		t.Fatalf("upgrades = %d, want the second apply to reach the upgrade seam", *upgrades)
+	}
+}
+
+func TestHubUpdateApplyRestartsAfterTheResponseIsWritten(t *testing.T) {
+	setBuild(t, "3b1c5f8", "snapshot")
+	previousDelay := hubRestartDelay
+	hubRestartDelay = 0
+	t.Cleanup(func() { hubRestartDelay = previousDelay })
+
+	execs := make(chan string, 1)
+	previousExec := execHubBinary
+	execHubBinary = func(binary string, _ []string) error {
+		execs <- binary
+		return errors.New("exec failed") // keep this process alive and release hubUpdateMu
+	}
+	t.Cleanup(func() { execHubBinary = previousExec })
+
+	previousStderr := hubUpdateStderr
+	hubUpdateStderr = io.Discard
+	t.Cleanup(func() { hubUpdateStderr = previousStderr })
+
+	stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
+		return selfupdate.Result{Release: "snapshot", Channel: "snapshot", Installed: []string{"/x/evener"}}, nil
+	})
+
+	// A real appserver round trip: only that gives the handler a context
+	// carrying the connection AfterResponseWritten needs.
+	appServer := newHubAppServer(hubcore.WebConfig{
+		HubStateRoot: t.TempDir(),
+		Past:         hubcore.NewPastIndex(""),
+	}, appsource.NewRegistry())
+	hub := httptest.NewServer(http.HandlerFunc(appServer.ServeWebSocket))
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	resp, err := client.UpdateApply(t.Context(), appwire.UpdateApplyParams{Channel: "snapshot"})
+	if err != nil {
+		t.Fatalf("UpdateApply: %v", err)
+	}
+	if !resp.Restarting {
+		t.Fatalf("apply response = %+v, want Restarting", resp)
+	}
+
+	select {
+	case binary := <-execs:
+		if binary != "/x/evener" {
+			t.Fatalf("exec'd %q, want the installed evener binary", binary)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restart never ran after the apply response reached the transport")
 	}
 }

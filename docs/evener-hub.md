@@ -317,8 +317,9 @@ per `hub_state_root` — one per user under the default layout.
 Settings → Hub → Updates shows the running build (version, commit, channel),
 a channel selector (release or snapshot), and whether that channel is ahead
 of the running build. "Update and restart" downloads and installs the
-channel's archive with the same code as `evener upgrade`, then the hub
-`exec`s the installed binary in place: same PID, same arguments, same
+channel's archive with the same code as `evener upgrade`, then, once the
+apply response has been written to the websocket, the hub `exec`s the
+installed binary in place: same PID, same arguments, same
 environment. That is why it works the same under launchd, systemd, or a
 plain shell, and why nothing needs `KeepAlive`. The `hub.lock` flock and the
 listener are released by the exec and re-acquired by the new process; the

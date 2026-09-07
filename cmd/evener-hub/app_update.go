@@ -13,6 +13,7 @@ import (
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/buildinfo"
 	"primeradiant.com/evener/envvars"
+	"primeradiant.com/evener/internal/appserver"
 	"primeradiant.com/evener/internal/selfupdate"
 )
 
@@ -25,10 +26,10 @@ var (
 	hubUpdateStderr    io.Writer = os.Stderr
 )
 
-// hubRestartDelay gives the appwire response time to reach the browser
-// before the process image is replaced; the frontend needs the success
-// result to start its health poll. A var, not a const, so tests can set it
-// to 0.
+// hubRestartDelay is a short grace period for the kernel to flush the apply
+// response frame the send loop has just written; the restart itself already
+// waits for that write (see scheduleHubRestartAfterResponse). A var, not a
+// const, so tests can set it to 0.
 var hubRestartDelay = 500 * time.Millisecond
 
 // hubUpdateMu serializes evener/update/apply: copyExecutable in
@@ -133,7 +134,7 @@ func hubUpdateApply(ctx context.Context, params appwire.UpdateApplyParams) (appw
 	// The process is about to be replaced: leave hubUpdateMu held so a
 	// second apply after this one is also refused.
 	unlockOnReturn = false
-	scheduleHubRestart(binary, hubProcessArgs()[1:])
+	scheduleHubRestart(ctx, binary, hubProcessArgs()[1:])
 	return appwire.UpdateApplyResponse{
 		Release:    result.Release,
 		Channel:    result.Channel,
@@ -155,16 +156,26 @@ func evenerBinaryFrom(channel string, installed []string) (string, error) {
 }
 
 // scheduleHubRestartAfterResponse execs binary with the hub's own arguments
-// after hubRestartDelay. hubUpdateMu is held across the exec attempt (see
-// its doc comment); on failure the old hub keeps running, so the lock is
-// released here too, or every later apply/upgrade would be refused forever.
-func scheduleHubRestartAfterResponse(binary string, args []string) {
-	go func() {
-		time.Sleep(hubRestartDelay)
-		_, _ = fmt.Fprintf(hubUpdateStderr, "[hub] self-update: restarting as %s\n", binary)
-		if err := execHubBinary(binary, args); err != nil {
-			hubUpdateMu.Unlock()
-			_, _ = fmt.Fprintf(hubUpdateStderr, "[hub] self-update: restart failed, still running the previous binary: %v\n", err)
-		}
-	}()
+// once the apply response has been written to the websocket -- the frontend
+// needs that success result to start its health poll, so replacing the
+// process image before the frame goes out would strand the page. When ctx
+// carries no appserver connection (a direct call in a test, a non-websocket
+// caller) there is no frame to wait for, so the restart runs immediately.
+// hubUpdateMu is held across the exec attempt (see its doc comment); on
+// failure the old hub keeps running, so the lock is released here too, or
+// every later apply/upgrade would be refused forever.
+func scheduleHubRestartAfterResponse(ctx context.Context, binary string, args []string) {
+	restart := func() {
+		go func() {
+			time.Sleep(hubRestartDelay)
+			_, _ = fmt.Fprintf(hubUpdateStderr, "[hub] self-update: restarting as %s\n", binary)
+			if err := execHubBinary(binary, args); err != nil {
+				hubUpdateMu.Unlock()
+				_, _ = fmt.Fprintf(hubUpdateStderr, "[hub] self-update: restart failed, still running the previous binary: %v\n", err)
+			}
+		}()
+	}
+	if !appserver.AfterResponseWritten(ctx, restart) {
+		restart()
+	}
 }

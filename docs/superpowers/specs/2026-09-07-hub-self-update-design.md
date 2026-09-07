@@ -121,13 +121,17 @@ New file `app_update.go`:
   `selfupdate.Check` via a package var `runHubUpdateCheck` (test seam).
 - `hubUpdateApply(ctx, params)`: dev build → error "dev build; rebuild with
   make build-hub". Otherwise `runHubSelfUpgrade` (the existing seam) with
-  `Requested: channel`, then `scheduleHubRestart(binary, args)`, where binary is
+  `Requested: channel`, then `scheduleHubRestart(ctx, binary, args)`, where binary is
   `result.Installed[0]` (the installed `evener`) and args is
   `hubProcessArgs()[1:]`. Returns `Restarting: true`.
-- `scheduleHubRestart` is a package var. The real one starts a goroutine that
-  sleeps 500ms (so the RPC response is flushed and the browser sees success)
-  then calls `selfupdate.Restart`; on failure it logs to stderr with the
-  `[hub]` prefix used elsewhere and the hub keeps running on the old binary.
+- `scheduleHubRestart` is a package var. The real one registers the restart
+  with `appserver.AfterResponseWritten(ctx, ...)`, so it runs only once the
+  apply response has reached the transport (or the connection tore down
+  without it) and the browser has the success result it needs; it then starts
+  a goroutine that waits a 500ms flush grace and calls `selfupdate.Restart`.
+  A context with no appserver connection restarts immediately. On failure it
+  logs to stderr with the `[hub]` prefix used elsewhere and the hub keeps
+  running on the old binary.
 - Registered in `app_rpc.go` next to `MethodEvenerUpgrade`.
 - The existing `evener/upgrade` RPC and the palette command are unchanged.
 

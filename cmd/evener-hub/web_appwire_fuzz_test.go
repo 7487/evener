@@ -195,7 +195,7 @@ func FuzzAppWireDispatch(f *testing.F) {
 	// no-op so the fuzz harness can never replace itself, even if built
 	// with release ldflags (isDevBuild would otherwise be the only guard).
 	previousScheduleHubRestart := scheduleHubRestart
-	scheduleHubRestart = func(string, []string) {}
+	scheduleHubRestart = func(context.Context, string, []string) {}
 	f.Cleanup(func() { scheduleHubRestart = previousScheduleHubRestart })
 	canary := installSandboxAuthSeam(f)
 	deny := installDenyTransportTB(f)

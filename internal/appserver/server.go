@@ -542,6 +542,9 @@ type Connection struct {
 	responseMu        sync.Mutex
 	hydrationMu       sync.Mutex
 	hydrations        map[string]*hydrationResponseFinalizer
+	// afterWrite holds the AfterResponseWritten callbacks, keyed the same way
+	// hydrations is (requestIDKey). Guarded by responseMu.
+	afterWrite map[string]func()
 }
 
 func (c *Connection) ID() string {
@@ -690,6 +693,38 @@ func (c *Connection) takeAllHydrations() []*hydrationResponseFinalizer {
 	return pending
 }
 
+// responseWritten runs the after-write callback registered for msg's request,
+// if any, now that the frame has reached the transport.
+func (c *Connection) responseWritten(msg appwire.Message) {
+	responseID, _ := responseHydrationOutcome(msg)
+	if responseID == "" {
+		return
+	}
+	c.responseMu.Lock()
+	fn := c.afterWrite[responseID]
+	delete(c.afterWrite, responseID)
+	c.responseMu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+// runPendingAfterWrite runs every after-write callback whose response was
+// never written, because the send loop stopped first. Callers that only ever
+// act once (a self-update restart) must still act when the browser vanished.
+func (c *Connection) runPendingAfterWrite() {
+	c.responseMu.Lock()
+	pending := make([]func(), 0, len(c.afterWrite))
+	for key, fn := range c.afterWrite {
+		pending = append(pending, fn)
+		delete(c.afterWrite, key)
+	}
+	c.responseMu.Unlock()
+	for _, fn := range pending {
+		fn()
+	}
+}
+
 func responseHydrationOutcome(msg appwire.Message) (string, bool) {
 	switch {
 	case msg.Response != nil:
@@ -814,6 +849,28 @@ func (f *hydrationResponseFinalizer) abortAfterWithdrawal() {
 	if f.handoff.Abort != nil {
 		f.handoff.Abort()
 	}
+}
+
+// AfterResponseWritten runs fn once the response to the request being
+// handled in ctx has been written to the transport, or once the connection
+// tears down without writing it. It reports false, and does not retain fn,
+// when ctx carries no appserver connection.
+func AfterResponseWritten(ctx context.Context, fn func()) bool {
+	conn, ok := ctx.Value(connectionContextKey{}).(*Connection)
+	if !ok || conn == nil {
+		return false
+	}
+	responseID, ok := ctx.Value(requestIDContextKey{}).(string)
+	if !ok || responseID == "" {
+		return false
+	}
+	conn.responseMu.Lock()
+	if conn.afterWrite == nil {
+		conn.afterWrite = map[string]func(){}
+	}
+	conn.afterWrite[responseID] = fn
+	conn.responseMu.Unlock()
+	return true
 }
 
 func Subscribe(ctx context.Context, threadID string) bool {
