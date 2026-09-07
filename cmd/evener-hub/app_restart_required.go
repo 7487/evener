@@ -60,11 +60,11 @@ func restartRequiredDaemon(ctx context.Context, cfg hubcore.WebConfig, ref, thre
 	seen := make(map[string]bool)
 	for !seen[threadID] {
 		seen[threadID] = true
-		if entry, ok := liveDaemonForThread(cfg.Roster, threadID); ok {
-			return verifyOwner(entry, false)
-		}
 		if unconfirmedDaemonForThread(cfg.Roster, threadID) {
 			return verifyOwner(hubcore.LiveEntry{SessionID: threadID}, true)
+		}
+		if entry, ok := liveDaemonForThread(cfg.Roster, threadID); ok {
+			return verifyOwner(entry, false)
 		}
 		// Ancestry locates a possible daemon. Every edge must have a persisted
 		// delegate descriptor before that daemon can be classified as the owner.

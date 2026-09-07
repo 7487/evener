@@ -968,7 +968,7 @@ func buildUpgradeDelegate(t *testing.T, stateDir, ownerID string) string {
 }
 
 func TestHubUpgradeDoesNotTreatFailedProbeAsAbsentOwner(t *testing.T) {
-	for _, fault := range []string{"probe", "unidentified", "malformed", "unreadable", "missing-directory"} {
+	for _, fault := range []string{"probe", "unidentified", "changed-identity", "malformed", "unreadable", "missing-directory"} {
 		for _, delegate := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/delegate=%v", fault, delegate), func(t *testing.T) {
 				stateDir := filepath.Join(t.TempDir(), "projects", "upgrade-0000000000")
@@ -994,7 +994,18 @@ func TestHubUpgradeDoesNotTreatFailedProbeAsAbsentOwner(t *testing.T) {
 				}
 				writeRendezvous(t, runDir, entry)
 				roster := hubcore.NewRoster(runDir, failedRPCProber{})
-				if fault != "probe" && fault != "unidentified" {
+				if fault == "changed-identity" {
+					entry.Protocol = appwire.ProtocolVersion
+					writeRendezvous(t, runDir, entry)
+					prober := &changedOwnershipProber{sessionID: rootID}
+					roster = hubcore.NewRoster(runDir, prober)
+					roster.Refresh()
+					entry.InstanceID = "replacement"
+					entry.Protocol = "evener-appwire-v3"
+					writeRendezvous(t, runDir, entry)
+					prober.fail = true
+				}
+				if fault != "probe" && fault != "unidentified" && fault != "changed-identity" {
 					roster = hubcore.NewRoster(runDir, fakeProber{sessionID: rootID, status: appwire.ThreadStatusRestartRequired})
 					roster.Refresh()
 					path := filepath.Join(runDir, fmt.Sprintf("%d.json", os.Getpid()))
@@ -1056,7 +1067,7 @@ func TestHubUpgradeDoesNotTreatFailedProbeAsAbsentOwner(t *testing.T) {
 				if after.Name != before.Name || len(afterMetas) != len(metas) {
 					t.Error("unresolved owner allowed metadata writes")
 				}
-				if fault == "probe" || fault == "unidentified" {
+				if fault == "probe" || fault == "unidentified" || fault == "changed-identity" {
 					web := &WebServer{cfg: hubcore.WebConfig{StateDir: stateDir, Past: past, Roster: roster}}
 					if _, err := (webNavigationSource{web: web}).Capture(t.Context(), "generation", time.Now()); err == nil {
 						t.Error("navigation published actions despite unresolved daemon ownership")
@@ -1084,4 +1095,13 @@ func TestRestartRequiredOwnershipSkipsUnspecifiedTarget(t *testing.T) {
 	if err != nil || required {
 		t.Fatalf("unspecified ownership: required=%v error=%v", required, err)
 	}
+}
+
+type changedOwnershipProber struct {
+	sessionID string
+	fail      bool
+}
+
+func (p *changedOwnershipProber) Probe(rendezvous.Entry) hubcore.ProbeResult {
+	return hubcore.ProbeResult{SessionID: p.sessionID, Status: appwire.ThreadStatusIdle, OK: !p.fail}
 }
