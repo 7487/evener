@@ -571,7 +571,7 @@ func TestHubUpgradeRestrictsPersistedDelegate(t *testing.T) {
 						if err := writer.Close(); err != nil {
 							t.Fatal(err)
 						}
-						descriptor := map[string]any{"child_session_id": grandchildID, "transcript_ref": localAppRef(grandchildID), "owner_session_id": childID, "task": "nested sentinel", "agent_type": "explorer", "tool_name_ceiling": []string{"communicate"}, "resumable": true, "config": map[string]any{}}
+						descriptor := map[string]any{"child_session_id": grandchildID, "transcript_ref": localAppRef(grandchildID), "owner_session_id": parentID, "parent_delegate_id": "dlg_upgrade", "task": "nested sentinel", "agent_type": "explorer", "tool_name_ceiling": []string{"communicate"}, "resumable": true, "config": map[string]any{}}
 						batch, err := json.Marshal(map[string]any{"events": []map[string]any{{"kind": "delegate_created", "seq": 2, "delegate_id": "dlg_nested", "created": map[string]any{"descriptor": descriptor}}}})
 						if err != nil {
 							t.Fatal(err)

@@ -237,20 +237,20 @@ func (s *Session) DetailedStatus() DetailedStatus {
 	return ds
 }
 
-// SessionOwnsDelegate reads durable ownership without projecting transcript
-// attention. A sibling's transcript cannot determine whether a daemon owns a child.
-func SessionOwnsDelegate(ctx context.Context, stateDir, ownerSessionID, childSessionID string) (bool, error) {
-	if err := schema.ValidateSessionID(ownerSessionID); err != nil {
+// SessionOwnsDelegate verifies a direct parent-child edge in the root-owned
+// delegate journal without projecting transcript attention.
+func SessionOwnsDelegate(ctx context.Context, stateDir, parentSessionID, childSessionID string) (bool, error) {
+	if err := schema.ValidateSessionID(parentSessionID); err != nil {
 		return false, err
 	}
 	if err := schema.ValidateSessionID(childSessionID); err != nil {
 		return false, err
 	}
-	meta, err := schema.LoadSessionMeta(stateDir, ownerSessionID)
+	meta, err := schema.LoadSessionMeta(stateDir, parentSessionID)
 	if err != nil {
 		return false, err
 	}
-	rootID := activityRootIDFromMeta(ownerSessionID, meta)
+	rootID := activityRootIDFromMeta(parentSessionID, meta)
 	if err := schema.ValidateSessionID(rootID); err != nil {
 		return false, err
 	}
@@ -259,8 +259,19 @@ func SessionOwnsDelegate(ctx context.Context, stateDir, ownerSessionID, childSes
 	if err != nil {
 		return false, err
 	}
+	parentDelegateID := ""
+	parentFound := parentSessionID == rootID
+	if !parentFound {
+		for delegateID, aggregate := range result.Value.state {
+			if aggregate != nil && aggregate.Descriptor.OwnerSessionID == rootID && aggregate.Descriptor.ChildSessionID == parentSessionID {
+				parentDelegateID, parentFound = delegateID, true
+				break
+			}
+		}
+	}
 	for _, aggregate := range result.Value.state {
-		if aggregate != nil && aggregate.Descriptor.OwnerSessionID == ownerSessionID && aggregate.Descriptor.ChildSessionID == childSessionID {
+		if parentFound && aggregate != nil && aggregate.Descriptor.OwnerSessionID == rootID &&
+			aggregate.Descriptor.ChildSessionID == childSessionID && aggregate.Descriptor.ParentDelegateID == parentDelegateID {
 			return true, nil
 		}
 	}

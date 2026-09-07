@@ -907,3 +907,32 @@ func TestSessionOwnsDelegateCancellationDuringJournalFold(t *testing.T) {
 		}
 	})
 }
+
+func TestSessionOwnsDelegateVerifiesRootOwnerAndImmediateParent(t *testing.T) {
+	const rootID = "02wMz5Txv1C3Hut0M8GCeC"
+	const parentID = "02wMz5Txv1C3Hut0M8GCeD"
+	const childID = "02wMz5Txv1C3Hut0M8GCeE"
+	const siblingID = "02wMz5Txv1C3Hut0M8GCeF"
+	stateDir := t.TempDir()
+	parent := pastStableDescriptor(rootID, parentID, "parent task")
+	child := pastStableDescriptor(rootID, childID, "nested task")
+	child.ParentDelegateID = "dlg_" + parentID
+	sibling := pastStableDescriptor(rootID, siblingID, "sibling task")
+	writePastStableDelegates(t, stateDir, rootID, parent, child, sibling)
+	savePastActivityMeta(t, stateDir, rootID, "root")
+	savePastActivityMetaWithTreeRevision(t, stateDir, parentID, "parent", rootID, 1)
+	savePastActivityMetaWithTreeRevision(t, stateDir, siblingID, "sibling", rootID, 1)
+	for _, tc := range []struct {
+		parent, child string
+		want          bool
+	}{
+		{rootID, parentID, true}, {parentID, childID, true}, {rootID, childID, false}, {siblingID, childID, false},
+	} {
+		t.Run(tc.parent+"/"+tc.child, func(t *testing.T) {
+			got, err := SessionOwnsDelegate(t.Context(), stateDir, tc.parent, tc.child)
+			if err != nil || got != tc.want {
+				t.Fatalf("owned=%v error=%v, want %v", got, err, tc.want)
+			}
+		})
+	}
+}
