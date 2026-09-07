@@ -25,6 +25,7 @@ import { useStore } from "zustand";
 import type { ThreadModel } from "../../protocol/model";
 import type { PaneProps } from "../../shell/paneRegistry";
 import { navigate, paneToURL } from "../../shell/routing";
+import { ForceStopDialog } from "../../shell/sessionMenu/ForceStopDialog";
 import { workspaceStore } from "../../shell/workspace";
 import { connectionStore } from "../../stores/connection";
 import { useNavigationStore } from "../../stores/navigation/store";
@@ -139,6 +140,34 @@ function RestartRequiredNotice({
       </Button>
       {error && <span>{error}</span>}
     </div>
+  );
+}
+
+function LoadingSessionRecovery({ sessionRef }: { sessionRef: string }) {
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const stop = async () => {
+    setError(null);
+    try {
+      await threadsStore.getState().forceStop(sessionRef);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    try {
+      await threadsStore.getState().refreshThread(sessionRef);
+    } catch (err) {
+      setError(`Session stopped; couldn't refresh its view: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  return (
+    <>
+      <Button variant="quiet" onClick={() => setOpen(true)}>
+        Force stop…
+      </Button>
+      <ForceStopDialog open={open} onClose={() => setOpen(false)} onConfirm={stop} />
+      {error && <span role="alert">{error}</span>}
+    </>
   );
 }
 
@@ -334,7 +363,15 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
     }
     return (
       <PaneScaffold paneId={paneId} focused={paneFocused} scaffoldMarker={`session:${ref}`} title={title}>
-        <EmptyState title="Loading transcript…" />
+        <EmptyState
+          title="Loading transcript…"
+          hint={
+            ref.startsWith("local:")
+              ? "If the session is unresponsive, you can stop its process to recover it."
+              : undefined
+          }
+          action={ref.startsWith("local:") ? <LoadingSessionRecovery sessionRef={ref} /> : undefined}
+        />
       </PaneScaffold>
     );
   }

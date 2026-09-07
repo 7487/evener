@@ -30,27 +30,20 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	}
 	// Clear gives one daemon stable and current session aliases. Lock both so
 	// resume or deletion through either alias cannot race exit confirmation.
-	aliases := []string{ref.ThreadID, entry.SessionID, entry.ThreadID}
-	if workspace, e := appwire.ParseRef(entry.WorkspaceRef); e == nil && workspace.SourceID == "local" {
-		aliases = append(aliases, workspace.ThreadID)
-	}
-	slices.Sort(aliases)
-	aliases = slices.Compact(aliases)
+	aliases := forceStopAliases(entry)
 	for _, id := range aliases {
-		if id != "" {
-			cfg.ResumeLocks.For(id).Lock()
-			defer cfg.ResumeLocks.For(id).Unlock()
-		}
+		cfg.ResumeLocks.For(id).Lock()
 	}
+	defer func() {
+		for i := len(aliases) - 1; i >= 0; i-- {
+			cfg.ResumeLocks.For(aliases[i]).Unlock()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	current, err := forceStopEntry(cfg.RunDir, ref.ThreadID)
-	if err != nil {
+	if err := forceStopOwnershipUnchanged(cfg.RunDir, ref.ThreadID, entry); err != nil {
 		return appwire.Unavailable(err.Error())
-	}
-	if current != entry {
-		return appwire.Unavailable("daemon ownership changed; refresh the session before force stopping")
 	}
 	if err := deletionFenceError(cfg, params.Ref, ref.ThreadID, ""); err != nil {
 		return err
@@ -91,6 +84,19 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	return nil
 }
 
+// forceStopOwnershipUnchanged revalidates discovery after acquiring every
+// alias lock, before opening any process handle.
+func forceStopOwnershipUnchanged(runDir, sessionID string, previous rendezvous.Entry) error {
+	current, err := forceStopEntry(runDir, sessionID)
+	if err != nil {
+		return err
+	}
+	if current != previous {
+		return errors.New("daemon ownership changed; refresh the session before force stopping")
+	}
+	return nil
+}
+
 func forceStopEntry(runDir, sessionID string) (rendezvous.Entry, error) {
 	entries, err := rendezvous.ListStrict(runDir)
 	if err != nil {
@@ -113,7 +119,29 @@ func forceStopEntry(runDir, sessionID string) (rendezvous.Entry, error) {
 	if !found {
 		return rendezvous.Entry{}, errors.New("no direct daemon ownership claim for this session")
 	}
+	aliases := forceStopAliases(match)
+	claims := 0
+	for _, entry := range entries {
+		for _, alias := range forceStopAliases(entry) {
+			if slices.Contains(aliases, alias) {
+				claims++
+				break
+			}
+		}
+	}
+	if claims != 1 {
+		return rendezvous.Entry{}, errors.New("multiple daemons claim this session; cannot choose a force-stop target")
+	}
 	return match, nil
+}
+
+func forceStopAliases(entry rendezvous.Entry) []string {
+	aliases := []string{entry.SessionID, entry.ThreadID}
+	if workspace, err := appwire.ParseRef(entry.WorkspaceRef); err == nil && workspace.SourceID == "local" {
+		aliases = append(aliases, workspace.ThreadID)
+	}
+	slices.Sort(aliases)
+	return slices.DeleteFunc(slices.Compact(aliases), func(id string) bool { return id == "" })
 }
 
 func refreshAfterForceStop(ctx context.Context, cfg hubcore.WebConfig) {

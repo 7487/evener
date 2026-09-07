@@ -2122,6 +2122,85 @@ test("offers explicit resume after restart even without pending messages", async
   expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
 });
 
+test.each(["success", "refused"])(
+  "failed initial read has confirmed recovery without navigation: %s",
+  async (outcome) => {
+    const fake = connectFakeClient();
+    const ref = "local:unconfirmed";
+    let stopped = false;
+    fake.on("thread/read", () => {
+      if (!stopped) throw new Error("ownership unconfirmed");
+      return readResponse(ref, { status: { type: "notLoaded" } });
+    });
+    fake.on("evener/thread/forceStop", () => {
+      if (outcome === "refused") throw new Error("no direct daemon ownership claim");
+      stopped = true;
+      return {};
+    });
+    render(
+      <ClientProvider client={fake}>
+        <Session params={{ ref }} paneId="p1" focused={true} />
+      </ClientProvider>,
+    );
+    await waitFor(() => expect(fake.calls.some((call) => call.method === "thread/read")).toBe(true));
+    expect(threadsStore.getState().threads.has(ref)).toBe(false);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Force stop…" }));
+    expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Force stop…" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+    if (outcome === "success") {
+      expect(await screen.findByRole("button", { name: "Resume session" })).toBeTruthy();
+      expect(screen.queryByRole("dialog")).toBeNull();
+    } else {
+      expect(await screen.findByText("no direct daemon ownership claim")).toBeTruthy();
+      expect(
+        (within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }) as HTMLButtonElement).disabled,
+      ).toBe(false);
+    }
+    expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+  },
+);
+
+test("confirmed force stop refreshes the session and exposes explicit Resume", async ({ onTestFinished }) => {
+  onTestFinished(stubSessionSlots);
+  vi.mocked(SessionChromeModule.SessionChrome).mockRestore();
+  const fake = connectFakeClient();
+  const ref = "local:force-stop-resume";
+  setNavigationTitle(ref, "Force stop recovery");
+  let status = "restartRequired";
+  fake.on("thread/read", () => readResponse(ref, { status: { type: status } }));
+  fake.on("evener/thread/forceStop", () => {
+    status = "notLoaded";
+    return {};
+  });
+  fake.on("thread/resume", () => {
+    status = "idle";
+    return readResponse(ref, { status: { type: status } });
+  });
+  render(
+    <ClientProvider client={fake}>
+      <SessionChromeModule.SessionChrome ref={ref} />
+      <Session params={{ ref }} paneId="p1" focused={true} />
+    </ClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /session actions/i }));
+  await user.click(screen.getByRole("menuitem", { name: "Force stop…" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+  const resume = await screen.findByRole("button", { name: "Resume session" });
+  expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+  await user.click(resume);
+  await waitFor(() => expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("idle"));
+  expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(1);
+  expect(fake.calls.filter((call) => call.method === "thread/resume")).toEqual([
+    { method: "thread/resume", params: { ref } },
+  ]);
+});
+
 test.each(["notLoaded", "active", "idle"])(
   "explicitly resumes a %s session before reconciling its uncertain send",
   async (recoveryStatus) => {

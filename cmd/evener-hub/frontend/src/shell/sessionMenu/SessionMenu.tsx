@@ -15,6 +15,7 @@ import type { SessionPanelKind } from "../../panes/sessionPanels";
 import { Button, Dialog, Input, Menu, type MenuEntry } from "../../widgets";
 import { requireClass } from "../../widgets/internal/requireClass";
 import { PinSectionPicker } from "../rail/PinSectionPicker";
+import { ForceStopDialog } from "./ForceStopDialog";
 import styles from "./sessionmenu.module.css";
 
 export type PinTarget = { section_id: string } | { section_name: string };
@@ -250,35 +251,7 @@ export function SessionMenu({
       </Dialog>
 
       {actions.onForceStop && (
-        <Dialog
-          open={forceStopOpen}
-          onClose={() => setForceStopOpen(false)}
-          title="Force stop this session?"
-          footer={
-            <div className={CLASS.footer}>
-              <Button variant="quiet" onClick={() => setForceStopOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="danger"
-                disabled={busy}
-                onClick={() =>
-                  void confirm(
-                    () => actions.onForceStop?.() ?? Promise.resolve(),
-                    () => setForceStopOpen(false),
-                  )
-                }
-              >
-                Force stop
-              </Button>
-            </div>
-          }
-        >
-          <p className={CLASS.body}>
-            Active turns and jobs may be interrupted. Saved transcripts are retained. You can resume the session after
-            its process stops.
-          </p>
-        </Dialog>
+        <ForceStopDialog open={forceStopOpen} onClose={() => setForceStopOpen(false)} onConfirm={actions.onForceStop} />
       )}
 
       <Dialog
