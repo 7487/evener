@@ -436,3 +436,55 @@ test("a job card still renders its echo metadata (watch suppression is scoped to
   expect(screen.getByTestId("notification-field-job-id").textContent).toContain("job_42");
   expect(screen.getByTestId("notification-field-status").textContent).toContain("completed");
 });
+
+test("a job-targeted watch card names the watched job id and nothing else (RoboRev PR #954, review 3)", () => {
+  // A job-targeted fire carries no watch_id attr at all
+  // (formatJobNotificationBlock emits watch_id only when JobID == ""), so the
+  // job id is the only recoverable identity — shown as what it is, with no
+  // echo fields beside it.
+  render(
+    <NotificationCard
+      notification={notif({
+        type: "watch",
+        title: "Output matched on job_a1b2",
+        tone: "neutral",
+        secondary: "output_match: ready",
+        jobId: "job_a1b2",
+        jobType: "watch",
+        status: "watch",
+        reason: "output_match: ready",
+        outputBytes: 0,
+        prose: "Matched output_match: ready on job_a1b2.",
+        rawText:
+          '<job-notification job_id="job_a1b2" event="watch" job_type="watch" status="watch" reason="output_match: ready" output_bytes="0">Matched output_match: ready on job_a1b2.</job-notification>',
+      })}
+    />,
+  );
+  // At activity level the card auto-expands (expandByDefault=true).
+  expect(screen.getByTestId("notification-field-job-id").textContent).toContain("job_a1b2");
+  expect(screen.queryByTestId("notification-field-watch-id")).toBeNull();
+  expect(screen.queryByTestId("notification-field-status")).toBeNull();
+  expect(screen.queryByTestId("notification-field-job-type")).toBeNull();
+  expect(screen.queryByTestId("notification-field-output")).toBeNull();
+  expect(screen.queryByTestId("notification-field-reason")).toBeNull();
+});
+
+test("a job-less watch card still shows no identity fields", () => {
+  render(
+    <NotificationCard
+      notification={notif({
+        type: "watch",
+        title: "Timer fired",
+        tone: "neutral",
+        secondary: "every 5m",
+        jobId: undefined,
+        watchId: "w1",
+        prose: "Timer fired (every 300s).",
+        rawText:
+          '<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="repeat" output_bytes="0" watch_id="w1">Timer fired (every 300s).</job-notification>',
+      })}
+    />,
+  );
+  expect(screen.queryByTestId("notification-field-job-id")).toBeNull();
+  expect(screen.queryByTestId("notification-field-watch-id")).toBeNull();
+});

@@ -137,7 +137,19 @@ function NotificationMetadata({ notification }: { notification: ParsedNotificati
   // nothing, so the card shows none of them. The watch id stays reachable
   // in the raw disclosure. Job, delegate, watch-send, and observer-callback
   // paths are untouched.
-  if (notification.type === "watch") return null;
+  // A job-targeted watch fire carries NO watch_id attr at all
+  // (formatJobNotificationBlock emits watch_id only when JobID == ""), so
+  // the watched job id is the only recoverable identity — it renders as the
+  // card's one identity line, labelled as what it is (never a watch id),
+  // with every echo field still suppressed. A job-less watch names nothing.
+  if (notification.type === "watch") {
+    if (!notification.jobId) return null;
+    return (
+      <div className={CLASS.metadata}>
+        <Field key="job-id" label="Job id" value={notification.jobId} testId="notification-field-job-id" />
+      </div>
+    );
+  }
   const fields = [
     notification.delegateId && (
       <Field

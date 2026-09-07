@@ -300,7 +300,16 @@ function titleForJobNotification(attrs: Record<string, string>, type: string, pr
     // #954): only an output_match fire is an "Output matched on …". A timer
     // prose lead ("Timer fired …") keeps a timer title; an event fire
     // ("event: …" reason) names the event.
-    const reason = (attrs.reason ?? "").trim();
+    // The reason is producer-escaped (escapeNotificationText) and
+    // parseQuotedAttrs does not decode, so decode before matching — a
+    // pattern containing & < > must title decoded (RoboRev PR #954 review 3).
+    const reason = decodeNotificationEntities(attrs.reason ?? "").trim();
+    // Teardown notices are endings, never firings (RoboRev PR #954 review 3):
+    // watchEndedUnfiredMessage / watchLostAtRestartMessage start with
+    // "watch ended:", watchBudgetClearedMessage with "watch cleared:". The
+    // prose/reason carries which watch and why, so the title stays short.
+    if (reason.startsWith("watch ended:")) return "Watch ended";
+    if (reason.startsWith("watch cleared:")) return "Watch auto-cleared";
     const jobId = (attrs.job_id ?? "").trim();
     const outputMatch = /^output_match:\s*(.+)$/.exec(reason)?.[1]?.trim();
     if (outputMatch && jobId) return `Output matched on ${jobId}`;
@@ -315,18 +324,59 @@ function titleForJobNotification(attrs: Record<string, string>, type: string, pr
   return `Job ${status}`;
 }
 
+// Local duration humanizer for timer secondaries. jobWatch.tsx owns the
+// canonical humanizeSeconds/humanizeInterval, but this file is a message
+// parser and must not import a tool renderer for one of its descriptors —
+// the parser stays independent of any single tool's rendering layer — so the
+// tiny minutes math is duplicated here instead of cross-imported.
+function humanizeTimerAfter(totalSeconds: number): string {
+  if (totalSeconds < 60) return `after ${Math.round(totalSeconds)}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const leftover = Math.round(totalSeconds % 60);
+  return leftover === 0 ? `after ${minutes}m` : `after ${minutes}m${String(leftover).padStart(2, "0")}s`;
+}
+
+function humanizeTimerEvery(totalSeconds: number): string {
+  if (totalSeconds < 60) return `every ${Math.round(totalSeconds)}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const leftover = Math.round(totalSeconds % 60);
+  return leftover === 0 ? `every ${minutes}m` : `every ${minutes}m${String(leftover).padStart(2, "0")}s`;
+}
+
+// timerSecondaryFromProse humanizes a bare timer reason ("after"/"repeat")
+// from the prose lead's own seconds ("Timer fired after 300s." /
+// "Timer fired (every 300s).", agent/job_notify.go). Undefined when the prose
+// does not match — the caller falls back to the raw reason.
+function timerSecondaryFromProse(reason: string, prose: string | undefined): string | undefined {
+  if (reason !== "after" && reason !== "repeat") return undefined;
+  const seconds = /^Timer fired (?:after|\(every) (\d+)s/.exec((prose ?? "").trim())?.[1];
+  if (seconds === undefined) return undefined;
+  const totalSeconds = Number(seconds);
+  if (!Number.isFinite(totalSeconds)) return undefined;
+  return reason === "after" ? humanizeTimerAfter(totalSeconds) : humanizeTimerEvery(totalSeconds);
+}
+
 function notificationSecondary(
   attrs: Record<string, string>,
   tone: NotificationTone,
   description: string,
   analysis: JobNotificationAnalysis,
   notificationType?: string,
+  prose?: string,
 ): string {
   // A watch card's secondary names the trigger (the output_match / event the
   // watch fired on) — the one producer field that says what happened. The
   // job_type/status/output echo attrs stay out (NotificationCard suppresses
   // them for watch type too).
-  if (notificationType === "watch") return (attrs.reason ?? "").trim();
+  // The reason is producer-escaped (see titleForJobNotification above), so it
+  // is decoded here too; a bare timer reason ("after"/"repeat") humanizes
+  // from the prose lead's seconds instead ("after 5m" / "every 5m"), falling
+  // back to the raw reason when the prose does not match (RoboRev PR #954
+  // review 3).
+  if (notificationType === "watch") {
+    const reason = decodeNotificationEntities(attrs.reason ?? "").trim();
+    return timerSecondaryFromProse(reason, prose) ?? reason;
+  }
   const bits: string[] = [];
   const type = (attrs.job_type ?? "").trim();
   if (description) bits.push(description);
@@ -376,7 +426,7 @@ function parseJobNotification(block: string): ParsedNotification | null {
     type,
     title: titleForJobNotification(attrs, type, type === "watch" ? bodyText : undefined),
     tone,
-    secondary: notificationSecondary(attrs, tone, description, analysis, type),
+    secondary: notificationSecondary(attrs, tone, description, analysis, type, type === "watch" ? bodyText : undefined),
     jobId: attrs.job_id?.trim() || undefined,
     jobType: attrs.job_type?.trim() || undefined,
     watchId: attrs.watch_id?.trim() || undefined,

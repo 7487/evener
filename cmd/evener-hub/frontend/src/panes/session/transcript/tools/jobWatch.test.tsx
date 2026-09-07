@@ -460,3 +460,172 @@ test("leftover seconds are kept, never rounded into the minute (RoboRev PR #954)
   const repeating = watchItem({ operation: "create" }, { ...TIMER_RAW, after_seconds: undefined, repeat_seconds: 90 });
   expect(d.summary(repeating)).toContain("every 1m30s");
 });
+
+// --- RoboRev PR #954 review 3 -----------------------------------------------
+
+test("an output pattern containing a semicolon survives Condition parsing (finding C)", () => {
+  // output_match is caller-supplied and unbounded, so it may itself contain
+  // "; " — only semicolons introducing a recognized field may split.
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "inspect", watch_id: "watch_semi" },
+        {
+          watch_id: "watch_semi",
+          source: "job_a1b2",
+          watching: true,
+          condition: "output_match: a;b; progress_interval_ms: 120000",
+          deliveries: 0,
+          created_at: "2026-09-06T09:41:00-07:00",
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("a;b");
+  expect(body).toContain("every 2m");
+});
+
+test("list rows keep a semicolon-bearing pattern whole (finding C)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "list" },
+        {
+          watches: [
+            {
+              watch_id: "watch_semi",
+              source: "job_a1b2",
+              watching: true,
+              condition: "output_match: a;b; progress_interval_ms: 120000",
+            },
+          ],
+          count: 1,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("a;b");
+  expect(body).toContain("every 2m");
+});
+
+test("a filter condition's every throttle renders in the list row (finding D)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "list" },
+        {
+          watches: [
+            {
+              watch_id: "watch_f",
+              source: "dlg_7Hk2",
+              watching: true,
+              condition: "events: [assistant.tool] every 3 where tool_name=read_file, status=error",
+            },
+          ],
+          count: 1,
+        },
+      )}
+      live={false}
+    />,
+  );
+  expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("(every 3)");
+});
+
+test("a filter condition's every throttle renders in the create sentence (finding D)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "create", source: "dlg_7Hk2", events: ["assistant.tool"], every: 3 },
+        {
+          watch_id: "watch_f",
+          source: "dlg_7Hk2",
+          watching: true,
+          events: ["assistant.tool"],
+          event_filter: { tool_name: "read_file", status: "error" },
+          replaced_existing: false,
+          fired: false,
+        },
+      )}
+      live={false}
+    />,
+  );
+  expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("(every 3)");
+});
+
+test("a filter condition's every throttle renders in inspect (finding D)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "inspect", watch_id: "watch_f" },
+        {
+          watch_id: "watch_f",
+          source: "dlg_7Hk2",
+          watching: true,
+          condition: "events: [assistant.tool] every 3 where tool_name=read_file, status=error",
+        },
+      )}
+      live={false}
+    />,
+  );
+  expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("(every 3)");
+});
+
+test("list rows name the tool for both filter outcomes (finding E)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "list" },
+        {
+          watches: [
+            {
+              watch_id: "watch_ok",
+              source: "dlg_7Hk2",
+              watching: true,
+              condition: "events: [assistant.tool] where tool_name=read_file, status=ok",
+            },
+            {
+              watch_id: "watch_err",
+              source: "dlg_7Hk2",
+              watching: true,
+              condition: "events: [assistant.tool] where tool_name=read_file, status=error",
+            },
+          ],
+          count: 2,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("successful tool calls on read_file");
+  expect(body).toContain("failed tool calls on read_file");
+});
+
+test("a progress-only create summarizes the heartbeat (finding F)", () => {
+  const d = toolRendererFor("job_watch");
+  const raw = {
+    watch_id: "watch_hb",
+    source: "job_a1b2",
+    watching: true,
+    progress_interval_ms: 120000,
+    replaced_existing: false,
+    fired: false,
+  };
+  expect(d.summary(watchItem({ operation: "create" }, raw))).toBe("Watch job_a1b2 · every 2m");
+});

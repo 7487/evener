@@ -277,16 +277,29 @@ function summarizeCreate(raw: JsonObject, item: ItemModel): string {
     const named = `${condition.events.join(", ")}${throttle}`;
     return suffix ? `Watch ${source} for ${named} ${suffix}` : `Watch ${source} for ${named}`;
   }
-  return `Watch ${source}`;
+  // A progress-only watch names its heartbeat (RoboRev PR #954 review 3) —
+  // reaching here means only progressIntervalMS is set (output, filter, and
+  // events return above; timers return earlier), so the cadence suffix must
+  // be present.
+  const heartbeat = cadenceSuffix(condition);
+  return heartbeat ? `Watch ${source} ${heartbeat}` : `Watch ${source}`;
 }
 
-// filterSummaryPhrase names an event-filter watch's shape in words for
-// summaries: error and ok both explicit, tool named when present.
-function filterSummaryPhrase(condition: ConditionSpec): string {
+// filterSummaryPhrase names an event-filter watch's shape in words, shared by
+// summaries, list rows, and row details so the three never drift (RoboRev PR
+// #954 review 3): error and ok both explicit with the tool named when
+// present; a status-less filter still names the tool ("calls on …"), and a
+// bare filter with neither reads "matching events".
+interface FilterPhrase {
+  filterToolName?: string;
+  filterStatus?: string;
+}
+
+function filterSummaryPhrase(condition: FilterPhrase): string {
   const tool = condition.filterToolName ? ` on ${condition.filterToolName}` : "";
   if (condition.filterStatus === "error") return `failed tool calls${tool}`;
   if (condition.filterStatus === "ok") return `successful tool calls${tool}`;
-  return condition.filterToolName ?? "matching events";
+  return condition.filterToolName ? `calls on ${condition.filterToolName}` : "matching events";
 }
 
 interface WatchRow {
@@ -338,9 +351,20 @@ function numAfter(value: string | undefined): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+// Split only on semicolons that introduce a recognized Condition field.
+// output_match is caller-supplied and unbounded, so a pattern may itself
+// contain ";" — splitting on every one truncates the pattern (RoboRev PR
+// #954 review 3). The heads below are the producer's exact grammar
+// (watchConditionSummary, agent/job_watch.go:2460-2494): "output_match: ",
+// "after_seconds: N" / "repeat_seconds: N" / "progress_interval_ms: N",
+// "note: ", "events: ...", joined with "; ". (A pattern literally containing
+// "; events: " stays ambiguous even to the producer's own join — the split
+// takes the field reading, matching what list/inspect show.)
+const CONDITION_PART_SPLIT = /;\s*(?=(?:output_match|after_seconds|repeat_seconds|progress_interval_ms|note|events):)/;
+
 function parseConditionText(condition: string): ParsedCondition {
   const parsed: ParsedCondition = { events: [] };
-  for (const part of condition.split(";")) {
+  for (const part of condition.split(CONDITION_PART_SPLIT)) {
     const text = part.trim();
     const outputMatch = /^output_match:\s*(.+)$/.exec(text)?.[1]?.trim();
     if (outputMatch) {
@@ -402,12 +426,17 @@ function rowConditionPhrase(row: WatchRow): string {
     }
     const bits: string[] = [];
     if (parsed.outputMatch) bits.push(`“${parsed.outputMatch}”`);
+    // The every throttle rides the events bit when one renders, else the
+    // filter bit — it is one shared throttle ("events: […] every N where …"),
+    // so it must never print twice. Parens match the create summary's
+    // "(every N)" shape (RoboRev PR #954 review 3).
+    const every = parsed.every !== undefined ? ` (every ${parsed.every})` : "";
     if (parsed.events.length > 0) {
       const names = parsed.events.includes("*") ? "any event" : parsed.events.join(", ");
-      bits.push(parsed.every !== undefined ? `${names} every ${parsed.every}` : names);
+      bits.push(`${names}${every}`);
     }
     if (parsed.filterToolName || parsed.filterStatus) {
-      bits.push(parsed.filterStatus === "error" ? "failed tool calls" : `calls on ${parsed.filterToolName ?? "?"}`);
+      bits.push(`${filterSummaryPhrase(parsed)}${parsed.events.length === 0 ? every : ""}`);
     }
     if (parsed.progressIntervalMS !== undefined) {
       bits.push(humanizeInterval(parsed.progressIntervalMS / 1000));
@@ -558,11 +587,17 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
           (<span className={CLASS.mono}>{spec.events[0]}</span>)
         </>
       ) : null;
+    // The every throttle rides the filter sentence too (RoboRev PR #954
+    // review 3): a filter Condition carries it ("events: […] every N where
+    // …"), and dropping it claims every event fires. Same "(every N)" shape
+    // as the events branch below.
+    const throttle = spec.every !== undefined ? ` (every ${spec.every})` : "";
     return (
       <span>
         Wakes you when <span className={CLASS.mono}>{source}</span> makes a tool call {outcome}
         {tool}
-        {eventName}.
+        {eventName}
+        {throttle}.
       </span>
     );
   }
@@ -660,16 +695,15 @@ function rowDetailPhrase(row: WatchRow): string | undefined {
   if (parsed.afterSeconds !== undefined) return `Reminds ${humanizeSeconds(parsed.afterSeconds)}${deliveries}.`;
   if (parsed.repeatSeconds !== undefined) return `Reminds ${humanizeInterval(parsed.repeatSeconds)}${deliveries}.`;
   const bits: string[] = [];
+  const every = parsed.every !== undefined ? ` (every ${parsed.every})` : "";
   if (parsed.events.length > 0) {
     const names = parsed.events.includes("*") ? "any event" : parsed.events.join(", ");
-    bits.push(parsed.every !== undefined ? `${names} every ${parsed.every}` : names);
+    bits.push(`${names}${every}`);
   }
   if (parsed.filterToolName || parsed.filterStatus) {
-    if (parsed.filterStatus === "error")
-      bits.push(`failed tool calls${parsed.filterToolName ? ` on ${parsed.filterToolName}` : ""}`);
-    else if (parsed.filterStatus === "ok")
-      bits.push(`successful tool calls${parsed.filterToolName ? ` on ${parsed.filterToolName}` : ""}`);
-    else bits.push(`calls on ${parsed.filterToolName ?? "?"}`);
+    // The same shared filter phrase as rows and summaries (RoboRev PR #954
+    // review 3); the throttle rides here only when no events bit carries it.
+    bits.push(`${filterSummaryPhrase(parsed)}${parsed.events.length === 0 ? every : ""}`);
   }
   if (parsed.progressIntervalMS !== undefined) {
     bits.push(`heartbeat ${humanizeInterval(parsed.progressIntervalMS / 1000)}`);

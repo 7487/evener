@@ -254,7 +254,9 @@ Timer fired (every 300s).
   const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
   expect(n.type).toBe("watch");
   expect(n.title).toBe("Timer fired");
-  expect(n.secondary).toBe("repeat");
+  // RoboRev PR #954 review 3 (finding G): a bare timer reason humanizes from
+  // the prose lead's seconds.
+  expect(n.secondary).toBe("every 5m");
 });
 
 test("watch titles derive from the trigger: event fires name the event, timers the timer (RoboRev PR #954)", () => {
@@ -495,4 +497,86 @@ the section that keeps regressing
   expect(n.prose).toContain("excerpt:");
   expect(n.prose).toContain("the section that keeps regressing");
   expect(n.excerpt).toBe("");
+});
+
+// --- RoboRev PR #954 review 3: teardown/budget titles (finding A) ------------
+// watchEndedUnfiredMessage / watchLostAtRestartMessage start with
+// "watch ended:"; watchBudgetClearedMessage starts with "watch cleared:".
+// Those reasons must title as an ending, never as a firing.
+
+test("a watch-ended notice titles Watch ended, not a firing", () => {
+  const block = `<job-notification job_id="job_x" event="watch" job_type="watch" status="watch" reason="watch ended: job_x is terminal (status=completed reason=done output_bytes=10); condition never matched" output_bytes="0">
+watch ended: job_x is terminal (status=completed reason=done output_bytes=10); condition never matched
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.type).toBe("watch");
+  expect(n.title).toBe("Watch ended");
+});
+
+test("a budget auto-clear notice titles Watch auto-cleared, not a trigger", () => {
+  const block = `<job-notification job_id="self" event="watch" job_type="watch" status="watch" reason="watch cleared: self matched 50 times; re-arm with a tighter condition (higher every or narrower output_match)" output_bytes="0">
+watch cleared: self matched 50 times; re-arm with a tighter condition (higher every or narrower output_match)
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.type).toBe("watch");
+  expect(n.title).toBe("Watch auto-cleared");
+});
+
+// --- RoboRev PR #954 review 3: entity-decoded reasons (finding B) ------------
+// The producer entity-escapes attribute values (escapeNotificationText), and
+// parseQuotedAttrs does NOT decode, so a reason carrying & < > arrives
+// escaped and must be decoded before title/secondary use.
+
+test("an entity-escaped reason decodes in the watch secondary", () => {
+  const block = `<job-notification job_id="job_a1b2" event="watch" job_type="watch" status="watch" reason="output_match: a &amp; b" output_bytes="0">
+Matched output_match: a &amp; b on job_a1b2.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.secondary).toBe("output_match: a & b");
+});
+
+test("an entity-escaped reason decodes in the watch title", () => {
+  const block = `<job-notification job_id="job_a1b2" event="watch" job_type="watch" status="watch" reason="event: a &amp; b" output_bytes="0">
+Watch event triggered: event: a &amp; b.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.title).toBe("Event on job_a1b2: a & b");
+});
+
+// --- RoboRev PR #954 review 3: humanized timer secondaries (finding G) -------
+// Timer reasons are bare ("after"/"repeat"); the prose lead carries the
+// seconds ("Timer fired after 300s." / "Timer fired (every 300s)."), so the
+// secondary humanizes from the prose and falls back to the raw reason.
+
+test("an after-timer secondary humanizes the prose duration", () => {
+  const block = `<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="after" output_bytes="0" watch_id="w9">
+Timer fired after 300s.
+Note: check the build
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.secondary).toBe("after 5m");
+});
+
+test("a repeat-timer secondary humanizes the prose cadence", () => {
+  const block = `<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="repeat" output_bytes="0" watch_id="w9">
+Timer fired (every 300s).
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.secondary).toBe("every 5m");
+});
+
+test("a repeat-timer with a since-last-turn tail still humanizes", () => {
+  const block = `<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="repeat" output_bytes="0" watch_id="w9">
+Timer fired (every 300s), 3 times since your last turn.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.secondary).toBe("every 5m");
+});
+
+test("a timer secondary falls back to the raw reason when the prose does not match", () => {
+  const block = `<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="after" output_bytes="0" watch_id="w9">
+Something else entirely.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.secondary).toBe("after");
 });
