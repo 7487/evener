@@ -96,11 +96,11 @@ export const hubUpdateStore = createStore<HubUpdateStoreState>((set, get) => ({
   ...INITIAL,
 
   setChannel(channel) {
-    set({ channel, check: null, checking: false, checkError: null, applyError: null });
+    set({ channel, check: null, checking: false, checkError: null, applyError: null, restartTimedOut: false });
   },
 
   async runCheck() {
-    set({ checking: true, checkError: null });
+    set({ checking: true, checkError: null, restartTimedOut: false });
     const channel = get().channel;
     try {
       const check = await requireClient().request("evener/update/check", { channel: channel ?? "" });

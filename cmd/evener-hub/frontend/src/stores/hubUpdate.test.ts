@@ -92,6 +92,24 @@ describe("runCheck", () => {
     expect(hubUpdateStore.getState().check).toBeNull();
   });
 
+  test("setChannel clears a stale restartTimedOut flag", () => {
+    hubUpdateStore.setState({ restartTimedOut: true });
+
+    act(() => hubUpdateStore.getState().setChannel("release"));
+
+    expect(hubUpdateStore.getState().restartTimedOut).toBe(false);
+  });
+
+  test("runCheck clears a stale restartTimedOut flag", async () => {
+    const fake = connectFakeClient();
+    fake.on("evener/update/check", () => UP_TO_DATE);
+    hubUpdateStore.setState({ restartTimedOut: true });
+
+    await act(() => hubUpdateStore.getState().runCheck());
+
+    expect(hubUpdateStore.getState().restartTimedOut).toBe(false);
+  });
+
   test("ignores stale runCheck response when channel changed during flight", async () => {
     vi.useFakeTimers();
     const fake = connectFakeClient();
