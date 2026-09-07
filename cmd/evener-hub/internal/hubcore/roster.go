@@ -718,10 +718,43 @@ func (r *Roster) RefreshEntry(ctx context.Context, entry rendezvous.Entry) error
 	if !result.OK || result.SessionID == "" {
 		return fmt.Errorf("cannot confirm spawned daemon %s", entry.SessionID)
 	}
+	return r.publishConfirmedEntry(entry, result, generation)
+}
+
+// ReadSpawnedThread confirms a fresh endpoint through the caller's direct read.
+// Initial delivery does not depend on collecting the full status inventory.
+func (r *Roster) ReadSpawnedThread(ctx context.Context, entry rendezvous.Entry, read func(context.Context) (appwire.ThreadReadResponse, error)) (appwire.ThreadReadResponse, error) {
+	r.mu.Lock()
+	r.refreshGen++
+	generation := r.refreshGen
+	r.mu.Unlock()
+	response, err := read(ctx)
+	if err != nil {
+		return response, err
+	}
+	if err := ctx.Err(); err != nil {
+		return response, err
+	}
+	root := response.Thread
+	if entry.Protocol != appwire.ProtocolVersion || entry.Endpoint == "" || root.ID != entry.ThreadID || statusThreadID(root) == "" || (entry.SessionID != "" && statusThreadID(root) != entry.SessionID) {
+		return response, errors.New("spawned daemon read did not confirm its identity")
+	}
+	runningJobs, completedJobs := splitNonAgentJobs(root.Evener.Diagnostics)
+	result := ProbeResult{OK: true, SessionID: statusThreadID(root), Status: root.Status.Type,
+		PendingAsk: root.Evener.AskPending, PendingEscalation: len(root.Evener.PendingEscalations) > 0,
+		RunningJobs: runningJobs, CompletedJobs: completedJobs}
+	return response, r.publishConfirmedEntry(entry, result, generation)
+}
+
+func (r *Roster) publishConfirmedEntry(entry rendezvous.Entry, result ProbeResult, generation uint64) error {
 	live := liveEntryFromProbe(entry, result)
 	r.mu.Lock()
 	if generation < r.publishedGen || generation < r.entryPublishedGen[entry.PID] {
+		current, ok := r.bySess[live.SessionID]
 		r.mu.Unlock()
+		if !ok || current.Crashed || current.PID != entry.PID || current.Endpoint != entry.Endpoint || current.Protocol != entry.Protocol {
+			return fmt.Errorf("spawned daemon %s confirmation superseded without a route", live.SessionID)
+		}
 		return nil
 	}
 	previous, hadPrevious := r.bySess[live.SessionID]

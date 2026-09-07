@@ -616,6 +616,7 @@ type overlappingRefreshProber struct {
 	secondStarted chan struct{}
 	releaseFirst  chan struct{}
 	releaseSecond chan struct{}
+	failSecond    bool
 }
 
 func (p *overlappingRefreshProber) Probe(rendezvous.Entry) ProbeResult {
@@ -628,6 +629,9 @@ func (p *overlappingRefreshProber) Probe(rendezvous.Entry) ProbeResult {
 		close(p.secondStarted)
 		if p.releaseSecond != nil {
 			<-p.releaseSecond
+		}
+		if p.failSecond {
+			return ProbeResult{}
 		}
 		return ProbeResult{SessionID: "parent", Status: "new", RunningSubagentIDs: []string{"new-child"}, OK: true}
 	default:
@@ -1337,4 +1341,23 @@ func (p *survivingOwnerProber) Probe(e rendezvous.Entry) ProbeResult {
 		return ProbeResult{}
 	}
 	return ProbeResult{SessionID: e.SessionID, Status: "restartRequired", OK: true}
+}
+
+func TestRosterRefreshEntryDoesNotSucceedWithoutRouteAfterNewerMiss(t *testing.T) {
+	dir := t.TempDir()
+	entry := rendezvous.Entry{PID: 1001, SessionID: "parent", Protocol: appwire.ProtocolVersion, Endpoint: "ws://daemon/rpc"}
+	writeRendezvous(t, dir, entry)
+	prober := &overlappingRefreshProber{firstStarted: make(chan struct{}), secondStarted: make(chan struct{}), releaseFirst: make(chan struct{}), failSecond: true}
+	roster := NewRoster(dir, prober)
+	roster.procAlive = func(int) bool { return true }
+	done := make(chan error, 1)
+	go func() { done <- roster.RefreshEntry(t.Context(), entry) }()
+	<-prober.firstStarted
+	roster.Refresh()
+	close(prober.releaseFirst)
+	err := <-done
+	live, ok := roster.Find("parent")
+	if err == nil && (!ok || live.Crashed || live.PID != entry.PID) {
+		t.Fatalf("confirmation returned success without a route: %+v, present=%v", live, ok)
+	}
 }

@@ -8371,7 +8371,7 @@ func TestHubRPCThreadStartKeepsProviderForModelIDsWithSlashes(t *testing.T) {
 }
 
 func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) {
-	for _, fault := range []string{"probe", "listing"} {
+	for _, fault := range []string{"probe", "listing", "status"} {
 		t.Run(fault, func(t *testing.T) {
 			const sessionID = "033snFBSHFr78ZbQQMAeBD"
 			daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
@@ -8387,6 +8387,9 @@ func TestHubRPCThreadStartDeliversPromptWhenFirstRosterProbeFails(t *testing.T) 
 				}}, nil
 			})
 			appserver.HandleTyped(daemon.Router(), appwire.MethodThreadList, func(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+				if fault == "status" {
+					return appwire.ThreadListResponse{}, appwire.Unavailable("status temporarily unavailable")
+				}
 				return appwire.ThreadListResponse{Data: []appwire.Thread{{ID: sessionID, SessionID: sessionID, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}}}, nil
 			})
 			var gotPrompt string

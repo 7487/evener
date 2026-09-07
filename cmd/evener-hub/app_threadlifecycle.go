@@ -185,16 +185,6 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 				}
 			}
 		}
-		if canUseSpawnEntry {
-			// The initial direct route also needs a published owner so later
-			// reads, relays, and navigation can find the spawned daemon.
-			live, found := cfg.Roster.Find(entry.SessionID)
-			if !found || live.Crashed || live.PID != entry.PID {
-				if err := cfg.Roster.RefreshEntry(ctx, entry); err != nil {
-					return appwire.ThreadStartResponse{}, appwire.Unavailable(err.Error())
-				}
-			}
-		}
 	}
 	ref := localSpawnWorkspaceRef(entry)
 	var source appsource.Source
@@ -225,7 +215,23 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 		annotateThreadProjects([]appwire.Thread{thread})
 		return appwire.ThreadStartResponse{Thread: thread}, nil
 	}
-	threadResp, err := source.ReadThread(ctx, appwire.ThreadReadParams{Ref: ref})
+	read := func(ctx context.Context) (appwire.ThreadReadResponse, error) {
+		return source.ReadThread(ctx, appwire.ThreadReadParams{Ref: ref})
+	}
+	var threadResp appwire.ThreadReadResponse
+	if cfg.Roster != nil && canUseSpawnEntry {
+		live, found := cfg.Roster.Find(entry.SessionID)
+		if !found || live.Crashed || live.PID != entry.PID {
+			threadResp, err = cfg.Roster.ReadSpawnedThread(ctx, entry, read)
+			if err != nil && threadResp.Thread.ID != "" {
+				return appwire.ThreadStartResponse{}, appwire.Unavailable(err.Error())
+			}
+		} else {
+			threadResp, err = read(ctx)
+		}
+	} else {
+		threadResp, err = read(ctx)
+	}
 	if err != nil {
 		threadResp.Thread = appwire.Thread{
 			ID: entry.ThreadID, SessionID: entry.SessionID, CWD: workingDir,
