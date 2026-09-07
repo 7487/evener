@@ -99,7 +99,7 @@ func lookupDaemonOwner(ctx context.Context, cfg hubcore.WebConfig, ref, threadID
 		threadID = parentID
 	}
 
-	if subagentAncestry && !reachedRoot {
+	if subagentAncestry && !reachedRoot && !cfg.Roster.DaemonOwnershipAbsent() {
 		return hubcore.LiveEntry{}, false, fmt.Errorf("cannot verify incomplete subagent ancestry at session %s", threadID)
 	}
 

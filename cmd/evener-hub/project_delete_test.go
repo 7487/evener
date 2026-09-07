@@ -1634,3 +1634,58 @@ func TestProjectDeleteDoesNotBroadcastWhenNothingRemoved(t *testing.T) {
 		t.Fatalf("expected nothing actually deleted (session skipped), got %+v", got.Deleted)
 	}
 }
+
+func TestProjectDeleteResumesAfterRemovingDelegateParent(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	if err := os.MkdirAll(work, 0755); err != nil {
+		t.Fatal(err)
+	}
+	project, err := identifier.ResolveProject(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "projects", project.ID)
+	parentID, childID := projectDeleteCanonicalSessionIDs[0], projectDeleteCanonicalSessionIDs[1]
+	writeSession(t, stateDir, parentID, project.CanonicalPath)
+	writeSession(t, stateDir, childID, project.CanonicalPath)
+	meta, err := schema.LoadSessionMeta(stateDir, childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.ParentSessionID, meta.JobTreeRootSessionID, meta.IsSubagent = parentID, parentID, true
+	if err := schema.SaveSessionMeta(stateDir, meta); err != nil {
+		t.Fatal(err)
+	}
+	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+	if _, err := past.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	oldRemove := removeProjectSessionFile
+	t.Cleanup(func() { removeProjectSessionFile = oldRemove })
+	removeProjectSessionFile = func(path string) error {
+		if filepath.Base(path) == childID+".future-artifact" {
+			return errors.New("interrupted child cleanup")
+		}
+		return oldRemove(path)
+	}
+	web := NewWebServer(hubcore.WebConfig{HubStateRoot: root, StateDir: root, Past: past, Roster: hubcore.NewRosterWithEntries()})
+	if _, err := dispatchProjectDelete(t, web, appwire.ProjectDeleteParams{Key: project.ID, WorkingDir: project.CanonicalPath}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "sessions", parentID+".meta.json")); !os.IsNotExist(err) {
+		t.Fatalf("parent not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "sessions", childID+".meta.json")); err != nil {
+		t.Fatalf("child not retained: %v", err)
+	}
+	removeProjectSessionFile = oldRemove
+	restored := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+	if _, err := restored.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	_ = NewWebServer(hubcore.WebConfig{HubStateRoot: root, StateDir: root, Past: restored, Roster: hubcore.NewRosterWithEntries()})
+	if _, err := os.Stat(filepath.Join(stateDir, "sessions", childID+".meta.json")); !os.IsNotExist(err) {
+		t.Fatalf("recovery retained child: %v", err)
+	}
+}

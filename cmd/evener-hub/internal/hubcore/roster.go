@@ -500,6 +500,23 @@ func (r *Roster) OwnershipError() error {
 	return r.ownershipErr
 }
 
+// DaemonOwnershipAbsent reports whether the roster excludes every possible
+// daemon owner, including unresolved claims. This permits retained sessions
+// with deleted ancestry to recover without guessing which daemon owns them.
+func (r *Roster) DaemonOwnershipAbsent() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.ownershipErr != nil || len(r.unconfirmed) != 0 {
+		return false
+	}
+	for _, entry := range r.byPID {
+		if !entry.Crashed {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *Roster) recordOwnershipError(generation uint64, err error) {
 	r.mu.Lock()
 	if generation < r.publishedGen {

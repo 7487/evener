@@ -806,3 +806,44 @@ func TestSessionDeleteAllowsIndependentForkOfLiveDaemon(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionDeleteRetainedDelegateAfterParentDeletion(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "projects", "upgrade-0000000000")
+	parentID := buildRPCParentSession(t, stateDir)
+	childID := buildUpgradeDelegate(t, stateDir, parentID)
+	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+	if _, err := past.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	roster := hubcore.NewRoster(t.TempDir(), &hubcore.StatusProber{})
+	roster.Refresh()
+	spawned := false
+	cfg := hubcore.WebConfig{Past: past, Roster: roster, ResumeLocks: hubcore.NewResumeLocks(), Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		spawned = true
+		return rendezvous.Entry{}, errors.New("spawn sentinel")
+	}}}
+	web := NewWebServer(cfg)
+	response, err := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(parentID)})
+	if err != nil || len(response.Deleted) != 1 {
+		t.Fatalf("delete parent: %+v %v", response, err)
+	}
+	hub := newHubRPCTestServer(t, cfg)
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: localAppRef(childID), IncludeTurns: true}); err != nil {
+		t.Fatalf("read retained child: %v", err)
+	}
+	_, _ = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Session: childID})
+	if !spawned {
+		t.Fatal("retained child could not reach resume launcher")
+	}
+	response, err = dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(childID)})
+	if err != nil || len(response.Deleted) != 1 {
+		t.Fatalf("delete child: %+v %v", response, err)
+	}
+}
