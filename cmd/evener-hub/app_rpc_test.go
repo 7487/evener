@@ -9264,22 +9264,28 @@ func TestHubRPCThreadResumeConfirmsSpawnAfterDiscoveryFailure(t *testing.T) {
 func TestHubRPCSubscribedReadRefreshesReplacedDaemonOwnership(t *testing.T) {
 	for _, sameEndpoint := range []bool{false, true} {
 		t.Run(fmt.Sprint("same endpoint=", sameEndpoint), func(t *testing.T) {
-			testHubSubscribedReadReplacedOwner(t, sameEndpoint, appwire.MethodThreadRead)
+			testHubSubscribedReadReplacedOwner(t, sameEndpoint, appwire.MethodThreadRead, serveProtocolMismatch)
 		})
 	}
 }
 
 func TestHubRPCSessionActionsRefreshReplacedDaemonOwnership(t *testing.T) {
 	for _, method := range []string{appwire.MethodThreadShutdown, appwire.MethodThreadModelSet, appwire.MethodThreadVisionModelSet, appwire.MethodThreadCompactStart, appwire.MethodGoalSet} {
-		t.Run(method, func(t *testing.T) { testHubSubscribedReadReplacedOwner(t, true, method) })
+		t.Run(method, func(t *testing.T) { testHubSubscribedReadReplacedOwner(t, true, method, serveProtocolMismatch) })
 	}
 }
 
 func TestHubRPCTurnStartRefreshesReplacedDaemonBeforeRelay(t *testing.T) {
-	testHubSubscribedReadReplacedOwner(t, true, appwire.MethodTurnStart)
+	testHubSubscribedReadReplacedOwner(t, true, appwire.MethodTurnStart, serveProtocolMismatch)
 }
 
-func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool, method string) {
+func TestHubRPCCachedRouteRefreshesTypedProtocolMismatch(t *testing.T) {
+	for _, method := range []string{appwire.MethodThreadRead, appwire.MethodTurnStart, appwire.MethodThreadModelSet} {
+		t.Run(method, func(t *testing.T) { testHubSubscribedReadReplacedOwner(t, true, method, serveTypedProtocolMismatch) })
+	}
+}
+
+func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool, method string, replacement http.HandlerFunc) {
 	root := t.TempDir()
 	sessionID := buildRPCParentSession(t, filepath.Join(root, "projects", "upgrade-0000000000"))
 	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
@@ -9320,7 +9326,7 @@ func testHubSubscribedReadReplacedOwner(t *testing.T, sameEndpoint bool, method 
 	entry.Protocol = "evener-appwire-v4"
 	if sameEndpoint {
 		handlerMu.Lock()
-		serve = serveProtocolMismatch
+		serve = replacement
 		handlerMu.Unlock()
 	} else {
 		peer.Close()

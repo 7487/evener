@@ -160,6 +160,14 @@ func protocolMismatchPeer(t *testing.T) string {
 }
 
 func serveProtocolMismatch(w http.ResponseWriter, r *http.Request) {
+	serveInitializeResponse(w, r, map[string]any{"error": map[string]any{"code": appwire.CodeInvalidRequest, "message": "incompatible protocol"}})
+}
+
+func serveTypedProtocolMismatch(w http.ResponseWriter, r *http.Request) {
+	serveInitializeResponse(w, r, map[string]any{"result": appwire.InitializeResponse{ProtocolVersion: "evener-appwire-v4"}})
+}
+
+func serveInitializeResponse(w http.ResponseWriter, r *http.Request, response map[string]any) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -171,7 +179,8 @@ func serveProtocolMismatch(w http.ResponseWriter, r *http.Request) {
 	if err := wsjson.Read(r.Context(), conn, &request); err != nil {
 		return
 	}
-	_ = wsjson.Write(r.Context(), conn, map[string]any{"id": request.ID, "error": map[string]any{"code": appwire.CodeInvalidRequest, "message": "incompatible protocol"}})
+	response["id"] = request.ID
+	_ = wsjson.Write(r.Context(), conn, response)
 }
 
 func TestHubResumeRefreshesProtocolStateBeforeDeciding(t *testing.T) {
