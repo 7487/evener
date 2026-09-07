@@ -87,3 +87,7 @@ Linux binds signaling and exit confirmation through a pidfd. Its process start t
 Recovery must remain reachable when both navigation and initial thread hydration fail. A local session loading surface therefore offers the same confirmation as the session menus; the hub remains the authority for whether the ref has a direct daemon owner.
 
 Serialization tests combine ownership of the actual stable/current mutexes with real resume/delete outcomes and acquisition call-site review. They do not infer scheduler timing from sleeps or runtime stack text; Go synctest does not consider mutex waits durably blocked.
+
+Recovery first opens a verified process handle, then fences and cancels that daemon's direct RPCs before acquiring the ownership locks. An independent bounded recovery slot can admit the request while the normal WebSocket worker is stalled; ordinary mutations retain FIFO order. Cancellation remains distinct from session-unavailable so it cannot trigger automatic resume. Exact-entry reads during spawn confirmation use the persistent source's cancellation scope too. The process key excludes mutable session aliases and normalizes timestamps to UTC.
+
+Retained rendezvous evidence is excluded from ambiguity only after verified process exit. A direct exited claim remains available for idempotent retry when every overlapping claim is verified dead; any live or unresolved competitor still prevents termination. Signaling and exit confirmation remain under the existing ownership locks, with discovery and native identity rechecked before the signal.
