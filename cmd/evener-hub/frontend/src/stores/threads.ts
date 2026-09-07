@@ -602,6 +602,7 @@ function notifyMutationPersistence(targetRefs: Iterable<string>, committed?: Mut
 }
 
 function applyClearResponse(targetRef: string, response: ThreadClearResponse): void {
+  invalidateGoalResponseFallback(targetRef);
   const now = Date.now();
   const model = hydrateThread({ thread: response.thread }, targetRef, now);
   // A clear response is a newer authoritative cut than any thread/read that

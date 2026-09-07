@@ -8625,3 +8625,27 @@ test("failed blocking persistence prevents a new enqueue from retrying uncertain
     vi.useRealTimers();
   }
 });
+
+test("clear response fences goal responses from the previous instance", async () => {
+  const fake = connectFakeClient();
+  fake.on("thread/read", () => readResponse("ref_a"));
+  await threadsStore.getState().ensureThread("ref_a");
+  await threadsStore.getState().watchThread("ref_a");
+  const goalResponse = deferred<{ started: boolean }>();
+  const requested = nextHandledRequest(fake, "goal/set", () => goalResponse.promise);
+  const pending = threadsStore.getState().setGoal("ref_a", "old objective");
+  await requested;
+  fake.on("thread/clear", (params) =>
+    clearResponse(params, testThread("ref_a", { id: "cleared-instance", turns: [] })),
+  );
+  await threadsStore.getState().clearThread("ref_a");
+  expect(threadsStore.getState().threads.get("ref_a")?.threadId).toBe("cleared-instance");
+  goalResponse.resolve({ started: true });
+  await pending;
+  expect(threadsStore.getState().threads.get("ref_a")?.goal).toBeNull();
+  expect(threadsStore.getState().watchedThreads.get("ref_a")?.goal).toBeNull();
+  fake.on("goal/set", () => ({ started: true }));
+  await threadsStore.getState().setGoal("ref_a", "new objective");
+  expect(threadsStore.getState().threads.get("ref_a")?.goal?.objective).toBe("new objective");
+  expect(threadsStore.getState().watchedThreads.get("ref_a")?.goal?.objective).toBe("new objective");
+});
