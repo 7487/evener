@@ -7933,6 +7933,25 @@ test("a new message composed after a saved snapshot can still dispatch", async (
   expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
 });
 
+test("a message composed during a saved read dispatches its first delivery", async () => {
+  const fake = connectFakeClient("connecting");
+  const saved = deferred<ThreadReadResponse>();
+  fake.on("thread/read", () => saved.promise);
+  const delivered = deferred<void>();
+  fake.on("turn/queue", (params) => {
+    delivered.resolve();
+    return { receipt: mutationReceipt(params.clientMutationId) };
+  });
+  fake.emitReady();
+  const hydration = threadsStore.getState().ensureThread("ref_a");
+  await threadsStore.getState().queue("ref_a", "new message during hydration");
+  expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(0);
+  saved.resolve(readResponse("ref_a", { status: { type: "notLoaded" } }));
+  await hydration;
+  await delivered.promise;
+  expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
+});
+
 test("reload after a failed restart write reconciles persisted uncertainty with the resumed daemon", async () => {
   const storage = new MutationOutboxIndexedDB({ createMutationId: () => "reload-uncertain" });
   const record = await storage.enqueueIntent({
@@ -7942,6 +7961,7 @@ test("reload after a failed restart write reconciles persisted uncertainty with 
     attachments: [],
     optimisticDisplay: { text: "sentinel" },
   });
+  await storage.markAttempted(record.clientMutationId);
   setMutationStorageForTests(storage);
   vi.spyOn(storage, "markUnknown").mockRejectedValue(new DOMException("storage unavailable", "AbortError"));
   const old = connectFakeClient("connecting");
@@ -7996,6 +8016,7 @@ test("saved snapshots retain restart protection for subsequently discovered outb
     attachments: [],
     optimisticDisplay: { text: "sentinel" },
   });
+  await storage.markAttempted(record.clientMutationId);
   await threadsStore.getState().refreshThread("ref_a");
   expect((await storage.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
   expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(0);
@@ -8015,6 +8036,7 @@ for (const state of ["blockedUnknown", "submitting"] as const) {
       attachments: [],
       optimisticDisplay: { text: "sentinel" },
     });
+    await storage.markAttempted(record.clientMutationId);
     if (state === "blockedUnknown") await storage.markUnknown(record.clientMutationId, state);
     storage.close();
     const fake = connectFakeClient("connecting");
@@ -8050,6 +8072,7 @@ test("compatible refresh wins over a delayed incompatible receipt write", async 
     attachments: [],
     optimisticDisplay: { text: "sentinel" },
   });
+  await storage.markAttempted(record.clientMutationId);
   const writeStarted = deferred<void>();
   const releaseWrite = deferred<void>();
   const markUnknown = storage.markUnknown.bind(storage);
@@ -8098,6 +8121,7 @@ test.each([false, true])(
       attachments: [],
       optimisticDisplay: { text: "sentinel" },
     });
+    await storage.markAttempted(record.clientMutationId);
     const scanStarted = deferred<void>();
     const releaseScan = deferred<void>();
     const listOutbox = storage.listOutbox.bind(storage);
@@ -8150,6 +8174,7 @@ for (const failure of ["listOutbox", "markUnknown"] as const) {
         attachments: [],
         optimisticDisplay: { text: "sentinel" },
       });
+      await storage.markAttempted(record.clientMutationId);
       const blockingStarted = deferred<void>();
       const releaseFailure = deferred<void>();
       let faultEnabled = true;
@@ -8378,6 +8403,7 @@ for (const status of ["active", "idle"]) {
       attachments: [],
       optimisticDisplay: { text: "sentinel" },
     });
+    await storage.markAttempted(record.clientMutationId);
     snapshot = readResponse("ref_a", { status: { type: status } });
     Object.assign(snapshot.thread.evener, { mutationStateAuthoritative: false, kind: "subagent" });
     await threadsStore.getState().refreshThread("ref_a");
@@ -8434,6 +8460,7 @@ test.each(["active", "idle"].flatMap((status) => [true, false].map((accepted) =>
         attachments: [],
         optimisticDisplay: { text: "sentinel" },
       });
+      await storage.markAttempted(record.clientMutationId);
       const settled = deferred<void>();
       const settleApplied = storage.settleApplied.bind(storage);
       vi.spyOn(storage, "settleApplied").mockImplementation(async (...args) => {

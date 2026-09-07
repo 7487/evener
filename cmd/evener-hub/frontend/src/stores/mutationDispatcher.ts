@@ -92,6 +92,8 @@ export class MutationDispatcher {
       if (current?.state !== "submitting") continue;
       if (this.#getClient(targetRef) !== client) return false;
 
+      if (!(await this.#storage.markAttempted(current.clientMutationId))) continue;
+      if (this.#getClient(targetRef) !== client) return false;
       const outcome = await this.#attempt(client, current);
       if (outcome === "stop") return false;
     }

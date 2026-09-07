@@ -235,14 +235,21 @@ function composerSteerButton(): HTMLButtonElement {
 
 test("an unconfirmed storage commit stays visible and repeated Steer clicks cannot duplicate it", async () => {
   const fake = await mountComposer("ref_a");
-  fake.on("turn/steer", (params) => ({
-    receipt: {
-      clientMutationId: params.clientMutationId,
-      disposition: "applied",
-      threadId: "thr_ref_a",
-      projectionState: "reflected",
-    },
-  }));
+  let deliveryObserved: (() => void) | undefined;
+  const delivered = new Promise<void>((resolve) => {
+    deliveryObserved = resolve;
+  });
+  fake.on("turn/steer", (params) => {
+    deliveryObserved?.();
+    return {
+      receipt: {
+        clientMutationId: params.clientMutationId,
+        disposition: "applied",
+        threadId: "thr_ref_a",
+        projectionState: "reflected",
+      },
+    };
+  });
   await flushPendingTurnsProjectionForTests();
   let hold: ReturnType<typeof holdIndexedDBEvent> | undefined;
   let commitObserved: (() => void) | undefined;
@@ -278,19 +285,27 @@ test("an unconfirmed storage commit stays visible and repeated Steer clicks cann
   }
   expect(textarea()?.value).toBe("");
   expect(screen.queryByRole("status", { name: "Message storage" })).toBeNull();
+  await act(async () => delivered);
   expect(fake.calls.filter((call) => call.method === "turn/steer")).toHaveLength(1);
 });
 
 test("a cancelled storage stall keeps the draft, reports the problem, and allows one safe retry", async () => {
   const fake = await mountComposer("ref_a");
-  fake.on("turn/steer", (params) => ({
-    receipt: {
-      clientMutationId: params.clientMutationId,
-      disposition: "applied",
-      threadId: "thr_ref_a",
-      projectionState: "reflected",
-    },
-  }));
+  let deliveryObserved: (() => void) | undefined;
+  const delivered = new Promise<void>((resolve) => {
+    deliveryObserved = resolve;
+  });
+  fake.on("turn/steer", (params) => {
+    deliveryObserved?.();
+    return {
+      receipt: {
+        clientMutationId: params.clientMutationId,
+        disposition: "applied",
+        threadId: "thr_ref_a",
+        projectionState: "reflected",
+      },
+    };
+  });
   await flushPendingTurnsProjectionForTests();
   const get = IDBObjectStore.prototype.get;
   let hold: ReturnType<typeof holdIndexedDBEvent> | undefined;
@@ -332,6 +347,7 @@ test("a cancelled storage stall keeps the draft, reports the problem, and allows
   fireEvent.click(composerSteerButton());
   await flushPendingTurnsProjectionForTests();
   expect(textarea()?.value).toBe("");
+  await act(async () => delivered);
   expect(fake.calls.filter((call) => call.method === "turn/steer")).toHaveLength(1);
 });
 

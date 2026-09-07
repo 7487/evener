@@ -11,6 +11,7 @@ import type {
 import { createSecureUUID } from "./secureUUID";
 
 type MutationOutboxOperation =
+  | "markAttempted"
   | "enqueueIntent"
   | "settleReceipt"
   | "transferToRecovery"
@@ -121,6 +122,7 @@ export class MutationOutboxIndexedDB {
         intentSequence,
         createdAt: this.#now(),
         state: "submitting",
+        attempted: false,
       };
       await requestResult(transaction.objectStore(OUTBOX_STORE).add(record));
       return record;
@@ -230,11 +232,27 @@ export class MutationOutboxIndexedDB {
     });
   }
 
-  async markUnknown(clientMutationId: string, state: MutationOutboxState): Promise<boolean> {
+  // Commit attempt evidence before transport so another tab or a reload cannot
+  // mistake a possibly delivered mutation for an unsent intent.
+  async markAttempted(clientMutationId: string): Promise<boolean> {
+    return this.#write(OUTBOX_STORE, "markAttempted", async (transaction) => {
+      const store = transaction.objectStore(OUTBOX_STORE);
+      const record = await requestResult<MutationOutboxRecord | undefined>(store.get(clientMutationId));
+      if (record?.state !== "submitting") return false;
+      await requestResult(store.put({ ...record, attempted: true }));
+      return true;
+    });
+  }
+
+  async markUnknown(
+    clientMutationId: string,
+    state: MutationOutboxState,
+    options?: { onlyAttempted: boolean },
+  ): Promise<boolean> {
     return this.#write(OUTBOX_STORE, undefined, async (transaction) => {
       const store = transaction.objectStore(OUTBOX_STORE);
       const record = await requestResult<MutationOutboxRecord | undefined>(store.get(clientMutationId));
-      if (!record) return false;
+      if (!record || (options?.onlyAttempted && record.attempted === false)) return false;
       if (record.state !== state) await requestResult(store.put({ ...record, state }));
       return true;
     });
@@ -358,6 +376,7 @@ export class MutationOutboxIndexedDB {
         intentSequence,
         createdAt: this.#now(),
         state: "submitting",
+        attempted: false,
       };
       await requestResult(transaction.objectStore(OUTBOX_STORE).add(record));
       await requestResult(recoveryStore.delete(clientMutationId));

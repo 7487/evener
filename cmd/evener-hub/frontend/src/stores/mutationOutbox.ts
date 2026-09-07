@@ -48,6 +48,7 @@ export interface MutationRecord extends MutationIntent {
 
 export interface MutationOutboxRecord extends MutationRecord {
   state: MutationOutboxState;
+  attempted?: boolean;
 }
 
 export interface MutationOptimisticRecord extends MutationRecord {

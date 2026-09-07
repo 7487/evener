@@ -1518,7 +1518,7 @@ async function publishAndReconcileThreadHydration(
           for (const record of await runtime.storage.listOutbox(ref)) {
             if (!current()) return;
             if (record.state === "submitting")
-              await runtime.storage.markUnknown(record.clientMutationId, "blockedUnknown");
+              await runtime.storage.markUnknown(record.clientMutationId, "blockedUnknown", { onlyAttempted: true });
           }
           notifyMutationPersistence([ref]);
         } else {
