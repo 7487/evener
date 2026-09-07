@@ -1138,7 +1138,9 @@ func (s *Server) appThreadReadSnapshotChecked(params appwire.ThreadReadParams) (
 			return appwire.ThreadReadResponse{}, err
 		}
 	}
-	thread.Evener.MutationStateAuthoritative = true
+	// Descendant projections carry events and transcript windows, but not the
+	// addressed child's durable queue and mutation receipts.
+	thread.Evener.MutationStateAuthoritative = threadID == s.appProjectionThreadID()
 	response := appwire.ThreadReadResponse{Thread: thread, OlderCursor: olderCursor}
 	if err := appwire.ValidateThreadReadItemResponse(response); err != nil {
 		return appwire.ThreadReadResponse{}, err

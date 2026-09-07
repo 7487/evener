@@ -1401,3 +1401,44 @@ func TestPreparedResumeFirstLiveLifecycleUsesAuthoritativeTurnIdentity(t *testin
 		}
 	}
 }
+
+func TestDescendantReadDoesNotClaimDurableMutationAuthority(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+	srv.SetAppIdentity("local", "root")
+	srv.RecordDescendantAppEvent("root", events.SessionEvent{
+		Kind: events.EventUserInput, SessionID: "child", Data: events.UserInputData{Text: "child work"},
+	})
+	peer := httptest.NewServer(http.HandlerFunc(srv.AppServer().ServeWebSocket))
+	defer peer.Close()
+	transport, err := appwire.DialWebSocket(t.Context(), "ws"+strings.TrimPrefix(peer.URL, "http"), peer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close()
+	client := appwire.NewClient(transport)
+	client.Start(t.Context())
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	for _, subscribe := range []bool{false, true} {
+		for _, includeTurns := range []bool{false, true} {
+			response, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: "local:child", IncludeTurns: includeTurns, Subscribe: subscribe, ItemLimit: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Thread.ID != "child" || response.Thread.Evener.MutationStateAuthoritative {
+				t.Fatalf("descendant subscribe=%v turns=%v thread=%+v", subscribe, includeTurns, response.Thread)
+			}
+			if includeTurns && len(response.Thread.Turns) == 0 {
+				t.Fatal("descendant transcript was lost")
+			}
+		}
+	}
+	root, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: "local:root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !root.Thread.Evener.MutationStateAuthoritative {
+		t.Fatal("root durable projection lost authority")
+	}
+}
