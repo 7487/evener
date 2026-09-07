@@ -233,7 +233,7 @@ func navigationBuildInputsFromTreeSnapshot(generationID string, revision uint64,
 	}
 	// Live daemon constraints override every persisted navigation copy.
 	for _, entry := range live {
-		if entry.SessionID == "" {
+		if entry.SessionID == "" || entry.Crashed {
 			continue
 		}
 		aliases := favoriteSessionAliases(entry.SessionID)
