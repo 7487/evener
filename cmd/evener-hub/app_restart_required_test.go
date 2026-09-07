@@ -1148,3 +1148,42 @@ func TestHubRPCListShowsIncompatibleDaemonWithoutPastIndex(t *testing.T) {
 		t.Fatalf("shutdown error=%v", err)
 	}
 }
+
+func TestHubRPCListDeduplicatesIncompatibleWorkspaceAlias(t *testing.T) {
+	root := t.TempDir()
+	sessionID := buildRPCParentSession(t, filepath.Join(root, "projects", "upgrade-0000000000"))
+	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+	if _, err := past.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	const instanceID = "02wMz5Txv1C3Hut0M8GCeC"
+	runDir := t.TempDir()
+	writeRendezvous(t, runDir, rendezvous.Entry{PID: os.Getpid(), Protocol: "evener-appwire-v4", Endpoint: protocolMismatchPeer(t), SourceID: "local", ThreadID: instanceID, SessionID: instanceID, WorkspaceRef: "local:" + sessionID})
+	roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+	roster.Refresh()
+	hub := newHubRPCTestServer(t, hubcore.WebConfig{Roster: roster, Past: past})
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := client.ThreadList(t.Context(), appwire.ThreadListParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Data) != 1 {
+		t.Fatalf("threads=%+v", list.Data)
+	}
+	thread := list.Data[0]
+	if thread.ID != instanceID || thread.Evener.Ref != "local:"+sessionID || thread.Status.Type != appwire.ThreadStatusRestartRequired {
+		t.Fatalf("thread=%+v", thread)
+	}
+	search, err := client.ThreadList(t.Context(), appwire.ThreadListParams{SearchTerm: "second task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(search.Data) != 1 || search.Data[0].ID != instanceID || search.Data[0].Name != "second task" {
+		t.Fatalf("search=%+v", search.Data)
+	}
+}
