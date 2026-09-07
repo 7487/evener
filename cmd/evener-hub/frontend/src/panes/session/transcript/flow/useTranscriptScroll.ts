@@ -534,7 +534,7 @@ function totalItemCount(model: ThreadModel | undefined): number {
   return total;
 }
 
-// Mirrors Session.tsx's own cadenceStateForStatus mapping (awaiting/warning
+// Mirrors Session.tsx's own cadenceStateForStatus mapping (awaiting/warning/restartRequired
 // -> needs-you) rather than importing it: flow/ is composed BY Session.tsx,
 // not the other way around (same "deliberately separate, parallel small
 // mapping function" precedent Session.tsx itself follows relative to
@@ -542,7 +542,12 @@ function totalItemCount(model: ThreadModel | undefined): number {
 // is checked independently since it need not always coincide with status.type.
 function isAttentionWorthy(model: ThreadModel | undefined): boolean {
   if (!model) return false;
-  return model.askPending || model.status.type === "awaiting" || model.status.type === "warning";
+  return (
+    model.askPending ||
+    model.status.type === "awaiting" ||
+    model.status.type === "warning" ||
+    model.status.type === "restartRequired"
+  );
 }
 
 // The error-anchor's failure signal is TURN-level (this rewrite's own
