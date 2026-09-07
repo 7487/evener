@@ -134,10 +134,11 @@ type Roster struct {
 	// an in-memory or sandboxed filesystem via SetFs.
 	fs afero.Fs
 
-	mu          sync.RWMutex
-	bySess      map[string]LiveEntry // session_id -> entry
-	byPID       map[int]LiveEntry    // pid -> entry (for fsnotify event correlation)
-	unconfirmed []rendezvous.Entry   // live PIDs whose daemon ownership has not been established
+	mu           sync.RWMutex
+	bySess       map[string]LiveEntry // session_id -> entry
+	byPID        map[int]LiveEntry    // pid -> entry (for fsnotify event correlation)
+	unconfirmed  []rendezvous.Entry   // live PIDs whose daemon ownership has not been established
+	ownershipErr error
 	// A completed pass may publish unless a newer pass already published.
 	refreshGen              uint64
 	publishedGen            uint64
@@ -319,6 +320,7 @@ func (r *Roster) refresh() error {
 		var err error
 		entries, err = rendezvous.ListStrict(r.runDir)
 		if err != nil {
+			r.recordOwnershipError(generation, err)
 			return err
 		}
 	}
@@ -463,7 +465,8 @@ func (r *Roster) refresh() error {
 	prevBySess := r.bySess
 	r.bySess = bySess
 	r.byPID = byPID
-	ownershipChanged := !slices.Equal(r.unconfirmed, unconfirmed)
+	ownershipChanged := r.ownershipErr != nil || !slices.Equal(r.unconfirmed, unconfirmed)
+	r.ownershipErr = nil
 	r.unconfirmed = unconfirmed
 	changed := fp != r.fingerprint || ownershipChanged
 	r.fingerprint = fp
@@ -487,6 +490,30 @@ func (r *Roster) refresh() error {
 		onChange()
 	}
 	return nil
+}
+
+// OwnershipError reports an incomplete full scan. Individual daemon
+// confirmations cannot establish that the remaining ownership claims are absent.
+func (r *Roster) OwnershipError() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.ownershipErr
+}
+
+func (r *Roster) recordOwnershipError(generation uint64, err error) {
+	r.mu.Lock()
+	if generation < r.publishedGen {
+		r.mu.Unlock()
+		return
+	}
+	changed := r.ownershipErr == nil || r.ownershipErr.Error() != err.Error()
+	r.publishedGen = generation
+	r.ownershipErr = err
+	onChange := r.onChange
+	r.mu.Unlock()
+	if changed && onChange != nil {
+		onChange()
+	}
 }
 
 type rosterRefreshBatch struct {

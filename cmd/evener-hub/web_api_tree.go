@@ -263,7 +263,9 @@ func navigationBuildInputsFromTreeSnapshot(generationID string, revision uint64,
 func (s *WebServer) navigationSnapshotInputs(ctx context.Context) navigationSnapshot {
 	var live []hubcore.LiveEntry
 	var unconfirmedOwnership bool
+	var ownershipErr error
 	if s.cfg.Roster != nil {
+		ownershipErr = s.cfg.Roster.OwnershipError()
 		live = s.cfg.Roster.List()
 		unconfirmedOwnership = len(s.cfg.Roster.UnconfirmedEntries()) > 0
 	}
@@ -276,7 +278,6 @@ func (s *WebServer) navigationSnapshotInputs(ctx context.Context) navigationSnap
 			metas = append(metas, entry.Meta)
 		}
 	}
-	var ownershipErr error
 	// Healthy navigation snapshots need no persisted ownership scan.
 	if unconfirmedOwnership || slices.ContainsFunc(live, func(entry hubcore.LiveEntry) bool {
 		return !entry.Crashed && entry.Status == appwire.ThreadStatusRestartRequired

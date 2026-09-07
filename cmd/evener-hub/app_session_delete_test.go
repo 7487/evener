@@ -646,3 +646,42 @@ func TestSessionDeletePreservesUnconfirmedDaemonState(t *testing.T) {
 		})
 	}
 }
+
+func TestFailedInitialRosterScanBlocksNavigationAndDeletion(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "projects", "delete-uncertain-0123456789")
+	writeSession(t, stateDir, webTestSessionID, root)
+	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+	if _, err := past.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	runDir := t.TempDir()
+	claim := filepath.Join(runDir, "1.json")
+	if err := os.WriteFile(claim, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	roster := hubcore.NewRoster(runDir, &fakeProber{})
+	roster.Refresh()
+	web := NewWebServer(hubcore.WebConfig{Past: past, Roster: roster, RunDir: runDir})
+	if _, err := (webNavigationSource{web: web}).Capture(t.Context(), "generation", time.Now()); err == nil {
+		t.Error("navigation treated failed discovery as absent ownership")
+	}
+	response, deleteErr := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(webTestSessionID)})
+	if len(response.Deleted) > 0 {
+		t.Error("deleted session after failed discovery")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "sessions", webTestSessionID+".meta.json")); err != nil {
+		t.Fatalf("state removed after failed discovery: %v (delete error: %v)", err, deleteErr)
+	}
+	if err := os.Remove(claim); err != nil {
+		t.Fatal(err)
+	}
+	roster.Refresh()
+	if _, err := (webNavigationSource{web: web}).Capture(t.Context(), "generation", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	response, err := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: localAppRef(webTestSessionID)})
+	if err != nil || len(response.Deleted) != 1 {
+		t.Fatalf("recovered deletion=%+v error=%v", response, err)
+	}
+}

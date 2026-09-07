@@ -1382,3 +1382,43 @@ func TestRosterRetainsChangedClaimAfterProbeFailure(t *testing.T) {
 		t.Fatalf("changed live claim not retained: %+v", claims)
 	}
 }
+
+func TestRosterOwnershipErrorRequiresNewerCompleteScan(t *testing.T) {
+	dir := t.TempDir()
+	entry := rendezvous.Entry{PID: 1001, SessionID: "parent", Protocol: appwire.ProtocolVersion, Endpoint: "ws://daemon/rpc"}
+	writeRendezvous(t, dir, entry)
+	prober := &overlappingRefreshProber{firstStarted: make(chan struct{}), secondStarted: make(chan struct{}), releaseFirst: make(chan struct{})}
+	roster := NewRoster(dir, prober)
+	var changes atomic.Int32
+	roster.SetOnChange(func() { changes.Add(1) })
+	done := make(chan struct{})
+	go func() { roster.Refresh(); close(done) }()
+	<-prober.firstStarted
+	badClaim := filepath.Join(dir, "2.json")
+	if err := os.WriteFile(badClaim, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	roster.Refresh()
+	if roster.OwnershipError() == nil || changes.Load() != 1 {
+		t.Fatal("failed discovery did not publish uncertainty")
+	}
+	close(prober.releaseFirst)
+	<-done
+	if roster.OwnershipError() == nil {
+		t.Fatal("older successful scan cleared newer uncertainty")
+	}
+	if err := roster.RefreshEntry(t.Context(), entry); err != nil {
+		t.Fatal(err)
+	}
+	if roster.OwnershipError() == nil {
+		t.Fatal("individual confirmation cleared global uncertainty")
+	}
+	if err := os.Remove(badClaim); err != nil {
+		t.Fatal(err)
+	}
+	before := changes.Load()
+	roster.Refresh()
+	if roster.OwnershipError() != nil || changes.Load() <= before {
+		t.Fatal("complete scan did not publish recovered ownership")
+	}
+}

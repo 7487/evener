@@ -144,6 +144,9 @@ func (s *WebServer) projectDelete(ctx context.Context, params appwire.ProjectDel
 
 	// Whole-project fast path: refuse when anything is live at entry.
 	if s.cfg.Roster != nil {
+		if err := s.cfg.Roster.OwnershipError(); err != nil {
+			return appwire.ProjectDeleteResponse{}, appwire.Unavailable(err.Error())
+		}
 		var liveNames []string
 		for _, e := range entries {
 			if projectSessionLive(s.cfg.Roster, e.ID) {
@@ -297,6 +300,12 @@ func (s *WebServer) acquireProjectDeletionOwnership(
 		lock := s.lockForSession(target.ThreadID)
 		lock.Lock()
 		locks = append(locks, lock)
+		if s.cfg.Roster != nil {
+			if err := s.cfg.Roster.OwnershipError(); err != nil {
+				release()
+				return nil, &projectDeletionOwnershipError{ThreadID: target.ThreadID, Err: err}
+			}
+		}
 		if s.cfg.Roster != nil && projectSessionLive(s.cfg.Roster, target.ThreadID) {
 			release()
 			return nil, &projectDeletionOwnershipError{ThreadID: target.ThreadID, Live: true}
