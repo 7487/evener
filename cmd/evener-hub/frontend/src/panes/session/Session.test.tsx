@@ -2117,76 +2117,82 @@ test("offers explicit resume after restart even without pending messages", async
   expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
 });
 
-test("explicitly resumes a stopped session before reconciling its uncertain send", async () => {
-  const fake = connectFakeClient();
-  let status = "restartRequired";
-  let mutationId = "";
-  fake.on("thread/read", () =>
-    readResponse("ref_a", {
-      status: { type: status },
-      evener: {
-        ref: "ref_a",
-        capabilities: CAPABILITIES,
-        queue: { revision: 1, clientMutationIds: status === "idle" ? [mutationId] : [] },
-      },
-    }),
-  );
-  fake.on("thread/resume", () => {
-    status = "idle";
-    return readResponse("ref_a", { status: { type: "idle" } });
-  });
-  render(
-    <ClientProvider client={fake}>
-      <Session params={{ ref: "ref_a" }} paneId="p1" focused={true} />
-    </ClientProvider>,
-  );
-  await screen.findByRole("alert");
-  await act(async () => {
-    mutationId = await seedPendingSend();
-    await mutationStorage.markUnknown(mutationId, "blockedUnknown");
-    await refreshPendingTurnsProjection("ref_a");
-    await flushPendingTurnsProjectionForTests();
-  });
-  const holds: ReturnType<typeof holdIndexedDBEvent>[] = [];
-  let announceRead: (() => void) | undefined;
-  const readHeld = new Promise<void>((resolve) => {
-    announceRead = resolve;
-  });
-  const getAll = IDBObjectStore.prototype.getAll;
-  const reads = vi.spyOn(IDBObjectStore.prototype, "getAll").mockImplementation(function (
-    this: IDBObjectStore,
-    ...args
-  ) {
-    const request = getAll.apply(this, args);
-    if (this.name === "outbox" && threadsStore.getState().threads.get("ref_a")?.status.type === "notLoaded") {
-      const hold = holdIndexedDBEvent(request, "success");
-      holds.push(hold);
-      void hold.reached.then(() => announceRead?.());
+test.each(["notLoaded", "active", "idle"])(
+  "explicitly resumes a %s session before reconciling its uncertain send",
+  async (recoveryStatus) => {
+    const fake = connectFakeClient();
+    let status = "restartRequired";
+    let mutationId = "";
+    let resumed = false;
+    fake.on("thread/read", () =>
+      readResponse("ref_a", {
+        status: { type: status },
+        evener: {
+          ref: "ref_a",
+          capabilities: CAPABILITIES,
+          mutationStateAuthoritative: resumed,
+          queue: { revision: 1, clientMutationIds: resumed ? [mutationId] : [] },
+        },
+      }),
+    );
+    fake.on("thread/resume", () => {
+      resumed = true;
+      status = "idle";
+      return readResponse("ref_a", { status: { type: "idle" } });
+    });
+    render(
+      <ClientProvider client={fake}>
+        <Session params={{ ref: "ref_a" }} paneId="p1" focused={true} />
+      </ClientProvider>,
+    );
+    await screen.findByRole("alert");
+    await act(async () => {
+      mutationId = await seedPendingSend();
+      await mutationStorage.markUnknown(mutationId, "blockedUnknown");
+      await refreshPendingTurnsProjection("ref_a");
+      await flushPendingTurnsProjectionForTests();
+    });
+    const holds: ReturnType<typeof holdIndexedDBEvent>[] = [];
+    let announceRead: (() => void) | undefined;
+    const readHeld = new Promise<void>((resolve) => {
+      announceRead = resolve;
+    });
+    const getAll = IDBObjectStore.prototype.getAll;
+    const reads = vi.spyOn(IDBObjectStore.prototype, "getAll").mockImplementation(function (
+      this: IDBObjectStore,
+      ...args
+    ) {
+      const request = getAll.apply(this, args);
+      if (this.name === "outbox" && threadsStore.getState().threads.get("ref_a")?.status.type === recoveryStatus) {
+        const hold = holdIndexedDBEvent(request, "success");
+        holds.push(hold);
+        void hold.reached.then(() => announceRead?.());
+      }
+      return request;
+    });
+    const releaseReads = () => {
+      reads.mockRestore();
+      for (const hold of holds.splice(0)) hold.release();
+    };
+    try {
+      status = recoveryStatus;
+      fireEvent.click(screen.getByRole("button", { name: "Refresh session" }));
+      await readHeld;
+      const resume = await screen.findByRole("button", { name: "Resume session" });
+      expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown");
+      expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+      expect((resume as HTMLButtonElement).disabled).toBe(true);
+      releaseReads();
+      await waitFor(() => expect((resume as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(resume);
+      await waitFor(async () => expect(await mutationStorage.getOutbox(mutationId)).toBeUndefined());
+      expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
+    } finally {
+      releaseReads();
     }
-    return request;
-  });
-  const releaseReads = () => {
-    reads.mockRestore();
-    for (const hold of holds.splice(0)) hold.release();
-  };
-  try {
-    status = "notLoaded";
-    fireEvent.click(screen.getByRole("button", { name: "Refresh session" }));
-    await readHeld;
-    const resume = await screen.findByRole("button", { name: "Resume session" });
-    expect((await mutationStorage.getOutbox(mutationId))?.state).toBe("blockedUnknown");
-    expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
-    expect((resume as HTMLButtonElement).disabled).toBe(true);
-    releaseReads();
-    await waitFor(() => expect((resume as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(resume);
-    await waitFor(async () => expect(await mutationStorage.getOutbox(mutationId)).toBeUndefined());
-    expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
-    expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
-  } finally {
-    releaseReads();
-  }
-});
+  },
+);
 
 test("keeps storage recovery failure visible on a compatible session until reconciliation succeeds", async () => {
   const fake = connectFakeClient();

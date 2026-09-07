@@ -104,14 +104,20 @@ function EmptyTranscript({ active, restartRequired }: { active: boolean; restart
 // actions) follows that shape. Automatic older-turn paging is the deliberate
 // exception: nobody pressed anything, so its failure reports inline at the top
 // of the transcript instead (useTranscript's olderError -> LoadOlderRow).
-function RestartRequiredNotice({ sessionRef, stopped = false }: { sessionRef: string; stopped?: boolean }) {
+function RestartRequiredNotice({
+  sessionRef,
+  resumeRequired = false,
+}: {
+  sessionRef: string;
+  resumeRequired?: boolean;
+}) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refresh = async () => {
     setRefreshing(true);
     setError(null);
     try {
-      if (stopped) {
+      if (resumeRequired) {
         const { client, state } = connectionStore.getState();
         if (!client || state !== "ready") throw new Error("Connect to the hub before resuming this session.");
         await client.request("thread/resume", { ref: sessionRef });
@@ -125,11 +131,11 @@ function RestartRequiredNotice({ sessionRef, stopped = false }: { sessionRef: st
   };
   return (
     <div role="alert">
-      {stopped
+      {resumeRequired
         ? "Resume this session to check whether its uncertain messages were delivered."
         : "Session restart required. Stop the older daemon, then refresh this session. Stopping interrupts active work."}
       <Button disabled={refreshing} onClick={() => void refresh()}>
-        {stopped ? "Resume session" : "Refresh session"}
+        {resumeRequired ? "Resume session" : "Refresh session"}
       </Button>
       {error && <span>{error}</span>}
     </div>
@@ -419,8 +425,9 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
               primaryModel={model.model}
             />
             {(model.status.type === "restartRequired" ||
-              (model.status.type === "notLoaded" && (restartPending || blockedMutations.length > 0))) && (
-              <RestartRequiredNotice sessionRef={ref} stopped={model.status.type === "notLoaded"} />
+              restartPending ||
+              (model.status.type === "notLoaded" && blockedMutations.length > 0)) && (
+              <RestartRequiredNotice sessionRef={ref} resumeRequired={model.status.type !== "restartRequired"} />
             )}
             {reconciliationFailed && (
               <div role="alert">

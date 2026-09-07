@@ -8333,6 +8333,34 @@ test("periodic discovery recovers reconciliation after the final durable record 
   }
 });
 
+test.each(["active", "idle"])(
+  "recovered %s descendant without uncertain messages permits new sends",
+  async (status) => {
+    const storage = new MutationOutboxIndexedDB({ createMutationId: () => "fresh-descendant-send" });
+    setMutationStorageForTests(storage);
+    const fake = connectFakeClient("connecting");
+    let snapshot = readResponse("ref_a", { status: { type: "restartRequired" } });
+    fake.on("thread/read", () => snapshot);
+    const delivered = deferred<void>();
+    fake.on("turn/queue", (params) => {
+      delivered.resolve();
+      return { receipt: mutationReceipt(params.clientMutationId) };
+    });
+    fake.emitReady();
+    await threadsStore.getState().ensureThread("ref_a");
+    await threadsStore.getState().refreshThread("ref_a");
+    expect(threadsStore.getState().restartBlockingObligations.has("ref_a")).toBe(true);
+    snapshot = readResponse("ref_a", { status: { type: status } });
+    Object.assign(snapshot.thread.evener, { mutationStateAuthoritative: false, kind: "subagent" });
+    await threadsStore.getState().refreshThread("ref_a");
+    expect(threadsStore.getState().restartBlockingObligations.has("ref_a")).toBe(false);
+    expect(threadsStore.getState().mutationAuthorityRefs.has("ref_a")).toBe(false);
+    await threadsStore.getState().queue("ref_a", "new message after restart");
+    await delivered.promise;
+    expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
+  },
+);
+
 for (const status of ["active", "idle"]) {
   test(`saved ${status} delegate snapshots do not release uncertain mutations`, async () => {
     const storage = new MutationOutboxIndexedDB({ createMutationId: () => "delegate-uncertain" });
