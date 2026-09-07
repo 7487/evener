@@ -530,3 +530,41 @@ describe("MutationDispatcher", () => {
     expect(await outbox.getOutbox(record.clientMutationId)).toBeUndefined();
   });
 });
+
+test("attempt evidence is visible to another tab before transport and survives an unknown outcome", async () => {
+  const indexedDB = new IDBFactory();
+  const writer = storage(indexedDB, "attempt-evidence", ["attempted", "unsent"]);
+  const inspector = new MutationOutboxIndexedDB({ indexedDB, databaseName: "attempt-evidence" });
+  const record = await writer.enqueueIntent(queueIntent());
+  const fake = new FakeClient("ready");
+  fake.on("turn/queue", async () => {
+    expect((await inspector.getOutbox(record.clientMutationId))?.attempted).toBe(true);
+    throw new Error("reply lost");
+  });
+  const dispatcher = new MutationDispatcher(writer, { getClient: () => fake });
+  await dispatcher.dispatchTargets([record.targetRef]);
+  writer.close();
+  const fresh = await inspector.enqueueIntent(queueIntent());
+  await inspector.markUnknown(record.clientMutationId, "blockedUnknown", { onlyAttempted: true });
+  await inspector.markUnknown(fresh.clientMutationId, "blockedUnknown", { onlyAttempted: true });
+  expect((await inspector.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
+  expect((await inspector.getOutbox(fresh.clientMutationId))?.state).toBe("submitting");
+  inspector.close();
+});
+
+test("failed attempt commit prevents transport", async () => {
+  const store = new MutationOutboxIndexedDB({
+    indexedDB: new IDBFactory(),
+    databaseName: "attempt-commit-failure",
+    beforeCommit: (operation) => {
+      if (operation === "markAttempted") throw new Error("attempt commit failed");
+    },
+  });
+  const record = await store.enqueueIntent(queueIntent());
+  const fake = new FakeClient("ready");
+  const dispatcher = new MutationDispatcher(store, { getClient: () => fake });
+  await expect(dispatcher.dispatchTargets([record.targetRef])).rejects.toThrow("attempt commit failed");
+  expect(fake.calls).toHaveLength(0);
+  expect((await store.getOutbox(record.clientMutationId))?.attempted).toBe(false);
+  store.close();
+});

@@ -87,6 +87,7 @@ describe("MutationOutboxIndexedDB", () => {
       attachments: [],
       optimisticDisplay: { text: "survive reload" },
       state: "submitting",
+      attempted: false,
     });
   });
 
