@@ -96,22 +96,35 @@ export const hubUpdateStore = createStore<HubUpdateStoreState>((set, get) => ({
   ...INITIAL,
 
   setChannel(channel) {
-    set({ channel, check: null, checkError: null, applyError: null });
+    set({ channel, check: null, checking: false, checkError: null, applyError: null });
   },
 
   async runCheck() {
     set({ checking: true, checkError: null });
+    const channel = get().channel;
     try {
-      const check = await requireClient().request("evener/update/check", { channel: get().channel ?? "" });
-      set({ check, checking: false });
+      const check = await requireClient().request("evener/update/check", { channel: channel ?? "" });
+      if (get().channel === channel) {
+        set({ check, checking: false });
+      }
     } catch (err) {
-      set({ check: null, checking: false, checkError: errorText(err) });
+      if (get().channel === channel) {
+        set({ check: null, checking: false, checkError: errorText(err) });
+      }
     }
   },
 
   async apply() {
+    if (get().applying || get().restarting) {
+      return;
+    }
+    const check = get().check;
+    if (!check) {
+      set({ applyError: "Check for updates first" });
+      return;
+    }
     set({ applying: true, applyError: null, restartTimedOut: false });
-    const previous = get().check?.currentVersion ?? null;
+    const previous = check.currentVersion;
     try {
       await requireClient().request("evener/update/apply", { channel: get().channel ?? "" });
     } catch (err) {

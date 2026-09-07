@@ -91,6 +91,39 @@ describe("runCheck", () => {
     expect(hubUpdateStore.getState().channel).toBe("release");
     expect(hubUpdateStore.getState().check).toBeNull();
   });
+
+  test("ignores stale runCheck response when channel changed during flight", async () => {
+    vi.useFakeTimers();
+    const fake = connectFakeClient();
+    let resolveCheck: ((value: UpdateCheckResponse) => void) | undefined;
+    const checkPromise = new Promise<UpdateCheckResponse>((resolve) => {
+      resolveCheck = resolve;
+    });
+    fake.on("evener/update/check", () => checkPromise);
+    hubUpdateStore.getState().setChannel("release");
+
+    act(() => {
+      void hubUpdateStore.getState().runCheck();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(hubUpdateStore.getState().checking).toBe(true);
+    act(() => hubUpdateStore.getState().setChannel("snapshot"));
+    expect(hubUpdateStore.getState().checking).toBe(false);
+
+    act(() => {
+      if (resolveCheck) resolveCheck(UP_TO_DATE);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const state = hubUpdateStore.getState();
+    expect(state.check).toBeNull();
+    expect(state.checkError).toBeNull();
+  });
 });
 
 describe("apply", () => {
@@ -163,10 +196,13 @@ describe("apply", () => {
     const fetchImpl = healthFetch(["be70029"]);
     resetHubUpdateStoreForTests({ fetchImpl, reload: vi.fn() });
     const fake = connectFakeClient();
+    fake.on("evener/update/check", () => ({ ...UP_TO_DATE, updateAvailable: true }));
     fake.on("evener/update/apply", () => {
       throw new Error("this hub is a dev build");
     });
 
+    hubUpdateStore.getState().setChannel("snapshot");
+    await act(() => hubUpdateStore.getState().runCheck());
     await act(() => hubUpdateStore.getState().apply());
     await act(async () => {
       await vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 2);
@@ -175,5 +211,52 @@ describe("apply", () => {
     expect(hubUpdateStore.getState().applyError).toContain("dev build");
     expect(hubUpdateStore.getState().restarting).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("requires a prior check and rejects apply() without one", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = healthFetch(["be70029"]);
+    resetHubUpdateStoreForTests({ fetchImpl, reload: vi.fn() });
+    const fake = connectFakeClient();
+    fake.on("evener/update/apply", () => ({
+      release: "snapshot",
+      channel: "snapshot",
+      installed: ["/x/evener"],
+      restarting: true,
+    }));
+
+    await act(() => hubUpdateStore.getState().apply());
+
+    expect(fake.calls).toEqual([]);
+    expect(hubUpdateStore.getState().applyError).toContain("Check for updates first");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test("guards against concurrent apply() calls", async () => {
+    vi.useFakeTimers();
+    const reload = vi.fn();
+    const fetchImpl = healthFetch(["be70029", "DOWN", "DOWN", "3b1c5f8"]);
+    resetHubUpdateStoreForTests({ fetchImpl, reload });
+    const fake = connectFakeClient();
+    fake.on("evener/update/check", () => ({ ...UP_TO_DATE, updateAvailable: true, latestCommit: "3b1c5f8aaaa" }));
+    fake.on("evener/update/apply", () => ({
+      release: "snapshot",
+      channel: "snapshot",
+      installed: ["/x/evener"],
+      restarting: true,
+    }));
+    hubUpdateStore.getState().setChannel("snapshot");
+    await act(() => hubUpdateStore.getState().runCheck());
+
+    act(() => {
+      void hubUpdateStore.getState().apply();
+      void hubUpdateStore.getState().apply();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const applyCalls = fake.calls.filter((c) => c.method === "evener/update/apply");
+    expect(applyCalls).toHaveLength(1);
   });
 });
