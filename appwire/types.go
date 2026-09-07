@@ -617,6 +617,9 @@ type EvenerThread struct {
 	// value (Depth==0, Preview==nil) means "no queued messages".
 	Queue            QueueState        `json:"queue"`
 	PendingMutations []PendingMutation `json:"pendingMutations,omitempty"`
+	// MutationStateAuthoritative identifies a daemon snapshot that can settle
+	// uncertain sends. Saved transcript data cannot prove a mutation absent.
+	MutationStateAuthoritative bool `json:"mutationStateAuthoritative,omitempty"`
 	// Tasks carries the task-list progress for a session snapshot. It is nil
 	// when the source cannot authoritatively read task state, including an old
 	// daemon or a missing persisted task file; a present zero is real zero.

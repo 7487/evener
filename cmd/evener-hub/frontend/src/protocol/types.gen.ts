@@ -374,6 +374,7 @@ export interface EvenerThread {
   diagnostics?: EvenerDiagnostics;
   queue: QueueState;
   pendingMutations?: PendingMutation[];
+  mutationStateAuthoritative?: boolean;
   tasks?: TaskAggregate;
   goal?: GoalState;
   usage?: EvenerUsage;

@@ -1448,6 +1448,7 @@ async function publishAndReconcileThreadHydration(
             (pending.epoch === readyEpoch && pending.client === wiredClient));
         if (!current()) return;
         const authoritativeIds = collectAuthoritativeMutationIds(hydration.response);
+        const mutationStateAuthoritative = hydration.response.thread.evener.mutationStateAuthoritative === true;
         await runtime.dispatcher.reconcileIdentities(authoritativeIds);
         if (!current()) return;
         // The same read that settles what the authority knows also proves what it
@@ -1457,14 +1458,18 @@ async function publishAndReconcileThreadHydration(
         // Saved snapshots contain no authoritative daemon receipt history, even
         // after an incompatible daemon has been stopped. Persist uncertainty so
         // reopening that saved snapshot cannot release an already accepted send.
-        if (published.status.type === "restartRequired" || published.status.type === "notLoaded") {
+        if (
+          !mutationStateAuthoritative ||
+          published.status.type === "restartRequired" ||
+          published.status.type === "notLoaded"
+        ) {
           for (const record of await runtime.storage.listOutbox(ref)) {
             if (!current()) return;
             if (record.state === "submitting")
               await runtime.storage.markUnknown(record.clientMutationId, "blockedUnknown");
           }
           notifyMutationPersistence([ref]);
-        } else if (published.status.type !== "notLoaded") {
+        } else {
           await runtime.dispatcher.restoreProvenAbsent(ref, authoritativeIds);
         }
         if (!current()) return;
@@ -1473,6 +1478,7 @@ async function publishAndReconcileThreadHydration(
         // successful reconciliation cannot clear that newer restriction.
         if (
           current() &&
+          mutationStateAuthoritative &&
           published.status.type !== "restartRequired" &&
           published.status.type !== "notLoaded" &&
           threadsStore.getState().restartBlockingObligations.get(ref) === blockingObligation

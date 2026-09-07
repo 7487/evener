@@ -812,6 +812,9 @@ func TestAppWireItemPagingSubscriptionCut(t *testing.T) {
 	if len(response.Thread.Turns) == 0 || len(response.Thread.Turns[0].Items) != 1 {
 		t.Fatalf("item read response = %+v, want one positioned item fragment", response)
 	}
+	if !response.Thread.Evener.MutationStateAuthoritative {
+		t.Fatal("daemon read must carry authoritative mutation state")
+	}
 	item := response.Thread.Turns[0].Items[0]
 	if item.TranscriptKey == "" || item.Position == nil {
 		t.Fatalf("item metadata = %+v, want transcript key and position", item)

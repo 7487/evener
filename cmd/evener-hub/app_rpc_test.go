@@ -11192,3 +11192,35 @@ func TestHubRPCThreadStartEmptyModelRejected(t *testing.T) {
 		t.Fatalf("error = %v, want error containing \"model is required\"", err)
 	}
 }
+
+func TestHubRPCSavedDelegateReadDoesNotClaimMutationAuthority(t *testing.T) {
+	for _, status := range []string{appwire.ThreadStatusActive, appwire.ThreadStatusIdle} {
+		t.Run(status, func(t *testing.T) {
+			cfg, childID := runningSubagentProjectionConfigWithState(t, status)
+			entries := cfg.Roster.List()
+			entries[0].Protocol = appwire.ProtocolVersion
+			entries[0].Endpoint = "ws://unused.invalid/appwire"
+			cfg.Roster = hubcore.NewRosterWithEntries(entries...)
+			sources := appsource.NewRegistry()
+			sources.Add(&pastFallbackRelaySource{
+				thread:  appwire.Thread{ID: childID, Evener: appwire.EvenerThread{Ref: "local:" + childID}},
+				readErr: errors.New("delegate transport failed"),
+			})
+			app := newHubAppServer(cfg, sources)
+			hub := httptest.NewServer(http.HandlerFunc(app.ServeWebSocket))
+			defer hub.Close()
+			client := dialHubRPC(t, hub)
+			defer client.Close()
+			if _, err := client.Initialize(t.Context(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: "local:" + childID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Thread.Status.Type != status || response.Thread.Evener.MutationStateAuthoritative {
+				t.Fatalf("saved delegate status=%q mutation authority=%v", response.Thread.Status.Type, response.Thread.Evener.MutationStateAuthoritative)
+			}
+		})
+	}
+}
