@@ -1060,3 +1060,27 @@ func TestLocalDaemonListPreservesRestartRequiredStatus(t *testing.T) {
 	}
 
 }
+
+func TestLocalDaemonListsSessionOnlyRestartRequiredEntry(t *testing.T) {
+	for _, observedID := range []string{"", "owner"} {
+		t.Run("observed="+observedID, func(t *testing.T) {
+			source := NewLocalDaemonSourceWithEntries("local", func() []LocalDaemonEntry {
+				return []LocalDaemonEntry{{Entry: rendezvous.Entry{Protocol: "evener-appwire-v4", Endpoint: "ws://daemon", SourceID: "local", SessionID: "owner"}, SessionID: observedID, Status: appwire.ThreadStatusRestartRequired}}
+			}, nil)
+			response, err := source.ListThreads(t.Context(), appwire.ThreadListParams{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Data) != 1 {
+				t.Fatalf("threads=%+v", response.Data)
+			}
+			thread := response.Data[0]
+			if thread.ID != "owner" || thread.Evener.Ref != "local:owner" || thread.Status.Type != appwire.ThreadStatusRestartRequired {
+				t.Fatalf("thread=%+v", thread)
+			}
+			if thread.Evener.Capabilities != (appwire.ThreadCapabilities{}) {
+				t.Fatalf("capabilities=%+v", thread.Evener.Capabilities)
+			}
+		})
+	}
+}

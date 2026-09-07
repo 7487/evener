@@ -131,6 +131,6 @@ func threadNameIsLive(cfg hubcore.WebConfig, threadID string) bool {
 	if cfg.Roster == nil {
 		return false
 	}
-	_, live := cfg.Roster.Find(threadID)
+	_, live := liveDaemonForThread(cfg.Roster, threadID)
 	return live
 }
