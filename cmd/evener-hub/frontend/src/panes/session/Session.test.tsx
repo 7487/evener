@@ -2383,3 +2383,75 @@ test.each(["active", "idle"])(
     expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(0);
   },
 );
+
+test.each(["idle", "active"])(
+  "hydrated %s session keeps recovery when subsequent reads stall without navigation",
+  async (status) => {
+    const fake = connectFakeClient();
+    const ref = "local:retained-unresponsive";
+    let stopped = false;
+    let reads = 0;
+    let finishRead: (() => void) | undefined;
+    fake.on("thread/read", () => {
+      reads++;
+      if (reads === 2)
+        return new Promise((resolve) => {
+          finishRead = () => resolve(readResponse(ref, { status: { type: "notLoaded" } }));
+        });
+      return readResponse(ref, { status: { type: stopped ? "notLoaded" : status } });
+    });
+    fake.on("evener/thread/forceStop", () => {
+      stopped = true;
+      finishRead?.();
+      return {};
+    });
+    render(
+      <ClientProvider client={fake}>
+        <Session params={{ ref }} paneId="p1" focused={true} />
+      </ClientProvider>,
+    );
+    await waitFor(() => expect(threadsStore.getState().threads.get(ref)?.status.type).toBe(status));
+    act(() => {
+      void threadsStore.getState().refreshThread(ref);
+    });
+    await waitFor(() => expect(reads).toBe(2));
+    expect(threadsStore.getState().threads.get(ref)?.status.type).toBe(status);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Force stop…" }));
+    expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+    expect(await screen.findByRole("button", { name: "Resume session" })).toBeTruthy();
+    expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toEqual([
+      { method: "evener/thread/forceStop", params: { ref } },
+    ]);
+    expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+  },
+);
+
+test("a fresh client offers explicit Resume for a server-fenced stopped session", async () => {
+  const fake = connectFakeClient();
+  const ref = "local:stopped-on-another-client";
+  let resumed = false;
+  fake.on("thread/read", () => {
+    const response = readResponse(ref, { status: { type: resumed ? "idle" : "notLoaded" } });
+    response.thread.evener.resumeRequired = !resumed;
+    return response;
+  });
+  fake.on("thread/resume", () => {
+    resumed = true;
+    return readResponse(ref, { status: { type: "idle" } });
+  });
+  render(
+    <ClientProvider client={fake}>
+      <Session params={{ ref }} paneId="p1" focused={true} />
+    </ClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Resume session" }));
+  await waitFor(() => expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("idle"));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Resume session" })).toBeNull());
+  expect(fake.calls.filter((call) => call.method === "thread/resume")).toEqual([
+    { method: "thread/resume", params: { ref } },
+  ]);
+  expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+});

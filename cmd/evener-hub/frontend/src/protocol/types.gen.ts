@@ -359,6 +359,7 @@ export interface EvenerSubagentPreviewResponse {
 }
 
 export interface EvenerThread {
+  resumeRequired?: boolean;
   ref: string;
   instanceId?: string;
   parentRef?: string;

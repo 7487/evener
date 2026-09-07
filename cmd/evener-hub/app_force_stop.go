@@ -17,7 +17,7 @@ import (
 
 // forceStopThread bypasses daemon RPC only after verifying the local process.
 // The session remains reserved until the exact process has exited.
-func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.ThreadForceStopParams, sources *appsource.Registry) error {
+func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.ThreadForceStopParams, sources *appsource.Registry) (stopErr error) {
 	ref, err := appwire.ParseRef(params.Ref)
 	if err != nil || ref.SourceID != "local" {
 		return appwire.InvalidParams("force stop requires a local session ref")
@@ -52,6 +52,9 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 			log.Printf("force stop process handle cleanup: %v", err)
 		}
 	}()
+	aliases := forceStopAliases(entry)
+	finishRecovery := cfg.ResumeLocks.BeginForceStop(aliases)
+	defer func() { finishRecovery(stopErr == nil) }()
 	if sources != nil {
 		if source, ok := sources.Source("local"); ok {
 			if local, ok := source.(*appsource.LocalDaemonSource); ok {
@@ -62,7 +65,6 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	}
 	// Clear gives one daemon stable and current session aliases. Lock both so
 	// resume or deletion through either alias cannot race exit confirmation.
-	aliases := forceStopAliases(entry)
 	for _, id := range aliases {
 		cfg.ResumeLocks.For(id).Lock()
 	}

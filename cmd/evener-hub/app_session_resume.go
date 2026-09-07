@@ -42,7 +42,7 @@ func withSessionResume[R any](
 	if ref != "" && !hubKnowsRef(cfg, ref) {
 		return resp, err
 	}
-	if _, resumeErr := hubThreadResume(ctx, cfg, sources, appwire.ThreadResumeParams{Ref: ref}); resumeErr != nil {
+	if _, resumeErr := hubThreadAutoResume(ctx, cfg, sources, appwire.ThreadResumeParams{Ref: ref}); resumeErr != nil {
 		var zero R
 		return zero, resumeErr
 	}

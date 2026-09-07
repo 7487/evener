@@ -75,7 +75,7 @@ func newHubSourceRegistry(cfg hubcore.WebConfig) *appsource.Registry {
 
 var (
 	resolveTurnStartSource = sourceForThread
-	resumeTurnStartThread  = hubThreadResume
+	resumeTurnStartThread  = hubThreadAutoResume
 	authLoginComplete      = func(c *hubAuthController, ctx context.Context, p appwire.AuthLoginCompleteParams) (appwire.AuthLoginCompleteResponse, error) {
 		return c.LoginComplete(ctx, p)
 	}
@@ -443,6 +443,7 @@ func registerThreadHandlers(
 			}
 		}
 		resp.Thread, err = mergePastThreadForRead(ctx, cfg, params, resp.Thread)
+		resp.Thread = applyThreadResumeRequirement(cfg, params.Ref, params.ThreadID, resp.Thread)
 		if err != nil {
 			read.finish(false)
 			return appwire.ThreadReadResponse{}, err

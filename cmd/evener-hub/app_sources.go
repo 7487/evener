@@ -48,6 +48,7 @@ func withDeletionTargetOwnership[R any](
 	ref, threadID, clientMutationID string,
 	action func() (R, error),
 ) (R, error) {
+	epoch := sessionRecoveryState(cfg, ref, threadID).Epoch
 	unlock := lockDeletionTarget(cfg, ref, threadID)
 	defer unlock()
 	if err := deletionFenceError(cfg, ref, threadID, clientMutationID); err != nil {
@@ -55,6 +56,10 @@ func withDeletionTargetOwnership[R any](
 		return zero, err
 	}
 	if clientMutationID != "" {
+		if err := sessionActionRecoveryError(cfg, ref, threadID, epoch); err != nil {
+			var zero R
+			return zero, err
+		}
 		if err := daemonRestartRequiredError(ctx, cfg, ref, threadID, clientMutationID); err != nil {
 			var zero R
 			return zero, err
@@ -73,7 +78,12 @@ func withDeletionTargetOwnership[R any](
 // withSessionActionOwnership guards actions that have no durable mutation ID.
 // Reads share deletion locking but must remain available for incompatible owners.
 func withSessionActionOwnership[R any](ctx context.Context, cfg hubcore.WebConfig, ref, threadID string, action func() (R, error)) (R, error) {
+	epoch := sessionRecoveryState(cfg, ref, threadID).Epoch
 	return withDeletionTargetOwnership(ctx, cfg, ref, threadID, "", func() (R, error) {
+		if err := sessionActionRecoveryError(cfg, ref, threadID, epoch); err != nil {
+			var zero R
+			return zero, err
+		}
 		if err := daemonRestartRequiredError(ctx, cfg, ref, threadID, ""); err != nil {
 			var zero R
 			return zero, err
@@ -159,4 +169,32 @@ func deletionThreadID(ref, threadID string) string {
 func hubKnowsRef(cfg hubcore.WebConfig, ref string) bool {
 	_, ok, _ := pastThreadForRead(context.Background(), cfg, appwire.ThreadReadParams{Ref: ref})
 	return ok
+}
+
+func sessionRecoveryState(cfg hubcore.WebConfig, ref, threadID string) hubcore.SessionRecoveryState {
+	if ref != "" {
+		parsed, err := appwire.ParseRef(ref)
+		if err != nil || parsed.SourceID != "local" {
+			return hubcore.SessionRecoveryState{}
+		}
+	}
+	if cfg.ResumeLocks == nil {
+		return hubcore.SessionRecoveryState{}
+	}
+	id := deletionThreadID(ref, threadID)
+	if id == "" {
+		return hubcore.SessionRecoveryState{}
+	}
+	return cfg.ResumeLocks.RecoveryState(id)
+}
+
+func sessionActionRecoveryError(cfg hubcore.WebConfig, ref, threadID string, epoch uint64) error {
+	state := sessionRecoveryState(cfg, ref, threadID)
+	if state.Stopping > 0 || state.ResumeRequired {
+		return appwire.Unavailable("session recovery requires an explicit thread/resume before submitting another action")
+	}
+	if state.Epoch != epoch {
+		return appwire.Unavailable("session recovery canceled this pending action; submit it again")
+	}
+	return nil
 }

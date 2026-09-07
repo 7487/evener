@@ -133,7 +133,7 @@ function RestartRequiredNotice({
   return (
     <div role="alert">
       {resumeRequired
-        ? "Resume this session to check whether its uncertain messages were delivered."
+        ? "Resume this session before continuing. Any uncertain messages will be checked before sending."
         : "Session restart required. Stop the older daemon, then refresh this session. Stopping interrupts active work."}
       <Button disabled={refreshing} onClick={() => void refresh()}>
         {resumeRequired ? "Resume session" : "Refresh session"}
@@ -468,6 +468,11 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
               (blockedMutations.length > 0 && (model.status.type === "notLoaded" || !mutationStateAuthoritative))) && (
               <RestartRequiredNotice sessionRef={ref} resumeRequired={model.status.type !== "restartRequired"} />
             )}
+            {ref.startsWith("local:") &&
+              !navigationSummaryFor(ref, navigation) &&
+              model.status.type !== "restartRequired" &&
+              model.status.type !== "notLoaded" &&
+              model.status.type !== "closed" && <SessionForceStopRecovery sessionRef={ref} />}
             {reconciliationFailed && (
               <div role="alert">
                 Message recovery is waiting for browser storage. Sending will resume after recovery succeeds.

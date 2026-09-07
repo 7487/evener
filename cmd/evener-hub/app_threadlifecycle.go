@@ -299,6 +299,14 @@ func launchSourceID(params appwire.ThreadStartParams) string {
 }
 
 func hubThreadResume(ctx context.Context, cfg hubcore.WebConfig, sources *appsource.Registry, params appwire.ThreadResumeParams) (appwire.ThreadResumeResponse, error) {
+	return resumeThread(ctx, cfg, sources, params, false)
+}
+
+func hubThreadAutoResume(ctx context.Context, cfg hubcore.WebConfig, sources *appsource.Registry, params appwire.ThreadResumeParams) (appwire.ThreadResumeResponse, error) {
+	return resumeThread(ctx, cfg, sources, params, true)
+}
+
+func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource.Registry, params appwire.ThreadResumeParams, automatic bool) (response appwire.ThreadResumeResponse, resumeErr error) {
 	if params.Ref != "" {
 		ref, err := appwire.ParseRef(params.Ref)
 		if err != nil {
@@ -322,9 +330,21 @@ func hubThreadResume(ctx context.Context, cfg hubcore.WebConfig, sources *appsou
 		return appwire.ThreadResumeResponse{}, appwire.InvalidParams("sessionId or ref is required")
 	}
 	if cfg.ResumeLocks != nil {
+		epoch := cfg.ResumeLocks.RecoveryState(sessionID).Epoch
 		lock := cfg.ResumeLocks.For(sessionID)
 		lock.Lock()
 		defer lock.Unlock()
+		state := cfg.ResumeLocks.RecoveryState(sessionID)
+		if state.Epoch != epoch || state.Stopping > 0 || (automatic && state.ResumeRequired) {
+			return appwire.ThreadResumeResponse{}, appwire.Unavailable("session recovery requires a fresh explicit thread/resume request")
+		}
+		if !automatic {
+			defer func() {
+				if resumeErr == nil {
+					cfg.ResumeLocks.ExplicitResumeCompleted(sessionID, epoch)
+				}
+			}()
+		}
 	}
 	if err := deletionFenceError(cfg, params.Ref, sessionID, ""); err != nil {
 		return appwire.ThreadResumeResponse{}, err

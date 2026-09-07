@@ -1468,7 +1468,7 @@ async function publishAndReconcileThreadHydration(
     else mutationAuthorityRefs.delete(ref);
     return { mutationAuthorityRefs };
   });
-  if (published.status.type === "restartRequired") {
+  if (published.status.type === "restartRequired" || hydration.response.thread.evener.resumeRequired === true) {
     threadsStore.setState((state) => ({
       restartBlockingObligations: new Map(state.restartBlockingObligations).set(ref, Symbol()),
     }));
@@ -1536,6 +1536,7 @@ async function publishAndReconcileThreadHydration(
           current() &&
           mutationsReconciled &&
           published.status.type !== "restartRequired" &&
+          hydration.response.thread.evener.resumeRequired !== true &&
           published.status.type !== "notLoaded" &&
           threadsStore.getState().restartBlockingObligations.get(ref) === blockingObligation
         ) {
