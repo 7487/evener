@@ -107,9 +107,11 @@ function EmptyTranscript({ active, restartRequired }: { active: boolean; restart
 function RestartRequiredNotice({
   sessionRef,
   resumeRequired = false,
+  ownerRef,
 }: {
   sessionRef: string;
   resumeRequired?: boolean;
+  ownerRef?: string;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -131,9 +133,12 @@ function RestartRequiredNotice({
   };
   return (
     <div role="alert">
-      {resumeRequired
-        ? "Resume this session to check whether its uncertain messages were delivered."
-        : "Session restart required. Stop the older daemon, then refresh this session. Stopping interrupts active work."}
+      {ownerRef
+        ? "This session is retained by its owning session. Its uncertain messages cannot be checked here until the owner releases it."
+        : resumeRequired
+          ? "Resume this session to check whether its uncertain messages were delivered."
+          : "Session restart required. Stop the older daemon, then refresh this session. Stopping interrupts active work."}
+      {ownerRef && <a href={paneToURL("session", { ref: ownerRef }) ?? undefined}>Open owning session</a>}
       <Button disabled={refreshing} onClick={() => void refresh()}>
         {resumeRequired ? "Resume session" : "Refresh session"}
       </Button>
@@ -339,6 +344,14 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
     );
   }
 
+  const recoveryOwnerRef =
+    !mutationStateAuthoritative &&
+    model.status.type !== "notLoaded" &&
+    model.status.type !== "restartRequired" &&
+    model.parentRef?.startsWith("local:")
+      ? model.parentRef
+      : undefined;
+
   const cadence = <Cadence state={cadenceStateForStatus(model.status.type)} frameTimes={frameTimes} now={now} />;
 
   const transcriptContent = (
@@ -428,12 +441,14 @@ export default function Session({ params, paneId, focused: paneFocused }: PanePr
             {(model.status.type === "restartRequired" ||
               restartPending ||
               (blockedMutations.length > 0 && (model.status.type === "notLoaded" || !mutationStateAuthoritative))) && (
-              <RestartRequiredNotice sessionRef={ref} resumeRequired={model.status.type !== "restartRequired"} />
+              <RestartRequiredNotice
+                sessionRef={ref}
+                ownerRef={recoveryOwnerRef}
+                resumeRequired={model.status.type !== "restartRequired" && !recoveryOwnerRef}
+              />
             )}
             {reconciliationFailed && (
-              <div role="alert">
-                Message recovery is waiting for browser storage. Sending will resume after recovery succeeds.
-              </div>
+              <div role="alert">Message recovery has not completed. Sending will resume after recovery succeeds.</div>
             )}
             <PendingChips sessionRef={ref} />
             <Composer ref={ref} />

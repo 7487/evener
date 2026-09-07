@@ -1294,3 +1294,67 @@ func TestHubRejectsMutationForPreviousPIDIdentity(t *testing.T) {
 		t.Fatalf("previous identity mutation error=%v, deliveries=%d", err, mutations.Load())
 	}
 }
+
+func TestHubResumeRetainedChildWaitsForOwnerRelease(t *testing.T) {
+	for _, delegate := range []bool{true, false} {
+		t.Run(fmt.Sprint("delegate=", delegate), func(t *testing.T) {
+			stateDir := t.TempDir()
+			rootID := buildRPCParentSession(t, stateDir)
+			var childID string
+			if delegate {
+				childID = buildUpgradeDelegate(t, stateDir, rootID)
+			} else {
+				var err error
+				childID, err = agent.ForkSession(stateDir, rootID, 1, "independent fork", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			runDir := t.TempDir()
+			entry := rendezvous.Entry{PID: 1001, Protocol: appwire.ProtocolVersion, ThreadID: rootID, SessionID: rootID, Endpoint: "ws://unused"}
+			writeRendezvous(t, runDir, entry)
+			roster := hubcore.NewRoster(runDir, &changedOwnershipProber{sessionID: rootID})
+			spawned := 0
+			cfg := hubcore.WebConfig{StateDir: stateDir, Roster: roster, ResumeLocks: hubcore.NewResumeLocks(), Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				spawned++
+				return rendezvous.Entry{}, errors.New("spawn sentinel")
+			}}}
+			_, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(childID)})
+			if delegate && spawned != 0 {
+				t.Fatalf("retained child launched replacement: %v", err)
+			}
+			if !delegate && spawned != 1 {
+				t.Fatalf("independent fork did not reach launcher: %v", err)
+			}
+			if delegate {
+				wire, ok := errors.AsType[appwire.WireError](err)
+				if !ok || wire.Code != appwire.CodeUnavailable || wire.Data.(appwire.ErrorData).EvenerErrorInfo != appwire.ErrorActionUnavailable {
+					t.Fatalf("expected unavailable owner refusal, got %v", err)
+				}
+			}
+			if delegate {
+				_, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(rootID), Session: childID})
+				if spawned != 0 || err == nil {
+					t.Fatalf("explicit child target lost ownership fence: spawned=%d err=%v", spawned, err)
+				}
+			}
+
+			if err := rendezvous.Remove(runDir, entry.PID); err != nil {
+				t.Fatal(err)
+			}
+			before := spawned
+			_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(childID)})
+			if spawned != before+1 {
+				t.Fatalf("released child did not reach launcher: %v", err)
+			}
+		})
+	}
+}
+
+func TestHubResumeWithoutRosterReturnsUnavailable(t *testing.T) {
+	_, err := hubThreadResume(t.Context(), hubcore.WebConfig{}, nil, appwire.ThreadResumeParams{Session: "saved"})
+	wire, ok := errors.AsType[appwire.WireError](err)
+	if !ok || wire.Code != appwire.CodeUnavailable {
+		t.Fatalf("resume without roster = %v", err)
+	}
+}
