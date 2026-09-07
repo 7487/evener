@@ -889,6 +889,9 @@ func (s *LocalDaemonSource) threadFromEntry(item LocalDaemonEntry) appwire.Threa
 		},
 		Status: appwire.ThreadStatus{Type: status},
 	}
+	if status == appwire.ThreadStatusRestartRequired {
+		thread.Evener.Capabilities = appwire.ThreadCapabilities{}
+	}
 	if !item.ReadOnlyAlias && (len(item.RunningJobs) > 0 || len(item.CompletedJobs) > 0) {
 		jobs := make([]appwire.EvenerJobInfo, 0, len(item.RunningJobs)+len(item.CompletedJobs))
 		jobs = append(jobs, item.RunningJobs...)
@@ -953,6 +956,8 @@ func localDaemonThreadStatus(status string) string {
 		return appwire.ThreadStatusClosed
 	case appwire.ThreadStatusNotLoaded:
 		return appwire.ThreadStatusNotLoaded
+	case appwire.ThreadStatusRestartRequired:
+		return appwire.ThreadStatusRestartRequired
 	case appwire.ThreadStatusIdle:
 		return appwire.ThreadStatusIdle
 	default:

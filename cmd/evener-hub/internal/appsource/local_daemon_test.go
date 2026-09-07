@@ -1022,3 +1022,26 @@ func TestLocalDaemonResolveRelaySessionCanonicalizesAliasesWithoutAcquiring(t *t
 		t.Fatalf("resolution acquired %d relay sessions, want none", acquired)
 	}
 }
+
+func TestLocalDaemonListPreservesRestartRequiredStatus(t *testing.T) {
+	source := NewLocalDaemonSourceWithEntries("local", func() []LocalDaemonEntry {
+		return []LocalDaemonEntry{{
+			Entry:  rendezvous.Entry{Protocol: appwire.ProtocolVersion, Endpoint: "ws://daemon", SourceID: "local", ThreadID: "owner", SessionID: "owner"},
+			Status: appwire.ThreadStatusRestartRequired,
+		}}
+	}, nil)
+	response, err := source.ListThreads(t.Context(), appwire.ThreadListParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Data) != 1 {
+		t.Fatalf("threads=%d", len(response.Data))
+	}
+	thread := response.Data[0]
+	if thread.Status.Type != appwire.ThreadStatusRestartRequired {
+		t.Fatalf("status=%s", thread.Status.Type)
+	}
+	if thread.Evener.Capabilities != (appwire.ThreadCapabilities{}) {
+		t.Fatalf("capabilities=%+v", thread.Evener.Capabilities)
+	}
+}
