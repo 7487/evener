@@ -8392,3 +8392,43 @@ test.each(["active", "idle"])("manual retry stays blocked after reload of a save
   expect(await retryBlockedMutation(record.clientMutationId)).toBe(false);
   expect((await storage.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
 });
+
+test.each(["active", "idle"].flatMap((status) => [true, false].map((accepted) => ({ status, accepted }))))(
+  "periodic discovery resumes authority checks for saved $status delegates, accepted=$accepted",
+  async ({ status, accepted }) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const storage = new MutationOutboxIndexedDB({ createMutationId: () => "delegate-periodic" });
+      const record = await storage.enqueueIntent({
+        targetRef: "ref_a",
+        method: "turn/queue",
+        payload: { ref: "ref_a", input: [{ type: "text", text: "sentinel" }] },
+        attachments: [],
+        optimisticDisplay: { text: "sentinel" },
+      });
+      setMutationStorageForTests(storage);
+      const fake = connectFakeClient("connecting");
+      let recovered = false;
+      fake.on("thread/read", () => {
+        const response = readResponse("ref_a", { status: { type: status } });
+        response.thread.evener.mutationStateAuthoritative = recovered;
+        if (recovered && accepted) response.thread.evener.queue.clientMutationIds = [record.clientMutationId];
+        return response;
+      });
+      fake.on("turn/queue", (params) => ({ receipt: mutationReceipt(params.clientMutationId) }));
+      fake.emitReady();
+      await threadsStore.getState().ensureThread("ref_a");
+      await settleCallerContinuations();
+      expect((await storage.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
+      recovered = true;
+      await vi.advanceTimersByTimeAsync(2000);
+      await flushIndexedDBUntil(() => threadsStore.getState().mutationAuthorityRefs.has("ref_a"));
+      await settleCallerContinuations();
+      if (!accepted) await flushIndexedDBUntil(() => fake.calls.some((call) => call.method === "turn/queue"));
+      expect(await storage.getOutbox(record.clientMutationId)).toBeUndefined();
+      expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(accepted ? 0 : 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);

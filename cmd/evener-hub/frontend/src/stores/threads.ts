@@ -710,12 +710,31 @@ function handleDiscoveredMutations(runtime: MutationRuntime, targetRefs: Iterabl
     if (
       dispatchableMutationRefs.has(targetRef) &&
       !threadsStore.getState().mutationReconciliationFailures.has(targetRef)
-    )
+    ) {
+      if (!threadsStore.getState().mutationAuthorityRefs.has(targetRef)) {
+        void refreshUncertainMutationAuthority(runtime, client, epoch, targetRef).catch(() => {
+          // The next discovery pass retries after storage or transport recovers.
+        });
+      }
       continue;
+    }
     const pending = pendingThreadHydrations.get(targetRef);
     if (pending?.client === client && pending.epoch === epoch) continue;
     void handleReady(client, epoch, targetRef);
   }
+}
+
+async function refreshUncertainMutationAuthority(
+  runtime: MutationRuntime,
+  client: AppwireClientLike,
+  epoch: number,
+  targetRef: string,
+): Promise<void> {
+  const records = await runtime.storage.listOutbox(targetRef);
+  if (!records.some((record) => record.state === "blockedUnknown")) return;
+  if (!isCurrentMutationRuntime(runtime) || currentDispatchClient() !== client || dispatchReadyEpoch !== epoch) return;
+  if (pendingMutationReconciliations.has(targetRef) || pendingThreadHydrations.has(targetRef)) return;
+  await handleReady(client, epoch, targetRef);
 }
 
 function getMutationRuntime(): MutationRuntime | null {
