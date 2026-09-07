@@ -394,7 +394,7 @@ func TestSessionDeleteFailsWithoutPastIndex(t *testing.T) {
 	}
 }
 
-func TestSessionDeleteReportsNavigationFailureAfterCommittedCleanup(t *testing.T) {
+func TestSessionDeletePreservesSuccessAfterNavigationFailure(t *testing.T) {
 	root := t.TempDir()
 	projectDir := filepath.Join(root, "project")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -415,14 +415,9 @@ func TestSessionDeleteReportsNavigationFailureAfterCommittedCleanup(t *testing.T
 	failingSource.err = errors.New("capture failed")
 	web.navigation = newTestNavigationService(t, failingSource)
 
-	_, err = dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: "local:" + webTestSessionID})
-	var wireErr appwire.WireError
-	if !errors.As(err, &wireErr) || wireErr.Code != appwire.CodeUnavailable {
-		t.Fatalf("navigation failure error = %v, want action unavailable", err)
-	}
-	data, ok := wireErr.Data.(appwire.ErrorData)
-	if !ok || data.EvenerErrorInfo != appwire.ErrorActionUnavailable {
-		t.Fatalf("navigation failure data = %#v, want actionUnavailable", wireErr.Data)
+	response, err := dispatchSessionDelete(t, web, appwire.SessionDeleteParams{Ref: "local:" + webTestSessionID})
+	if err != nil || len(response.Deleted) != 1 || response.Deleted[0] != webTestSessionID || len(response.Skipped) != 0 {
+		t.Fatalf("committed deletion outcome: response=%+v error=%v", response, err)
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "sessions", webTestSessionID+".meta.json")); !os.IsNotExist(err) {
 		t.Fatalf("cleanup must remain committed when the navigation receipt fails: %v", err)

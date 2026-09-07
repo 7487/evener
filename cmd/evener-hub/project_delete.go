@@ -14,6 +14,7 @@ import (
 	"primeradiant.com/evener/agent/schema"
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
+	"primeradiant.com/evener/hubapi"
 	"primeradiant.com/evener/identifier"
 	"primeradiant.com/evener/llm"
 	"primeradiant.com/evener/rendezvous"
@@ -25,13 +26,29 @@ func (s *WebServer) projectDeleteResult(ctx context.Context, deleted []string, s
 	navigation := s.emptyNavigationMutation()
 	if changed {
 		hint := navigationChangeHint{Projects: []string{project}}
-		var err error
-		navigation, err = s.navigation.Refresh(ctx, hint)
-		if err != nil {
-			return appwire.ProjectDeleteResponse{}, appwire.Unavailable(err.Error())
-		}
+		navigation = s.navigationAfterDeletion(ctx, hint)
 	}
 	return appwire.ProjectDeleteResponse{Deleted: deleted, Skipped: skipped, Navigation: navigation}, nil
+}
+
+// Roster and navigation refreshes do not undo committed artifact removal.
+// Keep discovery errors visible in the roster and log stale projections while
+// returning the durable deletion outcome to the caller.
+func (s *WebServer) refreshRosterAfterDeletion(ctx context.Context) {
+	if s.cfg.Roster != nil {
+		if err := hubRosterRefresh(ctx, s.cfg.Roster); err != nil {
+			fmt.Fprintf(os.Stderr, "[hub] deletion completed with stale roster: %v\n", err)
+		}
+	}
+}
+
+func (s *WebServer) navigationAfterDeletion(ctx context.Context, hint navigationChangeHint) hubapi.NavigationMutation {
+	navigation, err := s.navigation.Refresh(ctx, hint)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hub] deletion completed with stale navigation: %v\n", err)
+		return s.emptyNavigationMutation()
+	}
+	return navigation
 }
 
 var (
@@ -442,11 +459,7 @@ func (s *WebServer) cleanupProjectDeletion(
 		// UI's immediate follow-up navigation read is built from a roster that
 		// already dropped the deleted sessions (their rendezvous files were
 		// just unlinked) instead of showing ghost rows until the 5s tick.
-		if s.cfg.Roster != nil {
-			if err := hubRosterRefresh(ctx, s.cfg.Roster); err != nil {
-				result.DecisionErrors = append(result.DecisionErrors, "roster refresh error: "+err.Error())
-			}
-		}
+		s.refreshRosterAfterDeletion(ctx)
 		// Bust the tree memo unconditionally: a no-delta past rebuild plus a
 		// nil PokeAttention would otherwise leave InputsVersion unmoved and
 		// navigation serving the memoized pre-delete snapshot for its bucket.

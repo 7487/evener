@@ -78,11 +78,7 @@ func (s *WebServer) sessionDelete(ctx context.Context, params appwire.SessionDel
 	if err != nil {
 		decisionErrors = append(decisionErrors, "past index rebuild error: "+err.Error())
 	}
-	if s.cfg.Roster != nil {
-		if err := hubRosterRefresh(ctx, s.cfg.Roster); err != nil {
-			decisionErrors = append(decisionErrors, "roster refresh error: "+err.Error())
-		}
-	}
+	s.refreshRosterAfterDeletion(ctx)
 	if s.cfg.Inputs != nil {
 		s.cfg.Inputs.Bump()
 	}
@@ -125,10 +121,6 @@ func (s *WebServer) sessionDeleteResponse(
 	if s.navigation == nil {
 		return appwire.SessionDeleteResponse{}, appwire.Unavailable("navigation unavailable")
 	}
-	navigation, err := s.navigation.Refresh(ctx, hint)
-	if err != nil {
-		return appwire.SessionDeleteResponse{}, appwire.Unavailable(err.Error())
-	}
-	response.Navigation = navigation
+	response.Navigation = s.navigationAfterDeletion(ctx, hint)
 	return response, nil
 }
