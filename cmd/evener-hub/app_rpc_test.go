@@ -9184,6 +9184,53 @@ func TestHubRPCThreadResumeSpawnsAndReadsDaemon(t *testing.T) {
 	}
 }
 
+func TestHubRPCSubscribedReadRefreshesReplacedDaemonOwnership(t *testing.T) {
+	root := t.TempDir()
+	sessionID := buildRPCParentSession(t, filepath.Join(root, "projects", "upgrade-0000000000"))
+	past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+	if _, err := past.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
+	appserver.HandleTyped(daemon.Router(), appwire.MethodThreadList, func(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+		return appwire.ThreadListResponse{Data: []appwire.Thread{{ID: sessionID, SessionID: sessionID, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}}}, nil
+	})
+	appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(context.Context, appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+		return appwire.ThreadReadResponse{Thread: appwire.Thread{ID: sessionID, SessionID: sessionID, Status: appwire.ThreadStatus{Type: appwire.ThreadStatusIdle}}}, nil
+	})
+	peer := httptest.NewServer(http.HandlerFunc(daemon.ServeWebSocket))
+	defer peer.Close()
+	runDir := t.TempDir()
+	entry := rendezvous.Entry{PID: os.Getpid(), Protocol: appwire.ProtocolVersion, Endpoint: "ws" + strings.TrimPrefix(peer.URL, "http"), SourceID: "local", ThreadID: sessionID, SessionID: sessionID}
+	writeRendezvous(t, runDir, entry)
+	roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+	roster.Refresh()
+	if !roster.HasConfirmedEntry(entry) {
+		t.Fatal("owner not confirmed")
+	}
+	hub := newHubRPCTestServer(t, hubcore.WebConfig{RunDir: runDir, Roster: roster, Past: past})
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(context.Background(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	peer.Close()
+	entry.Protocol = "evener-appwire-v4"
+	entry.Endpoint = protocolMismatchPeer(t)
+	writeRendezvous(t, runDir, entry)
+	response, err := client.ThreadRead(context.Background(), appwire.ThreadReadParams{Ref: "local:" + sessionID, IncludeTurns: true, Subscribe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Thread.Status.Type != appwire.ThreadStatusRestartRequired {
+		t.Fatalf("status=%s", response.Thread.Status.Type)
+	}
+	if response.Thread.Evener.Capabilities.Send || len(response.Thread.Turns) != 2 {
+		t.Fatalf("thread=%+v", response.Thread)
+	}
+}
+
 func TestHubRPCThreadResumeVerifiesExistingOwnerWhenDiscoveryFails(t *testing.T) {
 	for _, state := range []string{"healthy", "unreachable", "absent"} {
 		t.Run(state, func(t *testing.T) {

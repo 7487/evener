@@ -334,12 +334,20 @@ func registerThreadHandlers(
 		}
 		read, err := relays.readThread(ctx, source, params)
 		if err != nil {
-			if allowsPastFallbackAfterLiveReadFailure(source, params, err) {
-				if _, local := localPastThreadID(params); local && cfg.Roster != nil && isSessionUnavailableError(err) {
-					if err := hubRosterRefresh(ctx, cfg.Roster); err != nil {
-						return appwire.ThreadReadResponse{}, appwire.Unavailable(err.Error())
-					}
+			allowPast := allowsPastFallbackAfterLiveReadFailure(source, params, err)
+			if _, local := localPastThreadID(params); local && cfg.Roster != nil && isSessionUnavailableError(err) {
+				if refreshErr := hubRosterRefresh(ctx, cfg.Roster); refreshErr != nil {
+					return appwire.ThreadReadResponse{}, appwire.Unavailable(refreshErr.Error())
 				}
+				if restartErr := daemonRestartRequiredError(ctx, cfg, params.Ref, params.ThreadID, ""); restartErr != nil {
+					if !isDaemonRestartRequiredError(restartErr) {
+						return appwire.ThreadReadResponse{}, restartErr
+					}
+					allowPast = true
+					err = restartErr
+				}
+			}
+			if allowPast {
 				saved, ok, pastErr := pastThreadReadResponse(ctx, cfg, params)
 				if pastErr != nil {
 					return appwire.ThreadReadResponse{}, pastErr
