@@ -330,7 +330,7 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 		return appwire.ThreadResumeResponse{}, appwire.InvalidParams("sessionId or ref is required")
 	}
 	if cfg.ResumeLocks != nil {
-		epoch := cfg.ResumeLocks.RecoveryState(sessionID).Epoch
+		epoch := sessionRequestRecoveryEpoch(ctx, cfg, "", sessionID)
 		lock := cfg.ResumeLocks.For(sessionID)
 		lock.Lock()
 		defer lock.Unlock()

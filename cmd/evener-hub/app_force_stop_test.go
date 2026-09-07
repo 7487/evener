@@ -806,3 +806,145 @@ func TestTurnStartDoesNotRetryRecoveryRejectionAfterExplicitResume(t *testing.T)
 		t.Fatalf("stale input retried: resolutions=%d resumes=%d submissions=%d", resolved, resumed, submitted)
 	}
 }
+
+func TestHubForceStopRejectsRequestsQueuedBeforeRecovery(t *testing.T) {
+	stateDir, runDir := filepath.Join(t.TempDir(), "queued-recovery-0000000000"), t.TempDir()
+	sessionID := buildRPCParentSession(t, stateDir)
+	past := hubcore.NewPastIndex(stateDir)
+	if _, err := past.Rebuild(); err != nil {
+		t.Fatal(err)
+	}
+	writeRendezvous(t, runDir, rendezvous.Entry{PID: 4242, SessionID: sessionID, ThreadID: sessionID, StateDir: stateDir, StartedAt: time.Now()})
+	var events []string
+	var resumes atomic.Int32
+	cfg := hubcore.WebConfig{RunDir: runDir, Past: past, ResumeLocks: hubcore.NewResumeLocks(),
+		DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+			return &forceStopProcess{events: &events}, nil
+		}),
+		Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+			resumes.Add(1)
+			return rendezvous.Entry{}, errors.New("fixture spawn boundary")
+		}},
+	}
+	hub, web := newHubRPCTestServerWithWeb(t, cfg)
+	defer hub.Close()
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	appserver.HandleTyped(web.appRPC.Router(), appwire.MethodThreadList, func(ctx context.Context, _ appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return appwire.ThreadListResponse{}, nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	transport, err := appwire.DialWebSocket(ctx, "ws"+hub.URL[len("http"):]+"/rpc", hub.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close()
+	send := func(id int64, method string, params any) {
+		t.Helper()
+		if err := transport.Send(ctx, appwire.RequestMessage(appwire.NewIntID(id), method, params)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receive := func(id int64) appwire.Message {
+		t.Helper()
+		for {
+			message, err := transport.Recv(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if message.Response != nil && message.Response.ID.String() == strconv.FormatInt(id, 10) || message.Error != nil && message.Error.ID.String() == strconv.FormatInt(id, 10) {
+				return message
+			}
+		}
+	}
+	send(1, appwire.MethodInitialize, appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion})
+	if message := receive(1); message.Error != nil {
+		t.Fatal(message.Error.Error)
+	}
+	send(2, appwire.MethodThreadList, appwire.ThreadListParams{})
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("serial request did not start")
+	}
+	ref := "local:" + sessionID
+	send(3, appwire.MethodThreadResume, map[string]any{"sessionId": sessionID, "threadId": "ignored-extra-field"})
+	send(4, appwire.MethodThreadModelSet, appwire.ThreadModelSetParams{Ref: ref, Model: "test", ModelProvider: "test"})
+	send(5, appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: ref})
+	if message := receive(5); message.Error != nil {
+		t.Fatalf("force stop: %+v", message.Error)
+	}
+	close(release)
+	if message := receive(3); message.Error == nil {
+		t.Fatal("pre-recovery resume was accepted")
+	}
+	if message := receive(4); message.Error == nil {
+		t.Fatal("pre-recovery model action was accepted")
+	}
+	if resumes.Load() != 0 {
+		t.Fatalf("queued requests restarted daemon %d times after recovery", resumes.Load())
+	}
+	send(6, appwire.MethodThreadResume, appwire.ThreadResumeParams{Ref: ref})
+	_ = receive(6)
+	if resumes.Load() != 1 {
+		t.Fatalf("fresh explicit resume did not reach spawn boundary: %d", resumes.Load())
+	}
+}
+
+func TestRecoveryAdmissionUsesNativeTargetAndPreservesRetryEpoch(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, target string
+		params               any
+	}{
+		{"resume ignores threadId", appwire.MethodThreadResume, "B", map[string]any{"sessionId": "B", "threadId": "A"}},
+		{"resume sessionId precedence", appwire.MethodThreadResume, "B", map[string]any{"sessionId": "B", "ref": "local:A", "threadId": "ignored"}},
+		{"turn ref precedence", appwire.MethodTurnStart, "B", map[string]any{"ref": "local:B", "threadId": "A"}},
+		{"turn threadId", appwire.MethodTurnStart, "B", map[string]any{"threadId": "B", "sessionId": "ignored"}},
+		{"model ignores unknown field types", appwire.MethodThreadModelSet, "B", map[string]any{"ref": "local:B", "threadId": []string{"ignored"}}},
+		{"unknown method", "unknown", "", map[string]any{"ref": "local:B"}},
+		{"foreign ref", appwire.MethodThreadResume, "", map[string]any{"ref": "remote:B", "sessionId": "A"}},
+		{"malformed ref", appwire.MethodThreadResume, "", map[string]any{"ref": "bad", "sessionId": "B"}},
+		{"invalid supported field", appwire.MethodThreadResume, "", map[string]any{"sessionId": []string{"bad"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := hubcore.WebConfig{ResumeLocks: hubcore.NewResumeLocks()}
+			ctx := admitSessionRecovery(t.Context(), cfg, appwire.RequestMessage(appwire.NewIntID(1), tc.method, tc.params))
+			admission, ok := ctx.Value(sessionRecoveryAdmissionKey{}).(sessionRecoveryAdmission)
+			if tc.target == "" {
+				if ok {
+					t.Fatalf("invalid or unrelated request admitted: %+v", admission)
+				}
+				return
+			}
+			if !ok || admission.sessionID != tc.target {
+				t.Fatalf("admission=%+v present=%v", admission, ok)
+			}
+			other := cfg.ResumeLocks.BeginForceStop([]string{"unrelated"})
+			other(true)
+			if err := sessionActionRecoveryError(cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err != nil {
+				t.Fatalf("another session invalidated this admission: %v", err)
+			}
+			finish := cfg.ResumeLocks.BeginForceStop([]string{tc.target})
+			finish(true)
+			cfg.ResumeLocks.ExplicitResumeCompleted(tc.target, cfg.ResumeLocks.RecoveryState(tc.target).Epoch)
+			if err := sessionActionRecoveryError(cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err == nil {
+				t.Fatal("retry replaced the request's admission epoch")
+			}
+			if epoch := sessionRequestRecoveryEpoch(t.Context(), cfg, "", tc.target); epoch != cfg.ResumeLocks.RecoveryState(tc.target).Epoch {
+				t.Fatal("direct handler did not use execution snapshot")
+			}
+		})
+	}
+}

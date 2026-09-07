@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -48,7 +49,7 @@ func withDeletionTargetOwnership[R any](
 	ref, threadID, clientMutationID string,
 	action func() (R, error),
 ) (R, error) {
-	epoch := sessionRecoveryState(cfg, ref, threadID).Epoch
+	epoch := sessionRequestRecoveryEpoch(ctx, cfg, ref, threadID)
 	unlock := lockDeletionTarget(cfg, ref, threadID)
 	defer unlock()
 	if err := deletionFenceError(cfg, ref, threadID, clientMutationID); err != nil {
@@ -78,7 +79,7 @@ func withDeletionTargetOwnership[R any](
 // withSessionActionOwnership guards actions that have no durable mutation ID.
 // Reads share deletion locking but must remain available for incompatible owners.
 func withSessionActionOwnership[R any](ctx context.Context, cfg hubcore.WebConfig, ref, threadID string, action func() (R, error)) (R, error) {
-	epoch := sessionRecoveryState(cfg, ref, threadID).Epoch
+	epoch := sessionRequestRecoveryEpoch(ctx, cfg, ref, threadID)
 	return withDeletionTargetOwnership(ctx, cfg, ref, threadID, "", func() (R, error) {
 		if err := sessionActionRecoveryError(cfg, ref, threadID, epoch); err != nil {
 			var zero R
@@ -209,4 +210,70 @@ func sessionActionRecoveryError(cfg hubcore.WebConfig, ref, threadID string, epo
 		return sessionRecoveryAdmissionError{appwire.Unavailable("session recovery canceled this pending action; submit it again")}
 	}
 	return nil
+}
+
+type sessionRecoveryAdmissionKey struct{}
+
+type sessionRecoveryAdmission struct {
+	sessionID string
+	epoch     uint64
+}
+
+// admitSessionRecovery captures only the requested local identity; it performs
+// no ownership discovery and leaves malformed or foreign targets to handlers.
+func admitSessionRecovery(ctx context.Context, cfg hubcore.WebConfig, message appwire.Message) context.Context {
+	if message.Request == nil || cfg.ResumeLocks == nil {
+		return ctx
+	}
+	var rawRef, id string
+	switch message.Request.Method {
+	case appwire.MethodThreadResume:
+		var params appwire.ThreadResumeParams
+		if json.Unmarshal(message.Request.Params, &params) != nil {
+			return ctx
+		}
+		rawRef, id = params.Ref, strings.TrimSpace(params.Session)
+	case appwire.MethodTurnStart, appwire.MethodTurnSteer, appwire.MethodTurnInterrupt:
+		var params appwire.TurnInterruptParams
+		if json.Unmarshal(message.Request.Params, &params) != nil {
+			return ctx
+		}
+		rawRef, id = params.Ref, strings.TrimSpace(params.ThreadID)
+	case appwire.MethodThreadModelSet, appwire.MethodThreadVisionModelSet,
+		appwire.MethodThreadReasoningEffortSet, appwire.MethodThreadCompactStart,
+		appwire.MethodThreadClear, appwire.MethodThreadShutdown, appwire.MethodGoalSet,
+		appwire.MethodTurnQueue, appwire.MethodTurnDrainAsSteer,
+		appwire.MethodTurnPromoteQueuedAsSteer, appwire.MethodTurnCancelQueued:
+		var params struct {
+			Ref string `json:"ref"`
+		}
+		if json.Unmarshal(message.Request.Params, &params) != nil {
+			return ctx
+		}
+		rawRef = params.Ref
+	default:
+		return ctx
+	}
+	if rawRef != "" {
+		ref, err := appwire.ParseRef(rawRef)
+		if err != nil || ref.SourceID != "local" {
+			return ctx
+		}
+		// Resume's explicit sessionId takes precedence; other handlers resolve ref
+		// before their optional threadId. Ignored extra fields cannot change this.
+		if message.Request.Method != appwire.MethodThreadResume || id == "" {
+			id = ref.ThreadID
+		}
+	}
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionRecoveryAdmissionKey{}, sessionRecoveryAdmission{sessionID: id, epoch: cfg.ResumeLocks.RecoveryState(id).Epoch})
+}
+
+func sessionRequestRecoveryEpoch(ctx context.Context, cfg hubcore.WebConfig, ref, threadID string) uint64 {
+	if admission, ok := ctx.Value(sessionRecoveryAdmissionKey{}).(sessionRecoveryAdmission); ok && admission.sessionID == deletionThreadID(ref, threadID) {
+		return admission.epoch
+	}
+	return sessionRecoveryState(cfg, ref, threadID).Epoch
 }
