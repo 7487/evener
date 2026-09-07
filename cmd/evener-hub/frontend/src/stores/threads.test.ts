@@ -8800,3 +8800,60 @@ test("force stop uses the independent recovery API and records only confirmed su
   expect(threadsStore.getState().restartBlockingObligations.has("local:owner")).toBe(true);
   expect(fake.calls.some((call) => call.method === "evener/thread/forceStop")).toBe(false);
 });
+
+test("clear permits explicit fresh recovery without replaying old-instance input", async () => {
+  const storage = new MutationOutboxIndexedDB();
+  setMutationStorageForTests(storage);
+  const fake = connectFakeClient("connecting");
+  const saved = readResponse("ref_a", { status: { type: "notLoaded" } });
+  saved.thread.evener.mutationStateAuthoritative = false;
+  const replacement = testThread("ref_a", { id: "replacement" });
+  let cleared = false;
+  fake.on("thread/read", () => (cleared ? { thread: replacement } : saved));
+  const started = deferred<void>();
+  const release = deferred<void>();
+  fake.on("thread/clear", async (params) => {
+    started.resolve();
+    await release.promise;
+    cleared = true;
+    return clearResponse(params, replacement);
+  });
+  fake.on("turn/queue", (params) => {
+    expect(params.expectedInstanceId).toBe("thr_ref_a");
+    throw new WireError("thread instance is stale", -32014, {
+      evenerErrorInfo: "mutationOutcome",
+      clientMutationId: params.clientMutationId,
+      mutationOutcome: "notAccepted",
+      retryDisposition: "none",
+    });
+  });
+  fake.emitReady();
+  await threadsStore.getState().ensureThread("ref_a");
+  const clearing = threadsStore.getState().clearThread("ref_a");
+  await started.promise;
+  // Another tab can contribute an uncertain old-instance intent while clear is in flight.
+  const record = await storage.enqueueIntent({
+    targetRef: "ref_a",
+    method: "turn/queue",
+    payload: { ref: "ref_a", expectedInstanceId: "thr_ref_a", input: [{ type: "text", text: "old input" }] },
+    attachments: [],
+    optimisticDisplay: { text: "old input" },
+  });
+  await storage.markAttempted(record.clientMutationId);
+  await storage.markUnknown(record.clientMutationId, "blockedUnknown");
+  release.resolve();
+  await clearing;
+  expect(threadsStore.getState().threads.get("ref_a")?.instanceId).toBe("replacement");
+  expect((await storage.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
+  expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(0);
+  const reads = fake.calls.filter((call) => call.method === "thread/read").length;
+  expect(await retryBlockedMutation(record.clientMutationId)).toBe(true);
+  expect(fake.calls.filter((call) => call.method === "thread/read").length).toBeGreaterThan(reads);
+  await vi.waitFor(async () => {
+    expect(await storage.getRecovery(record.clientMutationId)).toMatchObject({
+      recoveryKind: "rejected",
+      payload: { expectedInstanceId: "thr_ref_a" },
+    });
+  });
+  expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(1);
+});

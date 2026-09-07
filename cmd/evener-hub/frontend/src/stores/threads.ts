@@ -620,11 +620,17 @@ function applyClearResponse(targetRef: string, response: ThreadClearResponse): v
     stateBefore.threads.has(targetRef) ? model : undefined,
     stateBefore.watchedThreads.has(targetRef) ? model : undefined,
   );
-  if (stateBefore.threads.has(targetRef)) {
-    threadsStore.setState((state) => ({
-      hydrations: new Map(state.hydrations).set(targetRef, (state.hydrations.get(targetRef) ?? 0) + 1),
-    }));
-  }
+  threadsStore.setState((state) => {
+    const mutationAuthorityRefs = new Set(state.mutationAuthorityRefs);
+    if (response.thread.evener.mutationStateAuthoritative === true) mutationAuthorityRefs.add(targetRef);
+    else mutationAuthorityRefs.delete(targetRef);
+    return {
+      mutationAuthorityRefs,
+      hydrations: stateBefore.threads.has(targetRef)
+        ? new Map(state.hydrations).set(targetRef, (state.hydrations.get(targetRef) ?? 0) + 1)
+        : state.hydrations,
+    };
+  });
 }
 
 function currentDispatchClient(targetRef?: string): AppwireClientLike | null {

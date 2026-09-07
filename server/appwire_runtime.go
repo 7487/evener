@@ -1813,6 +1813,7 @@ func (s *Server) clearBlockedReasonLocked() string {
 
 func (s *Server) threadClearResponse(clientMutationID string, disposition appwire.MutationDisposition) appwire.ThreadClearResponse {
 	thread := s.appThread()
+	thread.Evener.MutationStateAuthoritative = true
 	return appwire.ThreadClearResponse{
 		Thread: thread,
 		Ref:    thread.Evener.Ref,
