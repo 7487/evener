@@ -93,3 +93,21 @@ func TestRunPendingAfterWriteRunsUnwrittenCallbacks(t *testing.T) {
 		t.Fatalf("callback ran %d times, want exactly one run", calls)
 	}
 }
+
+func TestAfterResponseWrittenReportsFalseAfterTeardown(t *testing.T) {
+	server := NewServer(ServerConfig{ServerName: "test", Version: "1", SourceID: "local"})
+	conn := server.NewConnection("conn-1")
+	ctx := context.WithValue(context.Background(), connectionContextKey{}, conn)
+	ctx = context.WithValue(ctx, requestIDContextKey{}, requestIDKey(appwire.NewIntID(11)))
+
+	conn.runPendingAfterWrite()
+
+	ran := false
+	if AfterResponseWritten(ctx, func() { ran = true }) {
+		t.Fatal("AfterResponseWritten accepted a callback after the send loop had drained")
+	}
+	conn.runPendingAfterWrite()
+	if ran {
+		t.Fatal("a callback registered after teardown ran")
+	}
+}

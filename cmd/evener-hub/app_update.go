@@ -158,9 +158,12 @@ func evenerBinaryFrom(channel string, installed []string) (string, error) {
 // scheduleHubRestartAfterResponse execs binary with the hub's own arguments
 // once the apply response has been written to the websocket -- the frontend
 // needs that success result to start its health poll, so replacing the
-// process image before the frame goes out would strand the page. When ctx
-// carries no appserver connection (a direct call in a test, a non-websocket
-// caller) there is no frame to wait for, so the restart runs immediately.
+// process image before the frame goes out would strand the page. When there
+// is no frame to wait for -- ctx carries no appserver connection (a direct
+// call in a test, a non-websocket caller), or the socket died during the
+// install and the send loop has already stopped -- the restart runs
+// immediately, because a hub that never restarts also never releases
+// hubUpdateMu.
 // hubUpdateMu is held across the exec attempt (see its doc comment); on
 // failure the old hub keeps running, so the lock is released here too, or
 // every later apply/upgrade would be refused forever.

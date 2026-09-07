@@ -129,7 +129,8 @@ New file `app_update.go`:
   apply response has reached the transport (or the connection tore down
   without it) and the browser has the success result it needs; it then starts
   a goroutine that waits a 500ms flush grace and calls `selfupdate.Restart`.
-  A context with no appserver connection restarts immediately. On failure it
+  A context with no appserver connection, or one whose send loop has already
+  stopped, restarts immediately. On failure it
   logs to stderr with the `[hub]` prefix used elsewhere and the hub keeps
   running on the old binary.
 - Registered in `app_rpc.go` next to `MethodEvenerUpgrade`.

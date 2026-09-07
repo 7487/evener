@@ -543,8 +543,12 @@ type Connection struct {
 	hydrationMu       sync.Mutex
 	hydrations        map[string]*hydrationResponseFinalizer
 	// afterWrite holds the AfterResponseWritten callbacks, keyed the same way
-	// hydrations is (requestIDKey). Guarded by responseMu.
-	afterWrite map[string]func()
+	// hydrations is (requestIDKey). afterWriteDrained records that
+	// runPendingAfterWrite has already run, so a callback arriving after the
+	// send loop stopped is refused instead of being retained forever. Both
+	// are guarded by responseMu.
+	afterWrite        map[string]func()
+	afterWriteDrained bool
 }
 
 func (c *Connection) ID() string {
@@ -719,6 +723,7 @@ func (c *Connection) runPendingAfterWrite() {
 		pending = append(pending, fn)
 		delete(c.afterWrite, key)
 	}
+	c.afterWriteDrained = true
 	c.responseMu.Unlock()
 	for _, fn := range pending {
 		fn()
@@ -854,7 +859,14 @@ func (f *hydrationResponseFinalizer) abortAfterWithdrawal() {
 // AfterResponseWritten runs fn once the response to the request being
 // handled in ctx has been written to the transport, or once the connection
 // tears down without writing it. It reports false, and does not retain fn,
-// when ctx carries no appserver connection.
+// when ctx carries no appserver connection or when the connection has
+// already torn down -- a handler that ran long enough for the send loop to
+// stop first must act for itself rather than wait for a callback nothing
+// will ever run.
+//
+// A second registration for the same request replaces the first: callbacks
+// are not chained. One handler owns one response, which is all any caller
+// needs today.
 func AfterResponseWritten(ctx context.Context, fn func()) bool {
 	conn, ok := ctx.Value(connectionContextKey{}).(*Connection)
 	if !ok || conn == nil {
@@ -865,11 +877,14 @@ func AfterResponseWritten(ctx context.Context, fn func()) bool {
 		return false
 	}
 	conn.responseMu.Lock()
+	defer conn.responseMu.Unlock()
+	if conn.afterWriteDrained {
+		return false
+	}
 	if conn.afterWrite == nil {
 		conn.afterWrite = map[string]func(){}
 	}
 	conn.afterWrite[responseID] = fn
-	conn.responseMu.Unlock()
 	return true
 }
 
