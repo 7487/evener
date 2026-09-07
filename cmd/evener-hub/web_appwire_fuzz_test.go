@@ -191,6 +191,12 @@ func pinSandboxCWD(raw []byte, cwd string) []byte {
 // this target.
 func FuzzAppWireDispatch(f *testing.F) {
 	stubSelfUpgrade(f)
+	// The self-update apply path execs the process in place; stub it to a
+	// no-op so the fuzz harness can never replace itself, even if built
+	// with release ldflags (isDevBuild would otherwise be the only guard).
+	previousScheduleHubRestart := scheduleHubRestart
+	scheduleHubRestart = func(string, []string) {}
+	f.Cleanup(func() { scheduleHubRestart = previousScheduleHubRestart })
 	canary := installSandboxAuthSeam(f)
 	deny := installDenyTransportTB(f)
 
