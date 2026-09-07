@@ -203,10 +203,14 @@ Default tests stay offline (AGENTS.md).
 - Frontend: `hubUpdate.test.ts` (scripted client: check, apply, health poll
   to reload, timeout) and `hub.test.tsx` (dev / up to date / available /
   restarting / timed out renderings, confirm dialog gating apply).
-- Opt-in e2e `EVENER_UPDATE_E2E=1` in `cmd/evener-hub`: install the current
-  snapshot into a temp `PREFIX`, start that hub on `127.0.0.1:0`, call
-  `evener/update/apply` over appwire, assert the PID is unchanged and
-  `/api/health` comes back. This is the only test that touches GitHub.
+- Opt-in e2e `EVENER_UPDATE_E2E=1` in `cmd/evener-hub`: build this branch's
+  own `evener` binary as a `snapshot`-channel build (so it isn't refused as a
+  dev build), start it as a hub on `127.0.0.1:0`, call `evener/update/apply`
+  over appwire against the real public snapshot release, and assert the PID
+  is unchanged, `/api/health` comes back, and its version differs from the
+  branch build's. This is the only test that touches GitHub; it downloads
+  the current public snapshot but does not depend on that release carrying
+  this feature, since the hub under test is built locally.
 
 ## Docs
 

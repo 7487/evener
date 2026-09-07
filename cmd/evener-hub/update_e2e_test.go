@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -16,15 +17,21 @@ import (
 	"primeradiant.com/evener/appwire"
 )
 
-// TestUpdateApplyEndToEnd installs the current snapshot into a temp prefix,
-// runs that hub, applies an update through the RPC, and proves the process
-// replaced itself in place: same PID, /api/health back. Opt-in only: it
-// downloads from GitHub (AGENTS.md forbids network in default tests). The
-// snapshot installed at test start IS the latest snapshot, so the exec
-// replaces the process with the same build -- the version reported before
-// and after may be identical. What this proves is that the exec happened
-// and the process survived it under the same PID, not that the version
-// changed.
+// TestUpdateApplyEndToEnd builds this branch's own evener binary as a
+// "snapshot" release build, runs it as a real hub, applies an update
+// through the RPC, and proves the process replaced itself in place: same
+// PID, /api/health back with a different version. Opt-in only: it downloads
+// the current public snapshot release from GitHub (AGENTS.md forbids
+// network in default tests).
+//
+// The hub under test is built from this worktree, not downloaded, because
+// the publicly published snapshot release only ever reflects main and this
+// feature has not merged there yet -- a downloaded "current snapshot" would
+// have no evener/update/apply route to call. Building the branch locally
+// with -X buildinfo.Channel=snapshot makes it a non-dev build (so self-update
+// isn't refused) whose version differs from whatever main last published,
+// which is what lets the post-update /api/health read back a different
+// version and prove the exec actually swapped binaries.
 //
 //	EVENER_UPDATE_E2E=1 go test ./cmd/evener-hub/ -run TestUpdateApplyEndToEnd -v
 func TestUpdateApplyEndToEnd(t *testing.T) {
@@ -36,14 +43,17 @@ func TestUpdateApplyEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("abs repo root: %v", err)
 	}
+	sha := gitShortSHA(t, repoRoot)
 
-	prefix := t.TempDir()
-	install := exec.Command("sh", filepath.Join(repoRoot, "install.sh"))
-	install.Env = append(os.Environ(), "PREFIX="+prefix, "EVENER_INSTALL_VERSION=snapshot")
-	if out, err := install.CombinedOutput(); err != nil {
-		t.Fatalf("install.sh: %v\n%s", err, out)
+	binDir := t.TempDir()
+	evenerBin := filepath.Join(binDir, "evener")
+	build := exec.Command("go", "build",
+		"-ldflags", "-X primeradiant.com/evener/buildinfo.Channel=snapshot -X primeradiant.com/evener/buildinfo.GitSHA="+sha,
+		"-o", evenerBin, "./cmd/evener/")
+	build.Dir = repoRoot
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build evener (snapshot-channel): %v\n%s", err, out)
 	}
-	evenerBin := filepath.Join(prefix, "bin", "evener")
 
 	// No model call is made, so the fake provider only needs to exist in
 	// config -- base_url is never dialed.
@@ -82,16 +92,33 @@ api_key  = "fakellm-not-a-secret"
 		}
 		decodeErr := json.NewDecoder(r.Body).Decode(&body)
 		_ = r.Body.Close()
-		if decodeErr != nil || body.Version == "" {
+		if decodeErr != nil || body.Version == "" || body.Version == before {
+			// A version equal to "before" can be the old process answering
+			// in the window before its self-exec fires; keep polling for a
+			// response that can only come from the newly installed binary.
 			continue
 		}
 		if !processAlive(stack.pid) {
 			t.Fatalf("hub pid %d died", stack.pid)
 		}
 		t.Logf("before=%s after=%s pid=%d", before, body.Version, stack.pid)
+
+		installedBin := filepath.Join(stack.home, ".local", "share", "evener", "bin", "evener")
+		if _, statErr := os.Stat(installedBin); statErr != nil {
+			t.Fatalf("installed snapshot binary missing at %s: %v", installedBin, statErr)
+		}
 		return
 	}
-	t.Fatal("hub did not come back within 30s")
+	t.Fatal("hub did not come back with a new version within 30s")
+}
+
+func gitShortSHA(t *testing.T, repoRoot string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repoRoot, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse --short HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func healthVersion(t *testing.T, addr string) string {
