@@ -538,6 +538,7 @@ type Connection struct {
 	pendingAdmissions map[*subscriptionAdmission]struct{}
 	mu                sync.RWMutex
 	initialized       bool
+	recoveryRunning   bool
 	cancel            context.CancelFunc
 	responseMu        sync.Mutex
 	hydrationMu       sync.Mutex
@@ -1243,8 +1244,8 @@ func concurrentDispatchMethod(method string) bool {
 // concerns: a ping request is answered inline through the shared
 // handleAndEnqueue barrier, bypassing the request queue — one ping
 // implementation, one panic barrier, no hand-built response beside the real
-// path that could drift from it — and every other frame is enqueued for the
-// serial worker. False means the connection died while blocked on a full
+// path that could drift from it. Initialized force-stop requests have one
+// independent recovery slot; every other frame is enqueued for the serial worker. False means the connection died while blocked on a full
 // queue and the loop should return. A second transport inherits the whole
 // policy by driving this same entry point.
 //
@@ -1255,6 +1256,25 @@ func concurrentDispatchMethod(method string) bool {
 func (c *Connection) receiveInbound(ctx context.Context, msg appwire.Message) bool {
 	if msg.Request != nil && msg.Request.Method == appwire.MethodPing {
 		c.handleAndEnqueue(ctx, msg)
+		return true
+	}
+	if msg.Request != nil && msg.Request.Method == appwire.MethodEvenerThreadForceStop && c.isInitialized() {
+		c.mu.Lock()
+		busy := c.recoveryRunning
+		if !busy {
+			c.recoveryRunning = true
+		}
+		c.mu.Unlock()
+		if busy {
+			c.enqueueDispatched(ctx, appwire.ErrorMessage(msg.Request.ID, appwire.Unavailable("force stop is already running")))
+			return true
+		}
+		// Recovery must reach ownership cancellation even when the serial worker
+		// is awaiting an unresponsive daemon. Other mutations retain FIFO order.
+		go func() {
+			defer func() { c.mu.Lock(); c.recoveryRunning = false; c.mu.Unlock() }()
+			c.handleAndEnqueue(ctx, msg)
+		}()
 		return true
 	}
 	return c.enqueueRequest(ctx, msg)

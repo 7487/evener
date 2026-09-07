@@ -2,12 +2,14 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,11 +30,15 @@ func (f forceStopControllerFunc) Open(target daemonprocess.Target) (daemonproces
 type forceStopProcess struct {
 	events           *[]string
 	killErr, waitErr error
+	onWait           func()
 }
 
 func (p *forceStopProcess) Kill() error { *p.events = append(*p.events, "kill"); return p.killErr }
 func (p *forceStopProcess) Wait(context.Context) error {
 	*p.events = append(*p.events, "wait")
+	if p.onWait != nil {
+		p.onWait()
+	}
 	return p.waitErr
 }
 func (p *forceStopProcess) Close() error { *p.events = append(*p.events, "close"); return nil }
@@ -116,7 +122,7 @@ func TestForceStopFailuresDoNotPretendExit(t *testing.T) {
 				}
 				return p, nil
 			})
-			err := forceStopThread(t.Context(), hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: controller}, appwire.ThreadForceStopParams{Ref: "local:" + webTestSessionID})
+			err := forceStopThread(t.Context(), hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: controller}, appwire.ThreadForceStopParams{Ref: "local:" + webTestSessionID}, nil)
 			if (err == nil) != (stage == "alreadyExited") {
 				t.Fatalf("error=%v", err)
 			}
@@ -145,10 +151,12 @@ func TestForceStopRejectsAmbiguousAndForeignTargets(t *testing.T) {
 				writeRendezvous(t, runDir, entry)
 			}
 			controller := forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
-				t.Error("unsafe target reached process controller")
+				if tc.name != "multiple" && tc.name != "overlapping aliases" {
+					t.Error("unsafe target reached process controller")
+				}
 				return nil, errors.New("unexpected")
 			})
-			if err := forceStopThread(t.Context(), hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: controller}, appwire.ThreadForceStopParams{Ref: tc.ref}); err == nil {
+			if err := forceStopThread(t.Context(), hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: controller}, appwire.ThreadForceStopParams{Ref: tc.ref}, nil); err == nil {
 				t.Fatal("unsafe target accepted")
 			}
 		})
@@ -177,13 +185,13 @@ func TestForceStopRejectsDiscoveryChangeDuringLockedRevalidation(t *testing.T) {
 	runDir := t.TempDir()
 	entry := rendezvous.Entry{PID: 4242, SessionID: "current", WorkspaceRef: "local:stable"}
 	writeRendezvous(t, runDir, entry)
-	previous, err := forceStopEntry(runDir, "stable")
+	previous, err := forceStopEntry(runDir, "stable", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	entry.InstanceID = "replacement"
 	writeRendezvous(t, runDir, entry)
-	if err := forceStopOwnershipUnchanged(runDir, "stable", previous); err == nil {
+	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil); err == nil {
 		t.Fatal("changed discovery accepted")
 	}
 }
@@ -198,13 +206,14 @@ func TestForceStopPreservesSuccessAfterRosterRefreshFailure(t *testing.T) {
 	cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), Roster: roster,
 		PokeAttention: func() { poked = true },
 		DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
-			if err := os.WriteFile(filepath.Join(runDir, "4243.json"), []byte("{"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			return &forceStopProcess{events: &events}, nil
+			return &forceStopProcess{events: &events, onWait: func() {
+				if err := os.WriteFile(filepath.Join(runDir, "4243.json"), []byte("{"), 0600); err != nil {
+					t.Error(err)
+				}
+			}}, nil
 		}),
 	}
-	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:owner"}); err != nil {
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:owner"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(events, []string{"kill", "wait", "close"}) {
@@ -273,6 +282,12 @@ func TestHubForceStopUnconfirmedRootReadAndExplicitResume(t *testing.T) {
 	opens := 0
 	cfg.DaemonProcesses = forceStopControllerFunc(func(target daemonprocess.Target) (daemonprocess.Process, error) {
 		opens++
+		if target.PID == 106 {
+			return &forceStopProcess{events: new([]string)}, nil
+		}
+		if target.PID == command.Process.Pid && command.ProcessState != nil {
+			return nil, daemonprocess.ErrExited
+		}
 		if target.PID != command.Process.Pid {
 			t.Fatalf("unexpected target: %+v", target)
 		}
@@ -319,6 +334,12 @@ func TestHubForceStopUnconfirmedRootReadAndExplicitResume(t *testing.T) {
 	if shutdownCalls != 1 || opens != 1 {
 		t.Fatalf("normal shutdown route=%d process opens=%d", shutdownCalls, opens)
 	}
+	if err := client.Request(t.Context(), appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: ref}, nil); err != nil {
+		t.Fatalf("stop after explicit resume: %v", err)
+	}
+	if *resumes != 1 {
+		t.Fatalf("second stop resumed: %d", *resumes)
+	}
 }
 
 func TestForceStopSerializesResumeAndDeletionEntryPoints(t *testing.T) {
@@ -352,7 +373,7 @@ func TestForceStopSerializesResumeAndDeletionEntryPoints(t *testing.T) {
 				web := NewWebServer(cfg)
 				stopped := make(chan error, 1)
 				go func() {
-					stopped <- forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:" + stableID})
+					stopped <- forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:" + stableID}, nil)
 				}()
 				<-process.entered
 				for _, alias := range []string{currentID, stableID} {
@@ -405,5 +426,181 @@ func TestForceStopSerializesResumeAndDeletionEntryPoints(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestHubForceStopInterruptsStalledRPCOnSameConnection(t *testing.T) {
+	for _, method := range []string{appwire.MethodThreadShutdown, appwire.MethodThreadModelSet} {
+		t.Run(method, func(t *testing.T) {
+			var sessionID string
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			defer close(release)
+			cfg, sid, resumes := parityResumeFixture(t, func(daemon *appserver.Server) {
+				appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(_ context.Context, params appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+					return appwire.ThreadReadResponse{Thread: appwire.Thread{ID: sessionID, SessionID: sessionID, Source: "local", Evener: appwire.EvenerThread{Ref: params.Ref, InstanceID: sessionID, Capabilities: appwire.ThreadCapabilities{Shutdown: true, ChangeModel: true}}}}, nil
+				})
+				daemon.Router().Handle(method, func(ctx context.Context, _ json.RawMessage) (any, error) {
+					close(entered)
+					select {
+					case <-ctx.Done():
+					case <-release:
+					}
+					return appwire.EmptyResponse{}, ctx.Err()
+				})
+			})
+			sessionID = sid
+			cfg.ResumeLocks = hubcore.NewResumeLocks()
+			var events []string
+			cfg.DaemonProcesses = forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+				return &forceStopProcess{events: &events}, nil
+			})
+			hub := newHubRPCTestServer(t, cfg)
+			defer hub.Close()
+			client := dialHubRPC(t, hub)
+			defer client.Close()
+			if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+				t.Fatal(err)
+			}
+			ref := "local:" + sessionID
+			if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: ref}); err != nil {
+				t.Fatal(err)
+			}
+			shutdown := make(chan error, 1)
+			go func() {
+				shutdown <- client.Request(t.Context(), method, appwire.ThreadModelSetParams{Ref: ref, ModelProvider: "test", Model: "test"}, nil)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("shutdown never reached daemon")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			if err := client.Request(ctx, appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: ref}, nil); err != nil {
+				t.Fatalf("force stop behind stalled shutdown: %v", err)
+			}
+			select {
+			case err := <-shutdown:
+				if err == nil {
+					t.Fatal("interrupted RPC returned success")
+				}
+			case <-ctx.Done():
+				t.Fatal("stalled shutdown did not return")
+			}
+			if !reflect.DeepEqual(events, []string{"kill", "wait", "close"}) {
+				t.Fatalf("process events=%v", events)
+			}
+			if *resumes != 1 {
+				t.Fatalf("recovery automatically resumed session: %d", *resumes)
+			}
+		})
+	}
+}
+
+func TestForceStopSkipsVerifiedExitedClaims(t *testing.T) {
+	for _, aliasOnly := range []bool{false, true} {
+		t.Run(strconv.FormatBool(aliasOnly), func(t *testing.T) {
+			runDir := t.TempDir()
+			old := rendezvous.Entry{PID: 4242, SessionID: "stable", ThreadID: "current", StateDir: t.TempDir(), StartedAt: time.Now()}
+			writeRendezvous(t, runDir, old)
+			var events []string
+			dead := map[int]bool{}
+			cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: forceStopControllerFunc(func(target daemonprocess.Target) (daemonprocess.Process, error) {
+				if dead[target.PID] {
+					return nil, daemonprocess.ErrExited
+				}
+				return &forceStopProcess{events: &events, onWait: func() { dead[target.PID] = true }}, nil
+			})}
+			params := appwire.ThreadForceStopParams{Ref: "local:stable"}
+			if err := forceStopThread(t.Context(), cfg, params, nil); err != nil {
+				t.Fatal(err)
+			}
+			resumed := old
+			resumed.PID++
+			if aliasOnly {
+				resumed.SessionID = "resumed"
+				params.Ref = "local:resumed"
+			}
+			writeRendezvous(t, runDir, resumed)
+			if err := forceStopThread(t.Context(), cfg, params, nil); err != nil {
+				t.Fatalf("second force stop: %v", err)
+			}
+			if err := forceStopThread(t.Context(), cfg, params, nil); err != nil {
+				t.Fatalf("retry with all owners exited: %v", err)
+			}
+			entries, err := rendezvous.ListStrict(runDir)
+			if err != nil || len(entries) != 2 {
+				t.Fatalf("crash markers not preserved: %v %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestHubForceStopInterruptsStalledSpawnedResumeRead(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	cfg, sessionID, resumes := parityResumeFixture(t, func(daemon *appserver.Server) {
+		appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(ctx context.Context, _ appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+			close(entered)
+			select {
+			case <-ctx.Done():
+			case <-release:
+			}
+			return appwire.ThreadReadResponse{}, ctx.Err()
+		})
+	})
+	spawner := cfg.Spawner.(*fakeRPCSpawner)
+	spawn := spawner.resume
+	spawner.resume = func(ctx context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		entry, err := spawn(ctx, req)
+		entry.StartedAt = time.Now()
+		entry.StateDir = req.StateDir
+		writeRendezvous(t, cfg.RunDir, entry)
+		return entry, err
+	}
+	cfg.Roster = hubcore.NewRoster(cfg.RunDir, forceStopProberFunc(func(rendezvous.Entry) hubcore.ProbeResult { return hubcore.ProbeResult{} }))
+	cfg.ResumeLocks = hubcore.NewResumeLocks()
+	var events []string
+	cfg.DaemonProcesses = forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+		return &forceStopProcess{events: &events}, nil
+	})
+	hub := newHubRPCTestServer(t, cfg)
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+		t.Fatal(err)
+	}
+	ref := "local:" + sessionID
+	resume := make(chan error, 1)
+	go func() {
+		_, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: ref})
+		resume <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("spawned read never reached daemon")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := client.Request(ctx, appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: ref}, nil); err != nil {
+		t.Fatalf("force stop behind spawned read: %v", err)
+	}
+	select {
+	case err := <-resume:
+		if err == nil {
+			t.Fatal("canceled resume succeeded")
+		}
+	case <-ctx.Done():
+		t.Fatal("resume retained ownership")
+	}
+	if *resumes != 1 {
+		t.Fatalf("spawns=%d", *resumes)
+	}
+	if !reflect.DeepEqual(events, []string{"kill", "wait", "close"}) {
+		t.Fatalf("process events=%v", events)
 	}
 }

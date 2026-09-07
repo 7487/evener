@@ -216,6 +216,9 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 		return appwire.ThreadStartResponse{Thread: thread}, nil
 	}
 	read := func(ctx context.Context) (appwire.ThreadReadResponse, error) {
+		if canUseSpawnEntry {
+			return readSpawnedLocalThread(ctx, sources, entry)
+		}
 		return source.ReadThread(ctx, appwire.ThreadReadParams{Ref: ref})
 	}
 	var threadResp appwire.ThreadReadResponse
@@ -380,11 +383,8 @@ func hubThreadResume(ctx context.Context, cfg hubcore.WebConfig, sources *appsou
 			// A successful scan can still miss an owner whose status probe
 			// failed. Confirm the exact spawned endpoint through its read before
 			// relying on the shared roster for subsequent requests.
-			source := appsource.NewLocalDaemonSource("local", func() []rendezvous.Entry {
-				return []rendezvous.Entry{entry}
-			}, nil)
 			read, err := cfg.Roster.ReadSpawnedThread(ctx, entry, func(ctx context.Context) (appwire.ThreadReadResponse, error) {
-				return source.ReadThread(ctx, appwire.ThreadReadParams{Ref: localSpawnWorkspaceRef(entry)})
+				return readSpawnedLocalThread(ctx, sources, entry)
 			})
 			if err != nil {
 				return appwire.ThreadResumeResponse{}, appwire.Unavailable(errors.Join(refreshErr, err).Error())
@@ -609,4 +609,18 @@ func parseSourceTurnID(raw string) (int, error) {
 		return 0, errors.New("sourceTurnId must be a positive turn number")
 	}
 	return turn, nil
+}
+
+// readSpawnedLocalThread keeps pre-admission reads in the same recovery scope
+// as ordinary calls so a stalled read cannot retain resume ownership forever.
+func readSpawnedLocalThread(ctx context.Context, sources *appsource.Registry, entry rendezvous.Entry) (appwire.ThreadReadResponse, error) {
+	source, ok := sources.Source("local")
+	if !ok {
+		return appwire.ThreadReadResponse{}, appwire.Unavailable("local daemon source is not configured")
+	}
+	local, ok := source.(*appsource.LocalDaemonSource)
+	if !ok {
+		return appwire.ThreadReadResponse{}, appwire.Unavailable("local daemon source is not configured")
+	}
+	return local.ReadThreadAtEntry(ctx, entry, appwire.ThreadReadParams{Ref: localSpawnWorkspaceRef(entry)})
 }

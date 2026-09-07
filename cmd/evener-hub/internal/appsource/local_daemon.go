@@ -27,6 +27,9 @@ type LocalDaemonSource struct {
 	itemPagingLocks keyedMutexRegistry
 	itemSnapshots   *itemSnapshotStateCache
 
+	callsMu sync.Mutex
+	calls   map[daemonIdentity]*daemonCalls
+
 	relayMu       sync.Mutex
 	relaySessions map[string]*relaySession
 	legacyRelays  map[string]legacyRelayRead
@@ -296,8 +299,14 @@ func (s *LocalDaemonSource) ReadThread(ctx context.Context, params appwire.Threa
 	if err != nil {
 		return appwire.ThreadReadResponse{}, err
 	}
+	return s.ReadThreadAtEntry(ctx, entry, params)
+}
+
+// ReadThreadAtEntry reads an exact daemon endpoint, including before roster
+// admission, within the source's recovery cancellation scope.
+func (s *LocalDaemonSource) ReadThreadAtEntry(ctx context.Context, entry rendezvous.Entry, params appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
 	var out appwire.ThreadReadResponse
-	err = s.withClient(ctx, entry, func(client *appwire.Client) error {
+	err := s.withClient(ctx, entry, func(client *appwire.Client) error {
 		var callErr error
 		out, callErr = client.ThreadRead(ctx, params)
 		return callErr
@@ -663,6 +672,11 @@ func (s *LocalDaemonSource) withClientCallMapper(
 	fn func(*appwire.Client) error,
 	mapCallError func(error) error,
 ) error {
+	ctx, finish := s.beginDaemonCall(ctx, entry)
+	defer finish()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	transport, err := s.dial(ctx, entry.Endpoint, s.client, daemonAuthHeader(entry.HubToken))
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
