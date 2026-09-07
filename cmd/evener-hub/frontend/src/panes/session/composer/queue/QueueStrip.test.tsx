@@ -1055,3 +1055,14 @@ describe("drain-as-steer affordance", () => {
     expect(fake.calls.filter((c) => c.method === "turn/drainAsSteer")).toHaveLength(0);
   });
 });
+
+test.each(["active", "idle"])("Retry stays disabled for saved %s delegate data", async (type) => {
+  const fake = connectFakeClient();
+  const thread = testThread("ref_a", { status: { type } });
+  thread.evener.mutationStateAuthoritative = false;
+  await hydrate(fake, "ref_a", thread);
+  await seedBlockedUnknown("uncertain");
+  renderStrip(defaultProps());
+  const retry = await screen.findByRole("button", { name: "Retry" });
+  expect(isDisabled(retry)).toBe(true);
+});

@@ -105,6 +105,7 @@ export interface ThreadsStoreState {
   mutationWriteStalled: boolean;
   mutationReconciliationFailures: ReadonlySet<string>;
   restartBlockingObligations: ReadonlyMap<string, symbol>;
+  mutationAuthorityRefs: ReadonlySet<string>;
   // Per-ref ring of live-notification arrival timestamps, for
   // widgets/cadence's Cadence trace - see appendFrameTime below. Deliberately
   // NOT part of ThreadModel/the reducer: it is display-liveness bookkeeping
@@ -790,6 +791,7 @@ export async function retryBlockedMutation(clientMutationId: string): Promise<bo
   await runtime.start;
   const record = await runtime.storage.getOutbox(clientMutationId);
   if (record?.state !== "blockedUnknown") return false;
+  if (!threadsStore.getState().mutationAuthorityRefs.has(record.targetRef)) return false;
   const status = threadsStore.getState().threads.get(record.targetRef)?.status.type;
   if (!status || status === "restartRequired" || status === "notLoaded") return false;
   if (
@@ -1415,6 +1417,12 @@ async function publishAndReconcileThreadHydration(
 ): Promise<ThreadModel | null> {
   const published = publishThreadHydration(ref, pending, hydration.model);
   if (!published) return null;
+  threadsStore.setState((state) => {
+    const mutationAuthorityRefs = new Set(state.mutationAuthorityRefs);
+    if (hydration.response.thread.evener.mutationStateAuthoritative === true) mutationAuthorityRefs.add(ref);
+    else mutationAuthorityRefs.delete(ref);
+    return { mutationAuthorityRefs };
+  });
   if (published.status.type === "restartRequired") {
     threadsStore.setState((state) => ({
       restartBlockingObligations: new Map(state.restartBlockingObligations).set(ref, Symbol()),
@@ -2031,6 +2039,7 @@ async function handleReady(client: AppwireClientLike, epoch: number, targetRef?:
 function rewireClient(client: AppwireClientLike): void {
   if (client === wiredClient) return;
   readyEpoch += 1;
+  threadsStore.setState({ mutationAuthorityRefs: new Set() });
   // A different client is a different connection: every wire subscription
   // this generation tracked belongs to a socket that is gone, so drop the
   // whole set — handleReady's re-reads re-subscribe the still-tracked refs on
@@ -2046,6 +2055,7 @@ function rewireClient(client: AppwireClientLike): void {
   unwireNotification = client.onNotification(handleNotification);
   unwireReady = client.onReady(() => {
     readyEpoch += 1;
+    threadsStore.setState({ mutationAuthorityRefs: new Set() });
     // onReady is the SAME client reconnecting: its old connection's
     // subscriptions are server-side gone too, even though the client object
     // survives. handleReady re-subscribes the still-tracked refs.
@@ -2074,6 +2084,9 @@ function rewireClient(client: AppwireClientLike): void {
 // Registered once, at module load, same lifetime as this module's other
 // singleton bookkeeping (refCounts, wiredClient, ...).
 connectionStore.subscribe((state) => {
+  if (state.client?.state !== "ready" && threadsStore.getState().mutationAuthorityRefs.size > 0) {
+    threadsStore.setState({ mutationAuthorityRefs: new Set() });
+  }
   if (state.client) rewireClient(state.client);
 });
 
@@ -2198,6 +2211,7 @@ export const threadsStore = createStore<ThreadsStoreState>(() => ({
   mutationWriteStalled: false,
   mutationReconciliationFailures: new Set(),
   restartBlockingObligations: new Map(),
+  mutationAuthorityRefs: new Set(),
   frameTimes: new Map(),
   hydrations: new Map(),
   watchedThreads: new Map(),

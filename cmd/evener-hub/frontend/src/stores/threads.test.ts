@@ -8369,3 +8369,26 @@ for (const status of ["active", "idle"]) {
     expect(fake.calls.filter((call) => call.method === "turn/queue")).toHaveLength(0);
   });
 }
+
+test.each(["active", "idle"])("manual retry stays blocked after reload of a saved %s delegate", async (status) => {
+  const storage = new MutationOutboxIndexedDB({ createMutationId: () => "saved-manual-retry" });
+  const record = await storage.enqueueIntent({
+    targetRef: "ref_a",
+    method: "turn/queue",
+    payload: { ref: "ref_a", input: [{ type: "text", text: "sentinel" }] },
+    attachments: [],
+    optimisticDisplay: { text: "sentinel" },
+  });
+  await storage.markUnknown(record.clientMutationId, "blockedUnknown");
+  setMutationStorageForTests(storage);
+  const fake = connectFakeClient("connecting");
+  const saved = readResponse("ref_a", { status: { type: status } });
+  saved.thread.evener.mutationStateAuthoritative = false;
+  fake.on("thread/read", () => saved);
+  fake.emitReady();
+  await threadsStore.getState().ensureThread("ref_a");
+  await settleCallerContinuations();
+  expect(threadsStore.getState().restartBlockingObligations.size).toBe(0);
+  expect(await retryBlockedMutation(record.clientMutationId)).toBe(false);
+  expect((await storage.getOutbox(record.clientMutationId))?.state).toBe("blockedUnknown");
+});
