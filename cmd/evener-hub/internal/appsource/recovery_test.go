@@ -45,17 +45,37 @@ func TestRecoveryCancelsDaemonCallsAcrossClearAliases(t *testing.T) {
 }
 
 func TestRecoveryCancelsInitializedDaemonRPC(t *testing.T) {
-	for _, method := range []string{appwire.MethodThreadRead, appwire.MethodTurnStart} {
-		t.Run(method, func(t *testing.T) {
+	for _, tc := range []struct {
+		method     string
+		duringSend bool
+	}{
+		{appwire.MethodThreadRead, false},
+		{appwire.MethodTurnStart, false},
+		{appwire.MethodThreadRead, true},
+		{appwire.MethodTurnStart, true},
+	} {
+		boundary := "initialized"
+		if tc.duringSend {
+			boundary = "send"
+		}
+		t.Run(tc.method+"/"+boundary, func(t *testing.T) {
 			source := NewLocalDaemonSource("local", nil, nil)
 			entry := rendezvousEntry("ws://daemon")
 			accepted := 0
+			attempted := 0
 			var transport *scriptedAppwireTransport
 			transport = newScriptedAppwireTransport(func(ctx context.Context, msg appwire.Message) error {
+				if msg.Request != nil && msg.Request.Method == tc.method {
+					attempted++
+					if tc.duringSend {
+						// Cancellation while a send is pending must reach its context.
+						t.Cleanup(source.BeginRecovery(entry))
+					}
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				if msg.Notification != nil && msg.Notification.Method == appwire.MethodInitialized {
+				if !tc.duringSend && msg.Notification != nil && msg.Notification.Method == appwire.MethodInitialized {
 					// Recovery begins after the handshake write succeeds, before
 					// the caller starts its RPC. Transport teardown may lag it.
 					t.Cleanup(source.BeginRecovery(entry))
@@ -73,10 +93,13 @@ func TestRecoveryCancelsInitializedDaemonRPC(t *testing.T) {
 			})
 			source.dial = dialTransport(transport)
 			var err error
-			if method == appwire.MethodThreadRead {
+			if tc.method == appwire.MethodThreadRead {
 				_, err = source.ReadThreadAtEntry(t.Context(), entry, appwire.ThreadReadParams{ThreadID: "thread"})
 			} else {
 				_, err = source.StartTurnAtEntry(t.Context(), entry, appwire.TurnStartParams{ThreadID: "thread", ClientMutationID: "mutation"})
+			}
+			if !tc.duringSend && attempted != 0 {
+				t.Errorf("attempted %d RPCs after initialization was canceled", attempted)
 			}
 			if accepted != 0 {
 				t.Errorf("accepted %d RPCs after recovery canceled the daemon call", accepted)

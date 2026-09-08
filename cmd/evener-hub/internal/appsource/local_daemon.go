@@ -699,6 +699,9 @@ func (s *LocalDaemonSource) withClientCallMapper(
 		}
 		return localDaemonInitializeError(err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := fn(ctx, client); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
