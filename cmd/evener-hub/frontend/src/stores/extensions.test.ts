@@ -188,6 +188,42 @@ describe("refreshMarketplace", () => {
   });
 });
 
+describe("editMarketplace", () => {
+  test("calls evener/marketplace/edit, applies the response, and drops the browse cache for both names", async () => {
+    const fake = connectFakeClient();
+    fake.on("evener/marketplace/browse", () => ({ name: "acme-plugins", description: "", plugins: [] }));
+    await extensionsStore.getState().browseMarketplace("acme-plugins");
+    expect(extensionsStore.getState().browseCatalogs.has("acme-plugins")).toBe(true);
+
+    fake.on("evener/marketplace/edit", (params) => {
+      expect(params).toEqual({
+        name: "acme-plugins",
+        newName: "acme2",
+        source: { kind: "url", url: "https://x/y.git" },
+      });
+      return { marketplaces: [{ ...MARKETPLACE_A, name: "acme2", source: { kind: "url", url: "https://x/y.git" } }] };
+    });
+    await extensionsStore.getState().editMarketplace({
+      name: "acme-plugins",
+      newName: "acme2",
+      source: { kind: "url", url: "https://x/y.git" },
+    });
+    expect(extensionsStore.getState().marketplaces?.map((m) => m.name)).toEqual(["acme2"]);
+    expect(extensionsStore.getState().browseCatalogs.has("acme-plugins")).toBe(false);
+    expect(extensionsStore.getState().browseCatalogs.has("acme2")).toBe(false);
+  });
+
+  test("a rejection propagates", async () => {
+    const fake = connectFakeClient();
+    fake.on("evener/marketplace/edit", () => {
+      throw new Error("edit failed");
+    });
+    await expect(extensionsStore.getState().editMarketplace({ name: "acme-plugins", newName: "x" })).rejects.toThrow(
+      "edit failed",
+    );
+  });
+});
+
 describe("browseMarketplace", () => {
   test("fetches and caches a marketplace's catalog as status:loaded", async () => {
     const fake = connectFakeClient();

@@ -26,6 +26,7 @@ import type {
   LaunchConfigLayer,
   MarketplaceAddParams,
   MarketplaceCatalogPlugin,
+  MarketplaceEditParams,
   MarketplaceEntry,
   PathValidateResponse,
   PluginEntry,
@@ -53,6 +54,10 @@ export interface ExtensionsStoreState {
   addMarketplace(params: MarketplaceAddParams): Promise<void>;
   removeMarketplace(name: string): Promise<void>;
   refreshMarketplace(name: string): Promise<void>;
+  /** Rename and/or re-source a marketplace (spec 2026-09-07 §3). The browse
+   * cache for the old AND new names is dropped: a re-source changes the
+   * catalog, and a renamed entry's catalog is keyed by its new name. */
+  editMarketplace(params: MarketplaceEditParams): Promise<void>;
 
   browseCatalogs: Map<string, MarketplaceCatalogEntry>;
   browseMarketplace(name: string): Promise<void>;
@@ -141,6 +146,17 @@ export const extensionsStore = createStore<ExtensionsStoreState>((set, get) => (
     set((s) => {
       const nextCatalogs = new Map(s.browseCatalogs);
       nextCatalogs.delete(name);
+      return { marketplaces: resp.marketplaces, browseCatalogs: nextCatalogs };
+    });
+  },
+
+  async editMarketplace(params) {
+    const client = requireClient();
+    const resp = await client.request("evener/marketplace/edit", params);
+    set((s) => {
+      const nextCatalogs = new Map(s.browseCatalogs);
+      nextCatalogs.delete(params.name);
+      if (params.newName) nextCatalogs.delete(params.newName);
       return { marketplaces: resp.marketplaces, browseCatalogs: nextCatalogs };
     });
   },
