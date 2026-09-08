@@ -239,10 +239,11 @@ export function InstanceSheet({
     : undefined;
   const clearingBaseUrl =
     instance !== undefined && draft !== null && Boolean(instance.baseUrl) && draft.baseUrl.trim() === "";
-  // Trimmed on both sides, exactly as instanceEditParams decides whether the
-  // request carries a newName: the note and the request must agree on what
-  // counts as a rename.
-  const renaming = initial !== null && draft !== null && draft.name.trim() !== initial.name.trim();
+  // Non-empty and trimmed on both sides, exactly as instanceEditParams decides
+  // whether the request carries a newName: the note and the request must agree
+  // on what counts as a rename, and an emptied Name is not one.
+  const renaming =
+    initial !== null && draft !== null && draft.name.trim() !== "" && draft.name.trim() !== initial.name.trim();
 
   return (
     <Sheet

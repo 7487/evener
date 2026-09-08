@@ -641,6 +641,17 @@ describe("the form", () => {
     expect(screen.getByText(/reference "work" keep the old name/)).toBeTruthy();
   });
 
+  // The note and instanceEditParams have to agree on what a rename is: an
+  // emptied Name is not one - the wire reads an empty newName as unchanged, so
+  // Save refuses it - and promising that past sessions keep the old name is a
+  // promise about a rename that cannot go out.
+  test("an emptied name shows no rename note", async () => {
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.clear(field("Name"));
+    expect(screen.queryByText(/reference "work" keep the old name/)).toBeNull();
+  });
+
   test("Save sends only the changed fields", async () => {
     const fake = new FakeClient("ready");
     fake.on("evener/instance/edit", (params) => {
@@ -812,6 +823,29 @@ describe("the form", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
+  // The guard goes up before the request leaves, so a FAILED rename has to take
+  // it back down: nothing renamed, so no re-selection is coming to spend it, and
+  // a guard left standing swallows the next genuine removal - an editor left
+  // open on a ghost, offering actions on an instance that no longer exists.
+  test("a failed rename releases the guard, so a later removal still closes the sheet", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => {
+      throw new Error("providers.toml: write: read-only");
+    });
+    connectionStore.getState().connect(fake);
+    const { onClose } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+    await user.click(saveButton());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("read-only"));
+    expect(onClose).not.toHaveBeenCalled();
+
+    act(() => {
+      credentialsStore.setState({ instances: [] });
+    });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
   // The rename lands in the store before the section re-selects the new name,
   // so for that beat the sheet's own name is in neither place. A sheet that
   // reads only the store goes `open === false` there and UNMOUNTS: the panel
@@ -866,6 +900,11 @@ describe("the form", () => {
     // being edited, so a remount's focus grab has something to take it from.
     field("Name").focus();
     const focused = document.activeElement;
+    // Names what focus has to stay on. The assertion at the end holds for
+    // whatever was captured here, `<body>` included, so a change that took
+    // focus out of the form before this point would pass it while pinning
+    // nothing at all.
+    expect(focused).toBe(field("Name"));
     fireEvent.submit(screen.getByRole("form", { name: "Edit work" }));
 
     await waitFor(() => expect(handlers.onRenamed).toHaveBeenCalledWith("work2"));
