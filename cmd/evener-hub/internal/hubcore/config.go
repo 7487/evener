@@ -48,7 +48,7 @@ type WebConfig struct {
 	Roster                    *Roster
 	Past                      *PastIndex
 	Spawner                   Spawner            // optional; nil disables spawn
-	ResumeLocks               *ResumeLocks       // per-session resume serialization shared by the REST and RPC paths; nil → each path falls back to its own lock
+	ResumeLocks               *ResumeLocks       // shared session ownership and recovery authority; web construction loads from HubStateRoot when nil
 	DeletionStore             *DeletionStore     // host-authoritative deletion fences; production persists this under HubStateRoot
 	PastPerPage               int                // results per page for /past; defaults to 50 when zero
 	StateDir                  string             // root of the projects/<sha> state directory; needed for ForkSession

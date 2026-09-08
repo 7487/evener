@@ -97,3 +97,25 @@ The hub retains an explicit-resume requirement after verified force stop. Saved 
 Force stop uses one bounded, short-lived browser recovery connection owned by the primary client. It reuses the endpoint, authentication and strict handshake, sends the stop once, and closes on completion, failure, timeout or owner teardown. This is necessary when the primary connection's normal 64-entry FIFO is full and its receive loop is applying backpressure; the independent server recovery slot alone cannot admit an unread frame. Ordinary queue semantics remain unchanged. Once verified signaling succeeds, the hub retains the explicit-resume requirement even if the connection drops or exit confirmation times out. That requirement records the user's termination intent; the RPC still reports unconfirmed exit as failure.
 
 The WebSocket connection captures a recovery sequence before its HTTP upgrade, before any request frame is accepted. Each affected alias records the latest sequence at both recovery start and completion, invalidating unread socket backlog and connections created during exit confirmation. Action handlers compare that immutable connection sequence as well as request admission epochs; neither another initialize nor explicit resume on an old connection can advance it. This restriction is per affected alias: reads and unrelated-session actions remain available. A stale connection's readable snapshot continues to advertise Resume even after another client acknowledged recovery. Pressing the existing Resume button replaces the primary transport through normal reconnect lifecycle, rejects its old pending calls without replay, and only then sends explicit resume. New connections still cannot automatically clear the hub's explicit-resume requirement. The live hub AppWire endpoint is WebSocket-only; direct handler calls retain their execution-time admission checks.
+
+## Durable recovery authority
+
+Jesse approved extending the explicit-Resume requirement across hub restarts.
+Store a versioned recovery snapshot under the same HubStateRoot as hub.lock.
+Persist verified alias-group obligations before signaling or reporting an
+already-exited stop successful. Restore them before request admission; corrupt
+or unsupported authority prevents production startup. An embedded server with
+an explicit empty state root remains process-local.
+
+Persist only recovery obligations and overlap-safe group identity. Keep request
+epochs, connection sequences, active stop counts and ownership locks in memory.
+Serialize atomic snapshot writes separately from admission reads. A completed
+explicit Resume clears only the applicable generation, and persistence failure
+must remain visible. After committed intent, interrupted or failed signaling
+conservatively retains the requirement rather than guessing whether stop took
+place. No old-protocol compatibility, automatic Resume or input replay is added.
+
+Validate real hub recreation, automatic-action rejection, explicit Resume and a
+second recreation after clearing; signal/write ordering; already-exited and
+failed-confirmation paths; malformed authority; before/after-rename failures;
+overlapping alias groups and admission responsiveness during held writes.

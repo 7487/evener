@@ -454,7 +454,9 @@ func TestLiveRenameRejectsRecoveryAdmission(t *testing.T) {
 			}
 			finish := cfg.ResumeLocks.BeginForceStop([]string{"owner"})
 			finish(true)
-			cfg.ResumeLocks.ExplicitResumeCompleted("owner", cfg.ResumeLocks.RecoveryState("owner").Epoch)
+			if err := cfg.ResumeLocks.ExplicitResumeCompleted("owner", cfg.ResumeLocks.RecoveryState("owner").Epoch); err != nil {
+				t.Fatal(err)
+			}
 			if unread {
 				ctx = admitSessionRecovery(ctx, cfg, message)
 			}

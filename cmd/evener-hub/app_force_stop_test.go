@@ -176,7 +176,7 @@ func TestForceStopFailuresDoNotPretendExit(t *testing.T) {
 			cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: controller}
 			err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:" + webTestSessionID}, nil)
 			state := cfg.ResumeLocks.RecoveryState(webTestSessionID)
-			if state.Stopping != 0 || state.ResumeRequired != (stage == "exit" || stage == "alreadyExited") {
+			if state.Stopping != 0 || state.ResumeRequired != (stage == "signal" || stage == "exit" || stage == "alreadyExited") {
 				t.Fatalf("incorrect recovery requirement after %s: %+v", stage, state)
 			}
 			if (err == nil) != (stage == "alreadyExited") {
@@ -928,7 +928,9 @@ func TestSessionRecoveryRejectsOldActionsAfterExplicitResume(t *testing.T) {
 	finish := cfg.ResumeLocks.BeginForceStop([]string{"stable", "current"})
 	finish(true)
 	epoch := sessionRecoveryState(cfg, "local:current", "").Epoch
-	cfg.ResumeLocks.ExplicitResumeCompleted("current", epoch)
+	if err := cfg.ResumeLocks.ExplicitResumeCompleted("current", epoch); err != nil {
+		t.Fatal(err)
+	}
 	if state := sessionRecoveryState(cfg, "local:stable", ""); state.ResumeRequired || state.Stopping != 0 {
 		t.Fatalf("stable alias still fenced after explicit resume: %+v", state)
 	}
@@ -951,7 +953,9 @@ func TestTurnStartDoesNotRetryRecoveryRejectionAfterExplicitResume(t *testing.T)
 	oldEpoch := sessionRecoveryState(cfg, ref, "").Epoch
 	finish := cfg.ResumeLocks.BeginForceStop([]string{"recovery-waiter"})
 	finish(true)
-	cfg.ResumeLocks.ExplicitResumeCompleted("recovery-waiter", cfg.ResumeLocks.RecoveryState("recovery-waiter").Epoch)
+	if err := cfg.ResumeLocks.ExplicitResumeCompleted("recovery-waiter", cfg.ResumeLocks.RecoveryState("recovery-waiter").Epoch); err != nil {
+		t.Fatal(err)
+	}
 	stale := sessionActionRecoveryError(t.Context(), cfg, ref, "", oldEpoch)
 	if stale == nil {
 		t.Fatal("fixture did not reject the stale admission")
@@ -1134,7 +1138,9 @@ func TestRecoveryAdmissionUsesNativeTargetAndPreservesRetryEpoch(t *testing.T) {
 			}
 			finish := cfg.ResumeLocks.BeginForceStop([]string{tc.target})
 			finish(true)
-			cfg.ResumeLocks.ExplicitResumeCompleted(tc.target, cfg.ResumeLocks.RecoveryState(tc.target).Epoch)
+			if err := cfg.ResumeLocks.ExplicitResumeCompleted(tc.target, cfg.ResumeLocks.RecoveryState(tc.target).Epoch); err != nil {
+				t.Fatal(err)
+			}
 			if err := sessionActionRecoveryError(t.Context(), cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err == nil {
 				t.Fatal("retry replaced the request's admission epoch")
 			}
@@ -1191,7 +1197,9 @@ func TestSandboxApprovalCannotCrossSessionRecovery(t *testing.T) {
 				}
 				finish := cfg.ResumeLocks.BeginForceStop([]string{"owner"})
 				finish(true)
-				cfg.ResumeLocks.ExplicitResumeCompleted("owner", cfg.ResumeLocks.RecoveryState("owner").Epoch)
+				if err := cfg.ResumeLocks.ExplicitResumeCompleted("owner", cfg.ResumeLocks.RecoveryState("owner").Epoch); err != nil {
+					t.Fatal(err)
+				}
 				if unread {
 					ctx = admitSessionRecovery(ctx, cfg, message)
 				}
@@ -1247,7 +1255,9 @@ func TestCapturedSessionActionsRejectAdmissionBeforeRecovery(t *testing.T) {
 			ctx := admitSessionRecovery(t.Context(), cfg, appwire.RequestMessage(appwire.NewIntID(1), method, params))
 			finish := cfg.ResumeLocks.BeginForceStop([]string{"admitted-session"})
 			finish(true)
-			cfg.ResumeLocks.ExplicitResumeCompleted("admitted-session", cfg.ResumeLocks.RecoveryState("admitted-session").Epoch)
+			if err := cfg.ResumeLocks.ExplicitResumeCompleted("admitted-session", cfg.ResumeLocks.RecoveryState("admitted-session").Epoch); err != nil {
+				t.Fatal(err)
+			}
 			_, err := exactDispatch(ctx, t, server, method, params)
 			if !isSessionRecoveryAdmissionError(err) {
 				t.Fatalf("old action crossed recovery admission: err=%v applied=%d", err, source.applied)
@@ -1315,7 +1325,9 @@ func TestConnectionRecoveryFenceIncludesUnreadActionsAndConnectionsBornDuringSto
 	finish := cfg.ResumeLocks.BeginForceStop([]string{"stable", "current"})
 	during := admitSessionConnection(t.Context(), cfg)
 	finish(true)
-	cfg.ResumeLocks.ExplicitResumeCompleted("stable", cfg.ResumeLocks.RecoveryState("stable").Epoch)
+	if err := cfg.ResumeLocks.ExplicitResumeCompleted("stable", cfg.ResumeLocks.RecoveryState("stable").Epoch); err != nil {
+		t.Fatal(err)
+	}
 	sources := appsource.NewRegistry()
 	source := &recoveryReasoningSource{}
 	sources.Add(source)

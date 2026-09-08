@@ -357,7 +357,10 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 		if !automatic {
 			defer func() {
 				if resumeErr == nil {
-					cfg.ResumeLocks.ExplicitResumeCompleted(sessionID, epoch)
+					if err := cfg.ResumeLocks.ExplicitResumeCompleted(sessionID, epoch); err != nil {
+						response = appwire.ThreadResumeResponse{}
+						resumeErr = appwire.Unavailable("persist completed session recovery: " + err.Error())
+					}
 				}
 			}()
 		}

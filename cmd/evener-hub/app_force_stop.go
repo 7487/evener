@@ -55,8 +55,7 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	}()
 	aliases := forceStopAliases(entry)
 	finishRecovery := cfg.ResumeLocks.BeginForceStop(aliases)
-	terminationRequested := false
-	defer func() { finishRecovery(stopErr == nil || terminationRequested) }()
+	defer func() { finishRecovery(stopErr == nil) }()
 	if sources != nil {
 		if source, ok := sources.Source("local"); ok {
 			if local, ok := source.(*appsource.LocalDaemonSource); ok {
@@ -94,18 +93,22 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 			}
 			return appwire.Unavailable(fmt.Sprintf("daemon exit is not confirmed: %v", err))
 		}
-		refreshAfterForceStop(ctx, cfg)
-		return nil
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Commit recovery authority before the signal can take effect. Interrupted
+	// signaling conservatively retains the explicit-Resume requirement.
+	if err := cfg.ResumeLocks.PersistForceStop(aliases); err != nil {
+		return appwire.Unavailable(fmt.Sprintf("persist session recovery: %v", err))
+	}
+	if exited {
+		refreshAfterForceStop(ctx, cfg)
+		return nil
+	}
 	if err := process.Kill(); err != nil && !errors.Is(err, daemonprocess.ErrExited) {
 		return appwire.Unavailable(fmt.Sprintf("cannot force stop daemon: %v", err))
 	}
-	// A successful signal can outlive the connection or exit-confirmation
-	// deadline. Automatic actions must not restart that daemon afterward.
-	terminationRequested = true
 	exitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := process.Wait(exitCtx); err != nil {
