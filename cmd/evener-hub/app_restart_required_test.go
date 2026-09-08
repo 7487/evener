@@ -1507,3 +1507,23 @@ func TestIndependentForkSurvivesDeletedParentWithUnrelatedDaemon(t *testing.T) {
 		t.Fatalf("fork deletion blocked: live=%v err=%v", live, err)
 	}
 }
+
+func TestResumeChecksExplicitSessionTargetForIncompatibleOwner(t *testing.T) {
+	stateDir := t.TempDir()
+	ownerID := buildRPCParentSession(t, stateDir)
+	forkID, err := agent.ForkSession(stateDir, ownerID, 1, "independent fork", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDir := t.TempDir()
+	writeRendezvous(t, runDir, rendezvous.Entry{PID: 1001, Protocol: "evener-appwire-v3", ThreadID: ownerID, SessionID: ownerID, Endpoint: protocolMismatchPeer(t)})
+	spawned := 0
+	cfg := hubcore.WebConfig{StateDir: stateDir, Roster: hubcore.NewRoster(runDir, &hubcore.StatusProber{}), ResumeLocks: hubcore.NewResumeLocks(), Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		spawned++
+		return rendezvous.Entry{}, errors.New("spawn sentinel")
+	}}}
+	_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(forkID), Session: ownerID})
+	if err == nil || spawned != 0 {
+		t.Fatalf("incompatible explicit target reached launcher: spawned=%d err=%v", spawned, err)
+	}
+}
