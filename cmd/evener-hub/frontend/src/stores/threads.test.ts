@@ -7193,6 +7193,40 @@ describe("useThreadsStore read-only ready-gating (requireReadyClient)", () => {
     vi.useRealTimers();
   });
 
+  test("explicit refresh keeps one readiness deadline across ready-to-rewire races", async () => {
+    let client = connectFakeClient("reconnecting");
+    const clients = [client];
+    let outcome: unknown;
+    const refreshing = threadsStore
+      .getState()
+      .refreshThread("ref_a")
+      .then(
+        () => {
+          outcome = "resolved";
+        },
+        (error: unknown) => {
+          outcome = error;
+        },
+      );
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      client.emitReady();
+      // Ready resolves the helper; the connection changes before the refresh
+      // continuation captures the current client and its ready epoch.
+      await Promise.resolve();
+      client = new FakeClient("reconnecting");
+      clients.push(client);
+      connectionStore.getState().connect(client);
+    }
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(outcome).toBeInstanceOf(ClientNotReadyError);
+    expect(errorKind(outcome)).toBe("hub-unreachable");
+    await refreshing;
+    expect(clients.flatMap((candidate) => candidate.calls)).toHaveLength(0);
+  });
+
   test("a read call times out with a classified ClientNotReadyError if the client never becomes ready", async () => {
     connectFakeClient("reconnecting"); // never reaches ready in this test
     const pending = threadsStore.getState().listJobs("ref_a");
