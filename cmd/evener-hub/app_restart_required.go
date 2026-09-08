@@ -80,6 +80,12 @@ func lookupDaemonOwner(ctx context.Context, cfg hubcore.WebConfig, ref, threadID
 		if !ok {
 			break
 		}
+		// A fork's parent records provenance, not daemon ownership. An
+		// independent activity root does not require its parent's metadata.
+		if !child.Meta.IsSubagent && (child.Meta.JobTreeRootSessionID == "" || child.Meta.JobTreeRootSessionID == threadID) {
+			reachedRoot = true
+			break
+		}
 		subagentAncestry = subagentAncestry || child.Meta.IsSubagent
 		if jobTreeRootID == "" {
 			jobTreeRootID = child.Meta.JobTreeRootSessionID

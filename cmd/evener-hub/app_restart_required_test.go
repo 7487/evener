@@ -1476,3 +1476,34 @@ func TestHubOwnershipProjectDiscoveryPreservesUncertainty(t *testing.T) {
 		})
 	}
 }
+
+func TestIndependentForkSurvivesDeletedParentWithUnrelatedDaemon(t *testing.T) {
+	stateDir := t.TempDir()
+	parentID := buildRPCParentSession(t, stateDir)
+	childID, err := agent.ForkSession(stateDir, parentID, 1, "independent fork", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(stateDir, "sessions", parentID+".meta.json")); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedID := "02wMz5Txv1C3Hut0M8GCec"
+	runDir := t.TempDir()
+	writeRendezvous(t, runDir, rendezvous.Entry{PID: 1001, Protocol: "evener-appwire-v3", ThreadID: unrelatedID, SessionID: unrelatedID, Endpoint: protocolMismatchPeer(t)})
+	spawned := 0
+	cfg := hubcore.WebConfig{StateDir: stateDir, Roster: hubcore.NewRoster(runDir, &hubcore.StatusProber{}), ResumeLocks: hubcore.NewResumeLocks(), Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		spawned++
+		return rendezvous.Entry{}, errors.New("spawn sentinel")
+	}}}
+	_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(childID)})
+	if spawned != 1 {
+		t.Fatalf("fork resume blocked: %v", err)
+	}
+	if err := daemonRestartRequiredError(t.Context(), cfg, localAppRef(childID), "", "input"); err != nil {
+		t.Fatal(err)
+	}
+	live, err := projectSessionOwnership(t.Context(), cfg, childID)
+	if live || err != nil {
+		t.Fatalf("fork deletion blocked: live=%v err=%v", live, err)
+	}
+}
