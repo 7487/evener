@@ -26,6 +26,7 @@ import (
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
 	"primeradiant.com/evener/hubapi"
 	"primeradiant.com/evener/internal/appserver"
+	"primeradiant.com/evener/llm"
 	"primeradiant.com/evener/rendezvous"
 )
 
@@ -1525,5 +1526,91 @@ func TestResumeChecksExplicitSessionTargetForIncompatibleOwner(t *testing.T) {
 	_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(forkID), Session: ownerID})
 	if err == nil || spawned != 0 {
 		t.Fatalf("incompatible explicit target reached launcher: spawned=%d err=%v", spawned, err)
+	}
+}
+
+func TestHubClearedOwnerReleasesHistoricalDelegate(t *testing.T) {
+	for _, compatible := range []bool{true, false} {
+		t.Run(fmt.Sprint("compatible=", compatible), func(t *testing.T) {
+			root := t.TempDir()
+			stateDir := filepath.Join(root, "projects", "clear-owner-0000000000")
+			oldID := buildRPCParentSession(t, stateDir)
+			oldChildID := buildUpgradeDelegate(t, stateDir, oldID)
+			newID, err := agent.ForkSession(stateDir, oldID, 1, "replacement root", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			newChildID := buildUpgradeDelegate(t, stateDir, newID)
+			past := hubcore.NewPastIndex(filepath.Join(root, "projects", "*"))
+			if _, err := past.Rebuild(); err != nil {
+				t.Fatal(err)
+			}
+			runDir := t.TempDir()
+			entry := rendezvous.Entry{PID: 1001, Protocol: appwire.ProtocolVersion, ThreadID: oldID, SessionID: oldID, WorkspaceRef: localAppRef(oldID), Endpoint: "ws://unused"}
+			prober := &changedOwnershipProber{sessionID: oldID}
+			roster := hubcore.NewRoster(runDir, prober)
+			if !compatible {
+				entry.Protocol = "evener-appwire-v4"
+				entry.Endpoint = protocolMismatchPeer(t)
+				roster = hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+			}
+			writeRendezvous(t, runDir, entry)
+			roster.Refresh()
+			spawned := 0
+			cfg := hubcore.WebConfig{StateDir: root, Past: past, Roster: roster, RunDir: runDir, ResumeLocks: hubcore.NewResumeLocks(), Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				spawned++
+				return rendezvous.Entry{}, errors.New("spawn sentinel")
+			}}}
+			if live, err := projectSessionOwnership(t.Context(), cfg, oldChildID); err != nil || !live {
+				t.Fatalf("old root must initially retain its child: live=%v err=%v", live, err)
+			}
+			oldOwner, err := llm.NewSessionAPILogger(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = oldOwner.Close() })
+			if err := oldOwner.ReserveSession(oldChildID); err != nil {
+				t.Fatal(err)
+			}
+			// Clear closes the old session tree and republishes the replacement
+			// session ID while retaining its workspace route and saved journals.
+			entry.SessionID, entry.ThreadID = newID, newID
+			prober.sessionID = newID
+			writeRendezvous(t, runDir, entry)
+			roster.Refresh()
+			hub, web := newHubRPCTestServerWithWeb(t, cfg)
+			defer hub.Close()
+			if owner, _, err := lookupDaemonOwner(t.Context(), cfg, localAppRef(oldID), "", true); err != nil || owner.SessionID != newID {
+				t.Fatalf("stable workspace route lost replacement: owner=%+v err=%v", owner, err)
+			}
+			_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(newChildID)})
+			if err == nil || spawned != 0 {
+				t.Fatalf("current child escaped owner: spawned=%d err=%v", spawned, err)
+			}
+			blocked, err := web.sessionDelete(t.Context(), appwire.SessionDeleteParams{Ref: localAppRef(newChildID)})
+			if err != nil || len(blocked.Deleted) != 0 || len(blocked.Skipped) != 1 {
+				t.Fatalf("current child deletion = %+v err=%v", blocked, err)
+			}
+			// Publication precedes oldSess.Close during clear. The old child's
+			// reservation must still prevent deletion in that interval.
+			closing, err := web.sessionDelete(t.Context(), appwire.SessionDeleteParams{Ref: localAppRef(oldChildID)})
+			if err != nil || len(closing.Deleted) != 0 || len(closing.Skipped) != 1 {
+				t.Fatalf("still-reserved historical child deletion = %+v err=%v", closing, err)
+			}
+			if _, err := schema.LoadSessionMeta(stateDir, oldChildID); err != nil {
+				t.Fatalf("still-reserved historical child metadata changed: %v", err)
+			}
+			if err := oldOwner.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(oldChildID)})
+			if spawned != 1 {
+				t.Errorf("released child did not reach launcher: spawned=%d err=%v", spawned, err)
+			}
+			deleted, err := web.sessionDelete(t.Context(), appwire.SessionDeleteParams{Ref: localAppRef(oldChildID)})
+			if err != nil || len(deleted.Deleted) != 1 || deleted.Deleted[0] != oldChildID || len(deleted.Skipped) != 0 {
+				t.Errorf("released child deletion = %+v err=%v", deleted, err)
+			}
+		})
 	}
 }

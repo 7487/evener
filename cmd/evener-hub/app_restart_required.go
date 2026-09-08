@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -68,7 +69,11 @@ func lookupDaemonOwner(ctx context.Context, cfg hubcore.WebConfig, ref, threadID
 		if unconfirmedDaemonForThread(cfg.Roster, threadID) {
 			return verifyOwner(hubcore.LiveEntry{SessionID: threadID}, true)
 		}
-		if entry, ok := liveDaemonForThread(cfg.Roster, threadID); ok {
+		findOwner := liveDaemonForThread
+		if len(edges) != 0 {
+			findOwner = liveDaemonForSession
+		}
+		if entry, ok := findOwner(cfg.Roster, threadID); ok {
 			return verifyOwner(entry, false)
 		}
 		// Ancestry locates a possible daemon. Every edge must have a persisted
@@ -113,7 +118,7 @@ func lookupDaemonOwner(ctx context.Context, cfg hubcore.WebConfig, ref, threadID
 	// An incomplete ancestry chain cannot establish that an incompatible
 	// job-tree owner has released this descendant. Report uncertainty until
 	// its metadata and descriptor chain can be verified.
-	if owner, ok := liveDaemonForThread(cfg.Roster, jobTreeRootID); ok && owner.Status == appwire.ThreadStatusRestartRequired {
+	if owner, ok := liveDaemonForSession(cfg.Roster, jobTreeRootID); ok && owner.Status == appwire.ThreadStatusRestartRequired {
 		return hubcore.LiveEntry{}, false, fmt.Errorf("cannot verify delegate ownership at session %s in incompatible job tree %s", threadID, jobTreeRootID)
 	}
 	if unconfirmedDaemonForThread(cfg.Roster, jobTreeRootID) {
@@ -168,6 +173,20 @@ func ownershipEntry(ctx context.Context, cfg hubcore.WebConfig, threadID string)
 		return hubcore.PastEntry{}, false, fmt.Errorf("cannot locate ownership metadata for session %s", threadID)
 	}
 	return found, found.ID != "", nil
+}
+
+// A workspace route can survive clear while its former session's journal and
+// delegates are released. An ancestor must match the daemon's current session.
+func liveDaemonForSession(roster *hubcore.Roster, sessionID string) (hubcore.LiveEntry, bool) {
+	if sessionID == "" {
+		return hubcore.LiveEntry{}, false
+	}
+	for _, entry := range roster.List() {
+		if !entry.Crashed && cmp.Or(entry.SessionID, entry.Entry.SessionID, entry.ThreadID) == sessionID {
+			return entry, true
+		}
+	}
+	return hubcore.LiveEntry{}, false
 }
 
 func liveDaemonForThread(roster *hubcore.Roster, threadID string) (hubcore.LiveEntry, bool) {
