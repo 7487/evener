@@ -889,3 +889,108 @@ test("a live row with an end_reason counts as ended (L3)", () => {
   render(<Body item={watchItem({ operation: "list" }, raw)} live={false} />);
   expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("ended");
 });
+
+// --- RoboRev combined review (818e809): sentence punctuation (M1) ------------
+// Clause nodes must carry no separators of their own — joining inserts them.
+// Pattern + heartbeat rendered "outputs ready, , heartbeat every 2m".
+
+test("a combined pattern + heartbeat sentence has no doubled comma (M1)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "create", source: "job_a1b2" },
+        {
+          watch_id: "watch_combo",
+          source: "job_a1b2",
+          watching: true,
+          output_match: "ready",
+          progress_interval_ms: 120000,
+          replaced_existing: false,
+          fired: false,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).not.toContain(", ,");
+  expect(body).toContain("heartbeat every 2m");
+});
+
+test("a filter sentence joins its clauses with spaces, not commas (M1)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "create", source: "dlg_7Hk2", events: ["assistant.tool"], every: 3 },
+        {
+          watch_id: "watch_f",
+          source: "dlg_7Hk2",
+          watching: true,
+          events: ["assistant.tool"],
+          event_filter: { tool_name: "read_file", status: "error" },
+          replaced_existing: false,
+          fired: false,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("makes a tool call on read_file ending in error (assistant.tool) (every 3)");
+});
+
+// --- RoboRev combined review (818e809): heartbeat-only lifecycle (M2) -------
+// Periodic progress ticks never consume the condition-fire budget, so a
+// heartbeat-only watch can live indefinitely — claiming it "auto-clears
+// after 50 matches" is a false lifecycle guarantee.
+
+test("a heartbeat-only sentence claims no auto-clear (M2)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "create", source: "job_a1b2" },
+        {
+          watch_id: "watch_hb",
+          source: "job_a1b2",
+          watching: true,
+          progress_interval_ms: 120000,
+          replaced_existing: false,
+          fired: false,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("heartbeat every 2m");
+  expect(body).not.toContain("auto-clears");
+});
+
+test("a budgeted trigger keeps the auto-clear clause (M2)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "create", source: "job_a1b2" },
+        {
+          watch_id: "watch_combo",
+          source: "job_a1b2",
+          watching: true,
+          output_match: "ready",
+          progress_interval_ms: 120000,
+          replaced_existing: false,
+          fired: false,
+        },
+      )}
+      live={false}
+    />,
+  );
+  expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("auto-clears after 50 matches");
+});

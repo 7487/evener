@@ -631,7 +631,22 @@ function NoteSection({ note }: { note: string }) {
 // returning after the first (combined RoboRev review).
 function ConditionSentence({ source, spec }: { source: string; spec: ConditionSpec }) {
   const heartbeat = heartbeatPhrase(spec);
+  // Top-level clauses join with ", " exactly once, in the final render
+  // below. Clause nodes carry NO separators of their own — neither leading
+  // spaces nor commas — or the join doubles them ("outputs ready, ,
+  // heartbeat …"). The filter's sub-clauses (tool + outcome + event +
+  // every) are one clause: they join with spaces inside a single node
+  // (combined RoboRev review).
   const head: ReactNode[] = [];
+  // A budgeted trigger is what the 50-match auto-clear bounds: a pattern, an
+  // event list, or an event filter. A heartbeat alone never consumes the
+  // budget (periodic ticks count deliveries but never trip it), so a
+  // heartbeat-only watch claims no auto-clear (combined RoboRev review).
+  const budgeted =
+    spec.outputMatch !== undefined ||
+    spec.events.length > 0 ||
+    spec.filterStatus !== undefined ||
+    spec.filterToolName !== undefined;
   if (spec.outputMatch) {
     head.push(
       <span key="pattern">
@@ -643,35 +658,34 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
     // Both filter statuses read explicitly (RoboRev PR #954: status "ok"
     // was discarded into a bare tool name). The tool rides along when
     // present; the event name disambiguates in list/inspect context.
+    const parts: ReactNode[] = [];
     if (spec.filterToolName) {
-      head.push(
+      parts.push(
         <span key="filter-tool">
           makes a tool call on <span className={CLASS.mono}>{spec.filterToolName}</span>
         </span>,
       );
     } else {
-      head.push(<span key="filter-tool">makes a tool call</span>);
+      parts.push(<span key="filter-tool">makes a tool call</span>);
     }
     // Both non-status filters (tool-only, or a bare filter with neither
     // field) read "matching" — a single path, no dead ternary (RoboRev PR
     // #954 combined review).
     if (spec.filterStatus === "error" || spec.filterStatus === "ok") {
-      head.push(
+      parts.push(
         <span key="filter-outcome">
-          {" "}
           ending in <span className={CLASS.mono}>{spec.filterStatus}</span>
         </span>,
       );
     } else {
-      head.push(<span key="filter-outcome"> matching</span>);
+      parts.push(<span key="filter-outcome">matching</span>);
     }
     // Name the filtered event: in inspect/list context the events array is
     // not shown separately, and the filter only ever attaches to
     // assistant.tool — without the name the sentence loses what fires.
     if (spec.events.length === 1) {
-      head.push(
+      parts.push(
         <span key="filter-event">
-          {" "}
           (<span className={CLASS.mono}>{spec.events[0]}</span>)
         </span>,
       );
@@ -680,7 +694,8 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
     // review 3): a filter Condition carries it ("events: […] every N where
     // …"), and dropping it claims every event fires. Same "(every N)" shape
     // as the events branch below.
-    if (spec.every !== undefined) head.push(<span key="filter-every"> (every {spec.every})</span>);
+    if (spec.every !== undefined) parts.push(<span key="filter-every">(every {spec.every})</span>);
+    head.push(<span key="filter">{joinNodes(parts, " ")}</span>);
   } else if (spec.events.length > 0) {
     const throttle = spec.every !== undefined ? ` (every ${spec.every})` : "";
     head.push(
@@ -690,7 +705,7 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
       </span>,
     );
   }
-  if (heartbeat) head.push(<span key="heartbeat">{`, ${heartbeat}`}</span>);
+  if (heartbeat) head.push(<span key="heartbeat">{heartbeat}</span>);
   if (head.length === 0) {
     return (
       <span>
@@ -700,8 +715,8 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
   }
   return (
     <span>
-      Wakes you when <span className={CLASS.mono}>{source}</span> {joinNodes(head, ", ")}, auto-clears after{" "}
-      {WATCH_DELIVERY_BUDGET} matches.
+      Wakes you when <span className={CLASS.mono}>{source}</span> {joinNodes(head, ", ")}
+      {budgeted ? <>, auto-clears after {WATCH_DELIVERY_BUDGET} matches.</> : "."}
     </span>
   );
 }
