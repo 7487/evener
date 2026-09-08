@@ -352,13 +352,9 @@ describe("MutationDispatcher", () => {
     expect(await outbox.getRecovery(record.clientMutationId)).toBeUndefined();
   });
 
-  // The daemon's own contract for a blocked-unknown outcome is "retry must
-  // remain blocked until persistence recovers" (NormalizeClientMutationError).
-  // The authoritative thread read is how recovery is proven: an id absent from
-  // every authoritative set (pending, queue, transcript items) was never
-  // journaled, so re-dispatching it is safe — the daemon's journal replays a
-  // receipt if a race ever makes it a duplicate. Without this restore, a
-  // blocked head parks the whole FIFO forever, across reloads (kata gwea).
+  // Live reconciliation reopens unresolved records without changing their
+  // payloads. The daemon's durable journal and original instance fence own
+  // replay safety; omission from the snapshot does not prove non-delivery.
   test("restoreProvenAbsent returns a blocked head to submitting and the next dispatch drains it", async () => {
     const indexedDB = new IDBFactory();
     const outbox = storage(indexedDB, "restore-absent", ["mutation-a", "mutation-b"]);

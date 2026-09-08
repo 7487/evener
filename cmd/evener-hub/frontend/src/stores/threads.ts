@@ -1509,10 +1509,10 @@ async function publishAndReconcileThreadHydration(
         const mutationStateAuthoritative = hydration.response.thread.evener.mutationStateAuthoritative === true;
         await runtime.dispatcher.reconcileIdentities(authoritativeIds);
         if (!current()) return;
-        // The same read that settles what the authority knows also proves what it
-        // does not: a blockedUnknown record absent from every authoritative set
-        // was never journaled, so it returns to dispatch here rather than parking
-        // forever behind an outage that has since recovered (kata gwea).
+        // A bounded transcript or a clear can omit an accepted mutation from
+        // the live projection. Retry unresolved records with their original
+        // mutation ID and payload: the daemon journal replays accepted work,
+        // and the original instance fence rejects a retry after a clear.
         // Saved snapshots contain no authoritative daemon receipt history, even
         // after an incompatible daemon has been stopped. Persist uncertainty so
         // reopening that saved snapshot cannot release an already accepted send.
