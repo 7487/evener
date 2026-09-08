@@ -25,7 +25,8 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	if cfg.RunDir == "" || cfg.ResumeLocks == nil {
 		return appwire.Unavailable("local session ownership is not configured")
 	}
-	entry, err := forceStopEntry(cfg.RunDir, ref.ThreadID, cfg.DaemonProcesses, nil)
+	recoveryTarget := cfg.ResumeLocks.RecoveryState(ref.ThreadID).ResumeSessionID
+	entry, err := forceStopEntry(cfg.RunDir, ref.ThreadID, cfg.DaemonProcesses, nil, recoveryTarget)
 	if err != nil {
 		return appwire.Unavailable(err.Error())
 	}
@@ -53,6 +54,9 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 			log.Printf("force stop process handle cleanup: %v", err)
 		}
 	}()
+	if exited && recoveryTarget != "" && sessionID != recoveryTarget {
+		return appwire.Unavailable("exited daemon claim does not match session recovery authority")
+	}
 	aliases := forceStopAliases(entry)
 	finishRecovery := cfg.ResumeLocks.BeginForceStop(aliases)
 	defer func() { finishRecovery(stopErr == nil) }()
@@ -77,7 +81,11 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := forceStopOwnershipUnchanged(cfg.RunDir, ref.ThreadID, entry, cfg.DaemonProcesses); err != nil {
+	currentTarget := cfg.ResumeLocks.RecoveryState(ref.ThreadID).ResumeSessionID
+	if currentTarget != recoveryTarget {
+		return appwire.Unavailable("session recovery authority changed; retry force stop")
+	}
+	if err := forceStopOwnershipUnchanged(cfg.RunDir, ref.ThreadID, entry, cfg.DaemonProcesses, currentTarget); err != nil {
 		return appwire.Unavailable(err.Error())
 	}
 	if err := deletionFenceError(cfg, params.Ref, ref.ThreadID, ""); err != nil {
@@ -120,8 +128,8 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 
 // forceStopOwnershipUnchanged revalidates discovery after acquiring every
 // alias lock, before signaling the verified process.
-func forceStopOwnershipUnchanged(runDir, sessionID string, previous rendezvous.Entry, controller daemonprocess.Controller) error {
-	current, err := forceStopEntry(runDir, sessionID, controller, &previous)
+func forceStopOwnershipUnchanged(runDir, sessionID string, previous rendezvous.Entry, controller daemonprocess.Controller, recoveryTarget string) error {
+	current, err := forceStopEntry(runDir, sessionID, controller, &previous, recoveryTarget)
 	if err != nil {
 		return err
 	}
@@ -141,7 +149,7 @@ func sameForceStopEntry(a, b rendezvous.Entry) bool {
 	return a == b
 }
 
-func forceStopEntry(runDir, sessionID string, controller daemonprocess.Controller, previous *rendezvous.Entry) (rendezvous.Entry, error) {
+func forceStopEntry(runDir, sessionID string, controller daemonprocess.Controller, previous *rendezvous.Entry, recoveryTarget string) (rendezvous.Entry, error) {
 	entries, err := rendezvous.ListStrict(runDir)
 	if err != nil {
 		return rendezvous.Entry{}, err
@@ -172,8 +180,7 @@ func forceStopEntry(runDir, sessionID string, controller daemonprocess.Controlle
 		if controller == nil {
 			controller = daemonprocess.NewController()
 		}
-		var exitedMatch rendezvous.Entry
-		exitedDirect := false
+		var exitedMatches []rendezvous.Entry
 		entries = slices.DeleteFunc(entries, func(entry rendezvous.Entry) bool {
 			if !overlaps(entry) {
 				return false
@@ -187,16 +194,38 @@ func forceStopEntry(runDir, sessionID string, controller daemonprocess.Controlle
 				_ = process.Close()
 			}
 			exited := errors.Is(err, daemonprocess.ErrExited)
-			if exited && slices.Contains(forceStopAliases(entry), sessionID) && (!exitedDirect || (previous != nil && sameForceStopEntry(entry, *previous))) {
-				exitedMatch, exitedDirect = entry, true
+			if exited && slices.Contains(forceStopAliases(entry), sessionID) {
+				exitedMatches = append(exitedMatches, entry)
 			}
 			return exited
 		})
-		// Keep one verified-exited direct claim only when no unresolved or live
-		// overlap remains. Prefer the reserved identity during revalidation so an
-		// exit racing recovery remains an idempotent success.
-		if exitedDirect && !slices.ContainsFunc(entries, overlaps) {
-			entries = append(entries, exitedMatch)
+		// Exited markers cannot establish which transcript is current. Durable
+		// authority resolves differing targets; without it every direct claim
+		// must agree. A reserved process is preferred only within that target.
+		if len(exitedMatches) > 0 && !slices.ContainsFunc(entries, overlaps) {
+			var selected rendezvous.Entry
+			var selectedID string
+			found := false
+			for _, entry := range exitedMatches {
+				id := entry.SessionID
+				if id == "" {
+					id = entry.ThreadID
+				}
+				if recoveryTarget != "" && id != recoveryTarget {
+					continue
+				}
+				if found && id != selectedID {
+					return rendezvous.Entry{}, errors.New("exited daemons claim different transcripts; cannot choose a force-stop target")
+				}
+				if !found || (previous != nil && sameForceStopEntry(entry, *previous)) {
+					selected, selectedID = entry, id
+				}
+				found = true
+			}
+			if !found {
+				return rendezvous.Entry{}, errors.New("no exited daemon claim matches session recovery authority")
+			}
+			entries = append(entries, selected)
 		}
 	}
 	var match rendezvous.Entry

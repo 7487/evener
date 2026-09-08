@@ -241,16 +241,16 @@ func TestForceStopRevalidationComparesTimestampInstants(t *testing.T) {
 	runDir := t.TempDir()
 	entry := rendezvous.Entry{PID: 4242, SessionID: "current", WorkspaceRef: "local:stable", StartedAt: time.Date(2026, 9, 7, 12, 0, 0, 0, time.FixedZone("offset", 1200))}
 	writeRendezvous(t, runDir, entry)
-	previous, err := forceStopEntry(runDir, "stable", nil, nil)
+	previous, err := forceStopEntry(runDir, "stable", nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil); err != nil {
+	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil, ""); err != nil {
 		t.Fatalf("identical persisted timestamp rejected: %v", err)
 	}
 	entry.StartedAt = entry.StartedAt.Add(time.Second)
 	writeRendezvous(t, runDir, entry)
-	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil); err == nil {
+	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil, ""); err == nil {
 		t.Fatal("changed start instant accepted")
 	}
 }
@@ -259,13 +259,13 @@ func TestForceStopRejectsDiscoveryChangeDuringLockedRevalidation(t *testing.T) {
 	runDir := t.TempDir()
 	entry := rendezvous.Entry{PID: 4242, SessionID: "current", WorkspaceRef: "local:stable"}
 	writeRendezvous(t, runDir, entry)
-	previous, err := forceStopEntry(runDir, "stable", nil, nil)
+	previous, err := forceStopEntry(runDir, "stable", nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	entry.InstanceID = "replacement"
 	writeRendezvous(t, runDir, entry)
-	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil); err == nil {
+	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil, ""); err == nil {
 		t.Fatal("changed discovery accepted")
 	}
 }
@@ -1486,5 +1486,115 @@ func TestHubForceStopUnconfirmedExitReadAfterOwnershipDisappears(t *testing.T) {
 	}
 	if *resumes != 0 {
 		t.Fatal("read automatically resumed a stopped session")
+	}
+}
+
+func TestForceStopRepeatedSharedAliasPreservesDurableTarget(t *testing.T) {
+	root, runDir := t.TempDir(), t.TempDir()
+	locks, err := hubcore.NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	dead := map[int]bool{}
+	cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: locks, DaemonProcesses: forceStopControllerFunc(func(target daemonprocess.Target) (daemonprocess.Process, error) {
+		if dead[target.PID] {
+			return nil, daemonprocess.ErrExited
+		}
+		return &forceStopProcess{events: &events, onWait: func() { dead[target.PID] = true }}, nil
+	})}
+	writeRendezvous(t, runDir, rendezvous.Entry{PID: 101, SessionID: "B", ThreadID: "B", WorkspaceRef: "local:A"})
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:A"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	writeRendezvous(t, runDir, rendezvous.Entry{PID: 102, SessionID: "C", ThreadID: "C", WorkspaceRef: "local:B"})
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:B"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ResumeLocks, err = hubcore.NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:B"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ResumeLocks, err = hubcore.NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ResumeLocks.RecoveryState("B").ResumeSessionID; got != "C" {
+		t.Fatalf("repeated stop replaced current target with %q", got)
+	}
+	called := false
+	cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		called = true
+		if req.SessionID != "C" {
+			t.Errorf("launched historical session %q", req.SessionID)
+		}
+		return rendezvous.Entry{}, errors.New("launcher observed")
+	}}
+	_, _ = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:B"})
+	if !called {
+		t.Fatal("current target did not reach launcher")
+	}
+}
+
+func TestForceStopRejectsExitedConflictingTargetsWithoutAuthority(t *testing.T) {
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: hubcore.NewResumeLocks(), DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) { return nil, daemonprocess.ErrExited })}
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: "B", ThreadID: "B", WorkspaceRef: "local:A"})
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 102, SessionID: "C", ThreadID: "C", WorkspaceRef: "local:B"})
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:B"}, nil); err == nil {
+		t.Fatal("ambiguous exited transcripts accepted")
+	}
+	if cfg.ResumeLocks.RecoveryState("B").ResumeRequired {
+		t.Fatal("ambiguous lookup established recovery authority")
+	}
+}
+
+func TestForceStopRejectsRecoveryAuthorityChangedAfterDiscovery(t *testing.T) {
+	locks := hubcore.NewResumeLocks()
+	finish := locks.BeginForceStop([]string{"A", "B"})
+	if err := locks.PersistForceStop([]string{"A", "B"}, "B"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	runDir := t.TempDir()
+	writeRendezvous(t, runDir, rendezvous.Entry{PID: 101, SessionID: "B", ThreadID: "B", WorkspaceRef: "local:A"})
+	var events []string
+	cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: locks, DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+		// A competing stop commits new authority after discovery, before this
+		// request acquires its alias reservations.
+		finish := locks.BeginForceStop([]string{"B", "C"})
+		if err := locks.PersistForceStop([]string{"B", "C"}, "C"); err != nil {
+			t.Fatal(err)
+		}
+		finish(true)
+		return &forceStopProcess{events: &events}, nil
+	})}
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:B"}, nil); err == nil {
+		t.Fatal("stale recovery target accepted")
+	}
+	if slices.Contains(events, "kill") {
+		t.Fatal("stale target signaled")
+	}
+	if got := locks.RecoveryState("B").ResumeSessionID; got != "C" {
+		t.Fatalf("new authority overwritten: %q", got)
+	}
+}
+
+func TestForceStopRejectsSoleExitedMarkerForSupersededTarget(t *testing.T) {
+	locks := hubcore.NewResumeLocks()
+	finish := locks.BeginForceStop([]string{"B", "C"})
+	if err := locks.PersistForceStop([]string{"B", "C"}, "C"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) { return nil, daemonprocess.ErrExited })}
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: "B", ThreadID: "B", WorkspaceRef: "local:A"})
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:B"}, nil); err == nil {
+		t.Fatal("superseded marker accepted after current marker removal")
+	}
+	if got := locks.RecoveryState("B").ResumeSessionID; got != "C" {
+		t.Fatalf("durable current target overwritten: %q", got)
 	}
 }
