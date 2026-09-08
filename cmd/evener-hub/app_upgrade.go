@@ -21,9 +21,13 @@ func hubUpgrade(ctx context.Context, params appwire.UpgradeParams) (appwire.Upgr
 	}
 	defer hubUpdateMu.Unlock()
 
+	prefix, binDir, shareBinDir := hubInstallDirs()
 	result, err := runHubSelfUpgrade(ctx, selfupdate.Options{
 		Requested:      params.Requested,
 		CurrentChannel: buildinfo.UpgradeChannel(),
+		Prefix:         prefix,
+		BinDir:         binDir,
+		ShareBinDir:    shareBinDir,
 	})
 	if err != nil {
 		return appwire.UpgradeResponse{}, err

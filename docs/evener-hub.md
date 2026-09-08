@@ -325,6 +325,11 @@ plain shell, and why nothing needs `KeepAlive`. The `hub.lock` flock and the
 listener are released by the exec and re-acquired by the new process; the
 page polls `/api/health` until the new version answers, then reloads.
 
+The install targets the prefix the running hub was launched from (derived
+from its own binary path, e.g. `/usr/local` for a system install), not
+always `~/.local`. The download is bounded by a 5-minute deadline so a
+stalled server fails the apply instead of blocking later updates.
+
 The channel selector has no stored setting. It defaults to the channel the
 running binary was built for, and after an update the installed binary's
 channel becomes the new default.

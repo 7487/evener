@@ -13,11 +13,18 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"primeradiant.com/evener/envvars"
 )
 
 const defaultRepoURL = "https://github.com/prime-radiant-inc/evener"
+
+// defaultUpgradeTimeout bounds the whole release-archive download when the
+// caller passes no HTTP client. Archives are ~40MB; a stalled connection
+// must fail instead of holding the hub's hubUpdateMu forever. A var so
+// tests can shorten it.
+var defaultUpgradeTimeout = 5 * time.Minute
 
 var installBinaries = []string{"evener", "evener-dev"}
 
@@ -99,7 +106,7 @@ func Upgrade(ctx context.Context, opts Options) (Result, error) {
 	url := releaseURL(repoURL, target.Release, asset)
 	client := opts.HTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultUpgradeTimeout}
 	}
 
 	tmpDir, err := os.MkdirTemp("", "evener-upgrade-*")
@@ -159,6 +166,26 @@ func installPrefix(prefix string) (string, error) {
 		return "", errors.New("set HOME or PREFIX before upgrading")
 	}
 	return filepath.Join(home, ".local"), nil
+}
+
+// InstallDirsFromExecutable derives the install layout (prefix, binDir,
+// shareBinDir) from the path of the running binary, so a hub installed
+// under /usr/local upgrades /usr/local instead of the ~/.local default.
+// The installed layout always places the binary at
+// <prefix>/share/evener/bin/<name>; when exe does not match that layout
+// (a worktree build, an ad-hoc path) all three return "" and Upgrade's
+// own defaults apply.
+func InstallDirsFromExecutable(exe string) (prefix, binDir, shareBinDir string) {
+	dir := filepath.Dir(exe)
+	const suffix = string(filepath.Separator) + "share" + string(filepath.Separator) + "evener" + string(filepath.Separator) + "bin"
+	if !strings.HasSuffix(dir, suffix) {
+		return "", "", ""
+	}
+	prefix = strings.TrimSuffix(dir, suffix)
+	if prefix == "" {
+		return "", "", ""
+	}
+	return prefix, filepath.Join(prefix, "bin"), dir
 }
 
 func releaseURL(repoURL, release, asset string) string {

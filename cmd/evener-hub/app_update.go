@@ -120,9 +120,13 @@ func hubUpdateApply(ctx context.Context, params appwire.UpdateApplyParams) (appw
 		}
 	}()
 
+	prefix, binDir, shareBinDir := hubInstallDirs()
 	result, err := runHubSelfUpgrade(ctx, selfupdate.Options{
 		Requested:      channel,
 		CurrentChannel: buildinfo.UpgradeChannel(),
+		Prefix:         prefix,
+		BinDir:         binDir,
+		ShareBinDir:    shareBinDir,
 	})
 	if err != nil {
 		return appwire.UpdateApplyResponse{}, err
@@ -141,6 +145,19 @@ func hubUpdateApply(ctx context.Context, params appwire.UpdateApplyParams) (appw
 		Installed:  result.Installed,
 		Restarting: true,
 	}, nil
+}
+
+// hubInstallDirs derives the install layout for a self-update from the
+// running hub binary, so a hub installed under /usr/local (or any other
+// prefix) upgrades that installation instead of the ~/.local default.
+// Unknown layouts (worktree builds, ad-hoc paths) return empty strings and
+// selfupdate.Upgrade falls back to its own defaults.
+func hubInstallDirs() (prefix, binDir, shareBinDir string) {
+	exe, err := hubExecutable()
+	if err != nil || exe == "" {
+		return "", "", ""
+	}
+	return selfupdate.InstallDirsFromExecutable(exe)
 }
 
 // evenerBinaryFrom picks the installed "evener" binary out of an upgrade
