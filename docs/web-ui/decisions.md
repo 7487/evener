@@ -934,7 +934,10 @@ sheet already edited its two switches in place and is unchanged.
 
 Two consequences ride along. Protocol and surface are exposed on both the
 sheet and the Add form as selects over the registry's four-value
-vocabularies, with an "inherit from base" empty option that sends the new
-clear flags. And the wire's instance entry now carries the authored
-api_key_env and credential header (never a secret: the header value is a
-`$VAR` template by construction) so the form can prefill them.
+vocabularies, with an "inherit from base" empty option. From the sheet
+that option sends the new clear flag; the Add form's create params have no
+clear flags, so it just omits the field. And the wire's instance entry now
+carries the authored api_key_env and credential header (never a secret:
+the hub omits any header value `registry.CheckCredentialHeaderValue`
+rejects — the loader itself would accept a hand-written literal) so the
+form can prefill them.

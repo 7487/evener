@@ -640,8 +640,10 @@ mobile breakpoint (chosen via `useIsMobile`, the same source the shell uses), `s
 when it carries a form. The sheet is the item's editor, not an inspector (2026-09-07): every
 authored, editable fact renders as a prefilled form field in place — `FormRow` over `Input` /
 `Select`, one column — with a dirty-gated **Save** as the footer's primary `Button`, and
-renaming is editing the name field. Read-only facts keep the meta-table idiom below. A
-separate `Dialog` is reserved for write-only secret entry (an API key, a credential JSON) and
+renaming is editing the name field. Read-only facts keep the meta-table idiom below.
+Display-only content a row does not carry (a plugin's catalog description) is pulled lazily
+through the browse cache — one store-level entry per marketplace, so re-open is free.
+A separate `Dialog` is reserved for write-only secret entry (an API key, a credential JSON) and
 multi-step flows (OAuth); it never exists to edit a field the sheet could show. Binary state
 (Enabled, Auto-upgrade) is a `Switch` row that applies immediately, disabled while its RPC is
 in flight; the destructive action keeps its `ConfirmDialog` even though that nests a second

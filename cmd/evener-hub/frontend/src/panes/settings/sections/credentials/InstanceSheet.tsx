@@ -140,7 +140,7 @@ export function InstanceSheet({
     seed(instance);
   }, [instance?.name]);
 
-  // An inspector is only as alive as its subject: the instance can vanish
+  // A detail sheet is only as alive as its subject: the instance can vanish
   // under an open sheet (its own Remove completing, or another client's
   // change), and an editor for a thing that no longer exists closes itself
   // rather than offering actions on a ghost. Its own rename is the one
