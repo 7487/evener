@@ -39,7 +39,8 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 	if sessionID == "" {
 		sessionID = entry.ThreadID
 	}
-	process, err := controller.Open(daemonprocess.Target{PID: entry.PID, SessionID: sessionID, StateDir: entry.StateDir, StartedAt: entry.StartedAt})
+	target := daemonprocess.Target{PID: entry.PID, SessionID: sessionID, StateDir: entry.StateDir, StartedAt: entry.StartedAt}
+	process, err := controller.Open(target)
 	exited := errors.Is(err, daemonprocess.ErrExited)
 	if err != nil && !exited {
 		return appwire.Unavailable(fmt.Sprintf("cannot verify daemon for force stop: %v", err))
@@ -84,6 +85,15 @@ func forceStopThread(ctx context.Context, cfg hubcore.WebConfig, params appwire.
 		return err
 	}
 	if exited {
+		// There is no retained process handle to reverify. An unchanged marker
+		// alone cannot confirm absence after waiting for ownership.
+		process, err = controller.Open(target)
+		if !errors.Is(err, daemonprocess.ErrExited) {
+			if err == nil {
+				err = errors.New("daemon is live after initial exit observation")
+			}
+			return appwire.Unavailable(fmt.Sprintf("daemon exit is not confirmed: %v", err))
+		}
 		refreshAfterForceStop(ctx, cfg)
 		return nil
 	}

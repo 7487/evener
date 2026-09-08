@@ -101,6 +101,54 @@ func TestHubForceStopConfirmsExitAndPreservesSavedData(t *testing.T) {
 	}
 }
 
+func TestForceStopRevalidatesExitedProcessUnderOwnership(t *testing.T) {
+	for _, current := range []string{"exited", "live", "ambiguous"} {
+		t.Run(current, func(t *testing.T) {
+			runDir := t.TempDir()
+			entry := rendezvous.Entry{PID: 4242, SessionID: "current", ThreadID: "current", WorkspaceRef: "local:stable", StateDir: t.TempDir(), StartedAt: time.Now()}
+			writeRendezvous(t, runDir, entry)
+			locks := hubcore.NewResumeLocks()
+			var events []string
+			opens := 0
+			controller := forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+				opens++
+				if opens == 1 {
+					return nil, daemonprocess.ErrExited
+				}
+				for _, alias := range []string{"stable", "current"} {
+					if locks.For(alias).TryLock() {
+						locks.For(alias).Unlock()
+						t.Errorf("exit revalidation did not hold %s ownership", alias)
+					}
+				}
+				switch current {
+				case "live":
+					return &forceStopProcess{events: &events}, nil
+				case "ambiguous":
+					return nil, errors.New("process identity is unresolved")
+				default:
+					return nil, daemonprocess.ErrExited
+				}
+			})
+			cfg := hubcore.WebConfig{RunDir: runDir, ResumeLocks: locks, DaemonProcesses: controller}
+			err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:stable"}, nil)
+			if opens != 2 || (err == nil) != (current == "exited") {
+				t.Fatalf("exit result ignored current process: opens=%d err=%v", opens, err)
+			}
+			var want []string
+			if current == "live" {
+				want = []string{"close"}
+			}
+			if !reflect.DeepEqual(events, want) {
+				t.Fatalf("unexpected generation was signaled or leaked: %v", events)
+			}
+			if state := locks.RecoveryState("stable"); state.Stopping != 0 || state.ResumeRequired != (current == "exited") {
+				t.Fatalf("false recovery success: %+v", state)
+			}
+		})
+	}
+}
+
 func TestForceStopFailuresDoNotPretendExit(t *testing.T) {
 	for _, stage := range []string{"identity", "signal", "exit", "alreadyExited"} {
 		t.Run(stage, func(t *testing.T) {
@@ -134,7 +182,7 @@ func TestForceStopFailuresDoNotPretendExit(t *testing.T) {
 			if (err == nil) != (stage == "alreadyExited") {
 				t.Fatalf("error=%v", err)
 			}
-			want := map[string][]string{"identity": {"open"}, "signal": {"open", "kill", "close"}, "exit": {"open", "kill", "wait", "close"}, "alreadyExited": {"open"}}[stage]
+			want := map[string][]string{"identity": {"open"}, "signal": {"open", "kill", "close"}, "exit": {"open", "kill", "wait", "close"}, "alreadyExited": {"open", "open"}}[stage]
 			if !reflect.DeepEqual(events, want) {
 				t.Fatalf("events=%v want=%v", events, want)
 			}
