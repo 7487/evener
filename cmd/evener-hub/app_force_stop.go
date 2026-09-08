@@ -125,10 +125,20 @@ func forceStopOwnershipUnchanged(runDir, sessionID string, previous rendezvous.E
 	if err != nil {
 		return err
 	}
-	if current != previous {
+	if !sameForceStopEntry(current, previous) {
 		return errors.New("daemon ownership changed; refresh the session before force stopping")
 	}
 	return nil
+}
+
+// sameForceStopEntry compares persisted ownership values; timestamp location
+// pointers may differ across reads even when they represent the same instant.
+func sameForceStopEntry(a, b rendezvous.Entry) bool {
+	if !a.StartedAt.Equal(b.StartedAt) {
+		return false
+	}
+	b.StartedAt = a.StartedAt
+	return a == b
 }
 
 func forceStopEntry(runDir, sessionID string, controller daemonprocess.Controller, previous *rendezvous.Entry) (rendezvous.Entry, error) {
@@ -177,7 +187,7 @@ func forceStopEntry(runDir, sessionID string, controller daemonprocess.Controlle
 				_ = process.Close()
 			}
 			exited := errors.Is(err, daemonprocess.ErrExited)
-			if exited && slices.Contains(forceStopAliases(entry), sessionID) && (!exitedDirect || (previous != nil && entry == *previous)) {
+			if exited && slices.Contains(forceStopAliases(entry), sessionID) && (!exitedDirect || (previous != nil && sameForceStopEntry(entry, *previous))) {
 				exitedMatch, exitedDirect = entry, true
 			}
 			return exited

@@ -237,6 +237,24 @@ func (p *waitingForceStopProcess) Wait(ctx context.Context) error {
 }
 func (p *waitingForceStopProcess) Close() error { return nil }
 
+func TestForceStopRevalidationComparesTimestampInstants(t *testing.T) {
+	runDir := t.TempDir()
+	entry := rendezvous.Entry{PID: 4242, SessionID: "current", WorkspaceRef: "local:stable", StartedAt: time.Date(2026, 9, 7, 12, 0, 0, 0, time.FixedZone("offset", 1200))}
+	writeRendezvous(t, runDir, entry)
+	previous, err := forceStopEntry(runDir, "stable", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil); err != nil {
+		t.Fatalf("identical persisted timestamp rejected: %v", err)
+	}
+	entry.StartedAt = entry.StartedAt.Add(time.Second)
+	writeRendezvous(t, runDir, entry)
+	if err := forceStopOwnershipUnchanged(runDir, "stable", previous, nil); err == nil {
+		t.Fatal("changed start instant accepted")
+	}
+}
+
 func TestForceStopRejectsDiscoveryChangeDuringLockedRevalidation(t *testing.T) {
 	runDir := t.TempDir()
 	entry := rendezvous.Entry{PID: 4242, SessionID: "current", WorkspaceRef: "local:stable"}
