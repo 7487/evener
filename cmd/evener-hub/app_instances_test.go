@@ -1293,6 +1293,133 @@ func TestInstances_EditRenameRefusesATakenName(t *testing.T) {
 	authoredEntry(t, f.tomlPath, "other")
 }
 
+// A credential can outlive the instance it belonged to — providers.toml
+// hand-edited while credentials.toml or the OAuth state kept its entry. Under a
+// name the registry does not curate such an orphan resolves no instance at all,
+// so neither taken-name check above sees it, and moveCredentials would
+// overwrite it with nothing left to recover from: it runs once the file is
+// re-keyed and the registry reloaded.
+func TestInstances_EditRenameRefusesANameHoldingOrphanedCredentials(t *testing.T) {
+	type check func(t *testing.T, f *instancesFixture)
+	plantKey := func(t *testing.T, f *instancesFixture) {
+		if err := f.store.Set("work2", "sk-orphan"); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+	}
+	keyIntact := func(t *testing.T, f *instancesFixture) {
+		if v, _ := f.store.Get("work2"); v != "sk-orphan" {
+			t.Fatalf("the orphaned stored key was overwritten: work2 = %q", v)
+		}
+	}
+	plantRecord := func(t *testing.T, f *instancesFixture) {
+		if err := authopenai.SaveAuth(f.stateDir, "work2", makeOAuthRecord("work2", "")); err != nil {
+			t.Fatalf("SaveAuth: %v", err)
+		}
+	}
+	recordIntact := func(t *testing.T, f *instancesFixture) {
+		orphan, err := authopenai.LoadAuth(f.stateDir, "work2")
+		if err != nil {
+			t.Fatalf("the orphaned OAuth record is gone: %v", err)
+		}
+		if orphan.AccessToken != "access-work2" {
+			t.Fatalf("the orphaned OAuth record was overwritten: access token = %q", orphan.AccessToken)
+		}
+	}
+	bothOf := func(a, b check) check {
+		return func(t *testing.T, f *instancesFixture) {
+			a(t, f)
+			b(t, f)
+		}
+	}
+	for _, tc := range []struct {
+		kind   string
+		plant  check
+		named  []string
+		intact check
+	}{
+		{
+			kind:   "a stored key",
+			plant:  plantKey,
+			named:  []string{`credentials.toml entry for "work2"`},
+			intact: keyIntact,
+		},
+		{
+			kind:   "an OAuth record",
+			plant:  plantRecord,
+			named:  []string{`OAuth record for "work2"`},
+			intact: recordIntact,
+		},
+		{
+			// Hand-editing can leave both behind, and the refusal has to name
+			// both: clearing one still loses the other.
+			kind:   "both kinds at once",
+			plant:  bothOf(plantKey, plantRecord),
+			named:  []string{`credentials.toml entry for "work2"`, `OAuth record for "work2"`},
+			intact: bothOf(keyIntact, recordIntact),
+		},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			f := newInstancesFixture(t, nil)
+			if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai-codex"}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := f.store.Set("work", "sk-work"); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			if err := authopenai.SaveAuth(f.stateDir, "work", makeOAuthRecord("work", "")); err != nil {
+				t.Fatalf("SaveAuth: %v", err)
+			}
+			if err := f.ctl.SetDefault(appwire.InstanceSetDefaultParams{Name: "work"}); err != nil {
+				t.Fatalf("SetDefault: %v", err)
+			}
+			tc.plant(t, f)
+			// The reload is what would have made an orphan visible if it could
+			// be: a curated provider picks a credential up and appears as an
+			// implicit instance. work2 is not one, so nothing appears.
+			if err := f.ctl.reg.Reload(); err != nil {
+				t.Fatalf("Reload: %v", err)
+			}
+			for _, e := range f.ctl.List().Instances {
+				if e.Name == "work2" {
+					t.Fatalf("the planted credential resolved an instance, so this is not the orphan case: %+v", e)
+				}
+			}
+
+			err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "work2"})
+			var wire appwire.WireError
+			if !errors.As(err, &wire) || wire.Code != appwire.CodeConflict {
+				t.Fatalf("Edit(rename) = %v, want a Conflict wire error", err)
+			}
+			for _, named := range tc.named {
+				if !strings.Contains(err.Error(), named) {
+					t.Fatalf("Edit(rename) = %v, want the leftover named as %s", err, named)
+				}
+			}
+
+			// Refused before any write, so every piece of state the rename
+			// would have touched is untouched.
+			authoredEntry(t, f.tomlPath, "work")
+			l, _, err := registry.ReadConfigFile(f.tomlPath)
+			if err != nil {
+				t.Fatalf("ReadConfigFile: %v", err)
+			}
+			if _, authored := l.Providers["work2"]; authored {
+				t.Fatal("a refused rename authored [providers.work2]")
+			}
+			if l.Default != "work" {
+				t.Fatalf("default = %q, want the pointer left on the old name", l.Default)
+			}
+			if v, _ := f.store.Get("work"); v != "sk-work" {
+				t.Fatalf("the instance's stored key moved despite the refusal: work = %q", v)
+			}
+			if _, err := authopenai.LoadAuth(f.stateDir, "work"); err != nil {
+				t.Fatalf("the instance's OAuth record moved despite the refusal: %v", err)
+			}
+			tc.intact(t, f)
+		})
+	}
+}
+
 func TestInstances_EditRenameRejectsAnInvalidName(t *testing.T) {
 	f := newInstancesFixture(t, nil)
 	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai"}); err != nil {

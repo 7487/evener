@@ -320,7 +320,8 @@ func (c *hubInstancesController) Create(params appwire.InstanceCreateParams) err
 //
 // A NewName re-keys the entry, follows the default pointer, and then moves
 // the stored key and OAuth record (moveCredentials); it is refused for an
-// implicit instance, an invalid name, or a name any instance already has.
+// implicit instance, an invalid name, a name any instance already has, and a
+// name still holding a credential of its own (credentialsUnder).
 //
 // Refusals follow Create's convention (#717/#748): the ones that blame the
 // fields the caller sent — an unknown name, an invalid vars key, an edit
@@ -374,6 +375,17 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 		}
 		if _, taken := c.reg.Get().Instance(newName); taken {
 			return appwire.Conflict(fmt.Sprintf("instance %q already exists", newName))
+		}
+		// Both checks above ask which instances exist, and a credential can
+		// outlive the instance it belonged to: providers.toml hand-edited
+		// while credentials.toml or the OAuth state kept its entry. Under a
+		// name the registry does not curate that leftover resolves no
+		// instance, so it is invisible to them, and moveCredentials would
+		// overwrite it. The refusal belongs here rather than there: by the
+		// time moveCredentials runs the file is re-keyed and the registry
+		// reloaded, so there is no longer anything to refuse.
+		if held := c.credentialsUnder(newName); len(held) > 0 {
+			return appwire.Conflict(fmt.Sprintf("renaming %q to %q would overwrite %s; clear that first", name, newName, strings.Join(held, " and ")))
 		}
 	}
 	if params.ClearBaseURL {
@@ -465,6 +477,23 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 		return moveErr
 	}
 	return nil
+}
+
+// credentialsUnder names the credentials already filed under name, in the
+// vocabulary describeImplicit uses for the same two sources. It is what a
+// rename onto name would overwrite, so the caller can go clear the one it
+// names. A record that exists but does not read back counts as present:
+// not-found is the only signal that nothing is there, and overwriting a
+// credential the hub merely failed to read is the same loss.
+func (c *hubInstancesController) credentialsUnder(name string) []string {
+	var held []string
+	if _, ok := c.auth.creds.Get(name); ok {
+		held = append(held, fmt.Sprintf("a credentials.toml entry for %q", name))
+	}
+	if _, err := c.auth.loadAuth(c.auth.stateDir, name); !errors.Is(err, authopenai.ErrAuthNotFound) {
+		held = append(held, fmt.Sprintf("an OAuth record for %q", name))
+	}
+	return held
 }
 
 // moveCredentials carries an instance's stored key and OAuth record to its
