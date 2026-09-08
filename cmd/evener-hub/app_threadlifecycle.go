@@ -330,7 +330,7 @@ func hubThreadResume(ctx context.Context, cfg hubcore.WebConfig, sources *appsou
 	if cfg.Roster != nil {
 		discoveryErr = hubRosterRefresh(ctx, cfg.Roster)
 	}
-	if err := daemonRestartRequiredError(ctx, cfg, params.Ref, sessionID, ""); err != nil {
+	if err := daemonRestartRequiredError(ctx, cfg, "", sessionID, ""); err != nil {
 		return appwire.ThreadResumeResponse{}, err
 	}
 	if discoveryErr != nil {
