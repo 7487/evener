@@ -498,6 +498,9 @@ func resumeOwnership(cfg hubcore.WebConfig, requestedID, requestedRefID string) 
 	visited := make(map[string]bool)
 	current := requestedID
 	for {
+		if cfg.ResumeLocks.HasSeparatePendingRecovery(requestedID, current) {
+			return "", nil, errors.New("resume target has a newer pending recovery; resume the current owning session")
+		}
 		if visited[current] {
 			return "", nil, errors.New("completed session aliases contain a cycle; refresh session ownership before resuming")
 		}
@@ -557,7 +560,13 @@ func resumeOwnershipStep(cfg hubcore.WebConfig, requestedID string) (string, []s
 		aliases = append(aliases, forceStopAliases(entry)...)
 	}
 	if len(claims) > 0 {
-		current, err := resumeClaimTarget(cfg, claims, durableTarget)
+		// A completed self-target cannot settle a conflicting exited successor.
+		// Only a redirect can advance traversal toward a separately resolved group.
+		completedRedirect := resolvedTarget
+		if completedRedirect == requestedID {
+			completedRedirect = ""
+		}
+		current, err := resumeClaimTarget(cfg, claims, durableTarget, completedRedirect)
 		if err != nil {
 			return "", nil, err
 		}
@@ -583,7 +592,7 @@ func resumeOwnershipStep(cfg hubcore.WebConfig, requestedID string) (string, []s
 
 // Distinct retained transcripts need process evidence: old crash markers are
 // not live owners, and an unverified process is never proof that a target is free.
-func resumeClaimTarget(cfg hubcore.WebConfig, claims []rendezvous.Entry, durableTarget string) (string, error) {
+func resumeClaimTarget(cfg hubcore.WebConfig, claims []rendezvous.Entry, durableTarget, resolvedTarget string) (string, error) {
 	target := durableTarget
 	conflict := false
 	for _, entry := range claims {
@@ -638,6 +647,12 @@ func resumeClaimTarget(cfg hubcore.WebConfig, claims []rendezvous.Entry, durable
 	if durableTarget != "" {
 		return durableTarget, nil
 	}
+	// Completed aliases guide the next hop only after all competing claims are
+	// verified exited. A live or unverified process never loses to this fallback.
+	if resolvedTarget != "" {
+		return resolvedTarget, nil
+	}
+
 	return "", errors.New("retained exited daemons have ambiguous current sessions and no persisted recovery target")
 }
 

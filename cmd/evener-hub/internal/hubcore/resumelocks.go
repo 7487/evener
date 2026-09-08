@@ -145,6 +145,15 @@ func (r *ResumeLocks) RecoveryAliases(sessionID string) []string {
 	return []string{sessionID}
 }
 
+// HasSeparatePendingRecovery identifies an obligation the requested alias cannot
+// acknowledge. Repeated stops of the same transcript still create a new group.
+func (r *ResumeLocks) HasSeparatePendingRecovery(sessionID, targetID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	requested, target := r.recovery[sessionID], r.recovery[targetID]
+	return (target.ResumeRequired || target.Stopping > 0) && target.group != requested.group
+}
+
 // RecordResolvedSession retains alias routing after successful Resume without
 // recreating a recovery obligation. Fresh rendezvous evidence takes priority.
 func (r *ResumeLocks) RecordResolvedSession(sessionID, target string, epoch uint64) {

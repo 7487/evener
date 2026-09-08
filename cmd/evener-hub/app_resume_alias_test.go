@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -261,8 +262,8 @@ func TestResumeRejectsConflictingRetainedTranscriptIdentities(t *testing.T) {
 }
 
 func TestResumeIgnoresOnlyVerifiedExitedTranscriptClaims(t *testing.T) {
-	for _, uncertain := range []bool{false, true} {
-		t.Run(map[bool]string{false: "dead old and live current", true: "unresolved old and live current"}[uncertain], func(t *testing.T) {
+	for _, oldState := range []string{"exited", "unverified", "live"} {
+		t.Run(oldState+" old and live current", func(t *testing.T) {
 			cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: hubcore.NewResumeLocks()}
 			// A previous force-stop and Resume obligation is already cleared. A later
 			// daemon clear keeps the workspace alias but advances its current transcript.
@@ -271,14 +272,17 @@ func TestResumeIgnoresOnlyVerifiedExitedTranscriptClaims(t *testing.T) {
 			if err := cfg.ResumeLocks.ExplicitResumeCompleted("stable", cfg.ResumeLocks.RecoveryState("stable").Epoch); err != nil {
 				t.Fatal(err)
 			}
+			cfg.ResumeLocks.RecordResolvedSession("stable", "old", cfg.ResumeLocks.RecoveryState("stable").Epoch)
 			writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: "old", ThreadID: "old", WorkspaceRef: "local:stable"})
 			writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 102, SessionID: "current", ThreadID: "current", WorkspaceRef: "local:stable"})
 			cfg.DaemonProcesses = forceStopControllerFunc(func(target daemonprocess.Target) (daemonprocess.Process, error) {
 				if target.PID == 101 {
-					if uncertain {
+					if oldState == "unverified" {
 						return nil, errors.New("unverified identity")
 					}
-					return nil, daemonprocess.ErrExited
+					if oldState == "exited" {
+						return nil, daemonprocess.ErrExited
+					}
 				}
 				return &forceStopProcess{events: new([]string)}, nil
 			})
@@ -293,8 +297,8 @@ func TestResumeIgnoresOnlyVerifiedExitedTranscriptClaims(t *testing.T) {
 			if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:stable"}); err == nil {
 				t.Fatal("expected launcher error or refusal")
 			}
-			if called == uncertain {
-				t.Fatalf("launch=%v uncertain=%v", called, uncertain)
+			if called != (oldState == "exited") {
+				t.Fatalf("launch=%v old state=%s", called, oldState)
 			}
 		})
 	}
@@ -692,5 +696,191 @@ func TestResumeCompletedChainPreservesConnectionAdmission(t *testing.T) {
 	}
 	if launches != 1 {
 		t.Fatalf("fresh connection launches=%d", launches)
+	}
+}
+
+type aliasRecoveryDaemon struct {
+	*fixtureExitProcess
+	server  *httptest.Server
+	session atomic.Value
+	entry   rendezvous.Entry
+}
+
+func (d *aliasRecoveryDaemon) Kill() error {
+	d.server.Close()
+	return d.fixtureExitProcess.Kill()
+}
+
+func startAliasRecoveryDaemon(t *testing.T, sessionID, workspaceID string) *aliasRecoveryDaemon {
+	t.Helper()
+	command := exec.CommandContext(t.Context(), "cat")
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &aliasRecoveryDaemon{fixtureExitProcess: &fixtureExitProcess{input: input, command: command}}
+	fixture.session.Store(sessionID)
+	t.Cleanup(func() {
+		_ = input.Close()
+		if command.ProcessState == nil {
+			_ = command.Wait()
+		}
+	})
+	daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
+	thread := func() appwire.Thread {
+		id := fixture.session.Load().(string)
+		return appwire.Thread{ID: id, SessionID: id, Source: "local", Status: appwire.ThreadStatus{Type: "idle"}, Evener: appwire.EvenerThread{Ref: "local:" + id, InstanceID: id}}
+	}
+	appserver.HandleTyped(daemon.Router(), appwire.MethodThreadList, func(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+		return appwire.ThreadListResponse{Data: []appwire.Thread{thread()}}, nil
+	})
+	appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(context.Context, appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+		return appwire.ThreadReadResponse{Thread: thread()}, nil
+	})
+	fixture.server = httptest.NewServer(http.HandlerFunc(daemon.ServeWebSocket))
+	t.Cleanup(fixture.server.Close)
+	fixture.entry = rendezvous.Entry{PID: command.Process.Pid, SessionID: sessionID, ThreadID: sessionID, WorkspaceRef: "local:" + workspaceID, Protocol: appwire.ProtocolVersion, Endpoint: "ws" + strings.TrimPrefix(fixture.server.URL, "http"), SourceID: "local", StartedAt: time.Now()}
+	return fixture
+}
+
+func TestRepeatedRecoveryRetainsCrashMarkersAndPendingGroups(t *testing.T) {
+	for _, clear := range []bool{true, false} {
+		t.Run(map[bool]string{true: "clear to a new transcript", false: "stop the same transcript"}[clear], func(t *testing.T) {
+			a, b, c := hubtest.SessionID(t), hubtest.SessionID(t), hubtest.SessionID(t)
+			cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: hubcore.NewResumeLocks()}
+			cfg.Roster = hubcore.NewRoster(cfg.RunDir, &hubcore.StatusProber{})
+			initial := startAliasRecoveryDaemon(t, b, a)
+			writeRendezvous(t, cfg.RunDir, initial.entry)
+			var mu sync.Mutex
+			daemons := map[int]*aliasRecoveryDaemon{initial.entry.PID: initial}
+			current := initial
+			cfg.DaemonProcesses = forceStopControllerFunc(func(target daemonprocess.Target) (daemonprocess.Process, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				daemon := daemons[target.PID]
+				if daemon == nil {
+					return nil, errors.New("unknown fixture process")
+				}
+				if daemon.command.ProcessState != nil {
+					return nil, daemonprocess.ErrExited
+				}
+				return daemon, nil
+			})
+			launches := 0
+			cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				daemon := startAliasRecoveryDaemon(t, req.SessionID, req.SessionID)
+				mu.Lock()
+				launches++
+				current = daemon
+				daemons[daemon.entry.PID] = daemon
+				mu.Unlock()
+				writeRendezvous(t, cfg.RunDir, daemon.entry)
+				return daemon.entry, nil
+			}}
+			hub := newHubRPCTestServer(t, cfg)
+			defer hub.Close()
+			connect := func() *appwire.Client {
+				client := dialHubRPC(t, hub)
+				t.Cleanup(func() { _ = client.Close() })
+				if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+					t.Fatal(err)
+				}
+				return client
+			}
+			client := connect()
+			if err := client.Request(t.Context(), appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: "local:" + a}, nil); err != nil {
+				t.Fatal(err)
+			}
+			client = connect()
+			if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + a}); err != nil {
+				t.Fatal(err)
+			}
+			if clear {
+				mu.Lock()
+				current.session.Store(c)
+				current.entry.SessionID = c
+				current.entry.ThreadID = c
+				current.entry.WorkspaceRef = "local:" + b
+				entry := current.entry
+				mu.Unlock()
+				writeRendezvous(t, cfg.RunDir, entry)
+			}
+			if err := client.Request(t.Context(), appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: "local:" + b}, nil); err != nil {
+				t.Fatal(err)
+			}
+			before := cfg.ResumeLocks.RecoveryState(b)
+			if !clear {
+				if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + a}); err == nil {
+					t.Fatal("stale connection crossed newer stop")
+				}
+				client = connect()
+				if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + a}); err == nil {
+					t.Error("older alias acknowledged a different pending group")
+				}
+				mu.Lock()
+				got := launches
+				mu.Unlock()
+				if got != 1 {
+					t.Errorf("older alias spawned through newer group: launches=%d", got)
+				}
+				after := cfg.ResumeLocks.RecoveryState(b)
+				if !after.ResumeRequired || before.Epoch != after.Epoch {
+					t.Fatalf("older alias changed pending recovery: before=%+v after=%+v", before, after)
+				}
+			}
+			client = connect()
+			if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + b}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + a}); err != nil {
+				t.Fatalf("retained crash markers blocked completed alias: %v", err)
+			}
+			mu.Lock()
+			got := launches
+			target := current.entry.SessionID
+			mu.Unlock()
+			want := b
+			if clear {
+				want = c
+			}
+			if got != 2 || target != want {
+				t.Fatalf("launches=%d target=%s want=%s", got, target, want)
+			}
+			entries, err := rendezvous.ListStrict(cfg.RunDir)
+			if err != nil || len(entries) != 3 {
+				t.Fatalf("crash markers were not retained: entries=%v err=%v", entries, err)
+			}
+			if cfg.ResumeLocks.RecoveryState(want).ResumeRequired {
+				t.Fatal("successful owning-session recovery left target fenced")
+			}
+		})
+	}
+}
+
+func TestCompletedSelfTargetDoesNotOverrideUnresolvedExitedSuccessor(t *testing.T) {
+	locks := hubcore.NewResumeLocks()
+	finish := locks.BeginForceStop([]string{"A", "B"})
+	finish(true)
+	epoch := locks.RecoveryState("A").Epoch
+	if err := locks.ExplicitResumeCompleted("A", epoch); err != nil {
+		t.Fatal(err)
+	}
+	locks.RecordResolvedSession("A", "B", epoch)
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) { return nil, daemonprocess.ErrExited })}
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: "B", ThreadID: "B", WorkspaceRef: "local:A"})
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 102, SessionID: "C", ThreadID: "C", WorkspaceRef: "local:B"})
+	launches := 0
+	cfg.Spawner = &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		launches++
+		return rendezvous.Entry{}, errors.New("superseded transcript reached launcher")
+	}}
+	if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:A"}); err == nil {
+		t.Fatal("unresolved exited successor accepted")
+	}
+	if launches != 0 {
+		t.Fatalf("completed self-target launched superseded B %d times", launches)
 	}
 }
