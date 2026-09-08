@@ -277,6 +277,56 @@ test("Save sends a changed source and reseeds the form from the refreshed entry"
   );
 });
 
+test("a successful save re-browses an expanded marketplace", async () => {
+  const fake = connectionStore.getState().client as FakeClient;
+  fake.on("evener/marketplace/edit", () => ({
+    marketplaces: [{ ...ACME, source: { kind: "url" as const, url: "https://x/y.git" } }],
+  }));
+  fake.on("evener/marketplace/browse", () => ({ name: "acme", description: "", plugins: [] }));
+  renderSheet(ACME, new Set(["acme"]));
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("radio", { name: "Git URL" }));
+  await user.type(screen.getByPlaceholderText("https://github.com/owner/repo.git"), "https://x/y.git");
+  await user.click(saveButton());
+  await waitFor(() => expect(getToasts().some((t) => t.kind === "success" && t.text === "Saved acme")).toBe(true));
+  // A save invalidates the catalog exactly as a Refresh does, and the tree node
+  // is expanded: with nothing re-requesting it, that node sits on a spinner.
+  await waitFor(() =>
+    expect(fake.calls.filter((c) => c.method === "evener/marketplace/browse").map((c) => c.params)).toEqual([
+      { name: "acme" },
+    ]),
+  );
+});
+
+test("a rename re-browses under the new name", async () => {
+  const fake = connectionStore.getState().client as FakeClient;
+  fake.on("evener/marketplace/edit", () => ({ marketplaces: [{ ...ACME, name: "acme2" }] }));
+  fake.on("evener/marketplace/browse", () => ({ name: "acme2", description: "", plugins: [] }));
+  const { onRenamed } = renderSheet(ACME, new Set(["acme"]));
+  const user = userEvent.setup();
+  await user.type(field("Name"), "2");
+  await user.click(saveButton());
+  await waitFor(() => expect(onRenamed).toHaveBeenCalledWith("acme2"));
+  // The catalog is keyed by the name it is stored under, which this save just
+  // changed, while the expansion set still holds the name the user expanded.
+  await waitFor(() =>
+    expect(fake.calls.filter((c) => c.method === "evener/marketplace/browse").map((c) => c.params)).toEqual([
+      { name: "acme2" },
+    ]),
+  );
+});
+
+test("a save leaves a marketplace nothing has expanded un-browsed", async () => {
+  const fake = connectionStore.getState().client as FakeClient;
+  fake.on("evener/marketplace/edit", () => ({ marketplaces: [{ ...ACME, name: "acme2" }] }));
+  renderSheet(ACME);
+  const user = userEvent.setup();
+  await user.type(field("Name"), "2");
+  await user.click(saveButton());
+  await waitFor(() => expect(getToasts().some((t) => t.kind === "success" && t.text === "Saved acme2")).toBe(true));
+  expect(fake.calls.some((c) => c.method === "evener/marketplace/browse")).toBe(false);
+});
+
 test("a local path browses for a new directory and locks the field while saving", async () => {
   const fake = connectionStore.getState().client as FakeClient;
   let release: (() => void) | undefined;

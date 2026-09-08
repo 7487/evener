@@ -57,9 +57,9 @@ export interface MarketplaceSheetProps {
   /** After a successful rename, with the new name: the page re-selects it
    * so the sheet stays open on the same marketplace. */
   onRenamed: (newName: string) => void;
-  /** Read-only: a Refresh on a marketplace BrowseSection currently has
-   * expanded re-browses it at once, so the tree never shows a catalog the
-   * refresh just invalidated. BrowseSection is a sibling of this sheet's
+  /** Read-only: a Refresh or a Save on a marketplace BrowseSection currently
+   * has expanded re-browses it at once, so the tree never shows a catalog the
+   * write just invalidated. BrowseSection is a sibling of this sheet's
    * own section, which is why the set lives on the page. */
   expandedMarketplaces: Set<string>;
 }
@@ -151,6 +151,15 @@ export function MarketplaceSheet({ name, onClose, onRenamed, expandedMarketplace
       // Reported wherever the user has navigated to: the write landed, and a
       // sheet that moved on is no reason to leave a completed save unreported.
       toasts.push("success", `Saved ${params.newName ?? entry.name}`);
+      // A save invalidates the catalog exactly as a Refresh does, so an
+      // expanded tree node has to be re-requested or it sits on a spinner.
+      // Keyed by the name the catalog will be stored under - the new one on a
+      // rename - while the expansion set still holds the name the user
+      // expanded. Unconditional, like Refresh's: the tree is the page's, not
+      // this sheet's, so a user who has moved on still owes it a catalog.
+      if (expandedMarketplaces.has(entry.name)) {
+        void extensionsStore.getState().browseMarketplace(params.newName ?? entry.name);
+      }
       if (params.newName === undefined) {
         // The rename branch's guard applies here too: seeding is cosmetic - it
         // only normalizes whitespace - but on a sheet the page has moved to it
