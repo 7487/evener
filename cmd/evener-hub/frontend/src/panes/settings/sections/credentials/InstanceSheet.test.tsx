@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { FakeClient } from "../../../../protocol/testing/fakeClient";
-import type { InstanceEntry, ProviderDescriptor } from "../../../../protocol/types.gen";
+import type { InstanceEntry, InstanceListResponse, ProviderDescriptor } from "../../../../protocol/types.gen";
 import { connectionStore } from "../../../../stores/connection";
 import { credentialsStore, resetCredentialsStoreForTests } from "../../../../stores/credentials";
 import { Toast } from "../../../../widgets";
@@ -54,7 +54,11 @@ function renderSheet(
   /** Points the sheet at another instance by name, the way the section does
    * when it re-selects the new name after a rename. */
   const selectName = (name: string) => rerender(tree(name));
-  return { handlers, onClose, selectName };
+  /** Drops the section's selection, the way it does on Escape, the scrim or
+   * the close button. The sheet stays mounted with no name, so nothing about
+   * it unmounts on dismissal. */
+  const dismiss = () => rerender(tree(null));
+  return { handlers, onClose, selectName, dismiss };
 }
 
 beforeEach(() => {
@@ -530,6 +534,7 @@ describe("the form", () => {
     hasStoredFile: true,
     activeSource: "store",
   });
+  const OTHER = instance({ name: "other", providerId: "openai", baseUrl: "https://other.example.test" });
 
   function field(label: string): HTMLInputElement {
     return screen.getByLabelText(label) as HTMLInputElement;
@@ -548,6 +553,19 @@ describe("the form", () => {
   async function sentEditParams(fake: FakeClient): Promise<unknown> {
     await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
     return fake.calls.find((c) => c.method === "evener/instance/edit")?.params;
+  }
+  /** A save the test finishes by hand, so the sheet can be dismissed or
+   * re-pointed while the request is still in flight. */
+  function deferredEdit(): { fake: FakeClient; finish: (list: InstanceListResponse) => void } {
+    const fake = new FakeClient("ready");
+    let resolve!: (list: InstanceListResponse) => void;
+    fake.on("evener/instance/edit", () => {
+      return new Promise<InstanceListResponse>((r) => {
+        resolve = r;
+      });
+    });
+    connectionStore.getState().connect(fake);
+    return { fake, finish: (list) => resolve(list) };
   }
   /** Watches the document for the removal of nodes that have to stay put, and
    * answers with the labels of the ones that were taken out. A before/after
@@ -912,5 +930,81 @@ describe("the form", () => {
     await waitFor(() => expect(field("Name").value).toBe("work2"));
 
     expect(document.activeElement).toBe(focused);
+  });
+
+  // A save outlives the sheet's interest in it: the request is in flight while
+  // the user is free to dismiss the sheet or pick another row, and the section
+  // owns the selection either way. onRenamed is the sheet asking for the
+  // selection to move, so answering a response the user has walked away from
+  // yanks the section somewhere it did not ask to go - re-opening a dismissed
+  // sheet, or dragging it off the row just picked. The write itself stands,
+  // and its toast is owed: the user asked for it and it happened.
+  test("a rename that lands after the sheet is dismissed does not re-open it", async () => {
+    const { fake, finish } = deferredEdit();
+    const { handlers, dismiss, selectName } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+    await user.click(saveButton());
+    expect(await sentEditParams(fake)).toEqual({ name: "work", newName: "work2" });
+
+    dismiss();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => finish({ instances: [{ ...WORK, name: "work2" }], availableProviders: [OPENAI] }));
+
+    expect(handlers.onRenamed).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The rename happened, so the user hears about it even though the sheet
+    // they asked from is gone.
+    expect(getToasts().some((t) => t.text === "Saved work2")).toBe(true);
+    // And the sheet is not wedged busy: opening it on the new name gives a
+    // live form again.
+    selectName("work2");
+    await waitFor(() => expect(field("Name").value).toBe("work2"));
+    expect(field("Name").disabled).toBe(false);
+  });
+
+  test("a rename that lands after another row is selected does not steal the selection", async () => {
+    const { fake, finish } = deferredEdit();
+    const { handlers, onClose, selectName } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+    await user.click(saveButton());
+    expect(await sentEditParams(fake)).toEqual({ name: "work", newName: "work2" });
+
+    act(() => {
+      credentialsStore.setState({ instances: [WORK, OTHER], availableProviders: [OPENAI] });
+    });
+    selectName("other");
+    await waitFor(() => expect(field("Name").value).toBe("other"));
+    await act(async () => finish({ instances: [{ ...WORK, name: "work2" }, OTHER], availableProviders: [OPENAI] }));
+
+    expect(handlers.onRenamed).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "other" })).toBeTruthy();
+    expect(field("Name").value).toBe("other");
+  });
+
+  // The other half of the same guard: a plain save reseeds the draft from the
+  // response, and the instance it reseeds from is the one the save went out
+  // for. Reseeding it into a sheet that has since moved on shows one
+  // instance's values under another's title.
+  test("a plain save that lands after another row is selected does not reseed its draft", async () => {
+    const { fake, finish } = deferredEdit();
+    const { onClose, selectName } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Base URL"), "/x");
+    await user.click(saveButton());
+    expect(await sentEditParams(fake)).toEqual({ name: "work", baseUrl: "https://gw.example.test/v1/x" });
+
+    act(() => {
+      credentialsStore.setState({ instances: [WORK, OTHER], availableProviders: [OPENAI] });
+    });
+    selectName("other");
+    await waitFor(() => expect(field("Name").value).toBe("other"));
+    await act(async () => finish({ instances: [WORK, OTHER], availableProviders: [OPENAI] }));
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(field("Name").value).toBe("other");
+    expect(field("Base URL").value).toBe("https://other.example.test");
   });
 });

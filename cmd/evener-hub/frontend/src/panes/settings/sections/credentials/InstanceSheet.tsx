@@ -17,12 +17,15 @@
 // where the section re-selects the new name (onRenamed) and the vanish is
 // the rename landing, not a removal. Across that vanish the sheet goes on
 // showing the instance the rename went out for (renamingFrom), so it never
-// unmounts itself mid-rename.
+// unmounts itself mid-rename. A save whose answer arrives after the user has
+// dismissed the sheet or picked another row still counts as a write, and is
+// toasted as one, but stops there (shownName): re-selecting or reseeding then
+// would drag the sheet back to a save the user has walked away from.
 //
 // Owns the one mutation it edits (evener/instance/edit); the section still
 // owns what every other action DOES (opening an editor, a confirm, or
 // calling the store), the same division of labor as before.
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { errorText } from "../../../../protocol/errors";
 import type { AuthTestResponse, InstanceEntry } from "../../../../protocol/types.gen";
 import { useIsMobile } from "../../../../shell/useIsMobile";
@@ -122,6 +125,12 @@ export function InstanceSheet({
   // its slide-in from off-screen and throwing focus out of the form - and it
   // is also the guard that keeps that vanish from closing the sheet.
   const [renamingFrom, setRenamingFrom] = useState<InstanceEntry | undefined>(undefined);
+  // The name the section has the sheet on right now, readable from a save
+  // still in flight: handleSave captured `name` from the render it ran in, and
+  // the user is free to dismiss the sheet or pick another row before the
+  // response lands. Compared against the instance the save went out for, this
+  // is what says whether the answer is still this sheet's to act on.
+  const shownName = useRef(name);
 
   const stored = name === null ? undefined : instances.find((i) => i.name === name);
   const instance = stored ?? renamingFrom;
@@ -163,6 +172,14 @@ export function InstanceSheet({
   useEffect(() => {
     setRenamingFrom(undefined);
   }, [name]);
+  // A layout effect, not the passive one above: a response can land between
+  // the commit that dismissed the sheet and a passive effect, and a mirror
+  // that is one beat stale lets exactly the save this guards slip through.
+  // useEditorLifetime keeps the dialogs' equivalent flag on layout timing for
+  // the same reason.
+  useLayoutEffect(() => {
+    shownName.current = name;
+  }, [name]);
 
   const open = name !== null && instance !== undefined;
 
@@ -199,6 +216,15 @@ export function InstanceSheet({
     try {
       await credentialsStore.getState().edit(params);
       toast.push("success", `Saved ${params.newName ?? instance.name}`);
+      // The sheet may have moved on while the request was in flight: dismissed,
+      // or pointed at another row. The write stands and the toast above is
+      // owed either way, but what follows steers the sheet - onRenamed asks
+      // the section to select the new name, and the reseed replaces the draft.
+      // Applied late, either one takes a sheet the user has moved somewhere
+      // else and drags it back to this save: a dismissed sheet re-opens, a
+      // freshly picked row loses the selection or shows another instance's
+      // values under its own title.
+      if (shownName.current !== instance.name) return;
       if (params.newName !== undefined) {
         onRenamed(params.newName);
       } else {
