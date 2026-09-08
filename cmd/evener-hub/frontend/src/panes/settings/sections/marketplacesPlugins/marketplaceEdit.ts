@@ -1,8 +1,10 @@
 // marketplaceEdit.ts: the marketplace sheet's form model - the draft, how it
 // is seeded from a MarketplaceEntry, and how a dirty draft becomes the
 // smallest evener/marketplace/edit request. Pure, so the rules (the kind's
-// own field is the only one that counts, a git-subdir entry is left alone
-// unless its URL is edited) are pinned without rendering anything.
+// own field is the only one that counts; a source whose kind the picker does
+// not offer shows its URL under Git URL and keeps that kind, and the fields
+// it carries, until the user picks a different kind; a blanked field is an
+// unfinished edit, not a change) are pinned without rendering anything.
 import type { MarketplaceEditParams, MarketplaceEntry, MarketplaceSourceInput } from "../../../../protocol/types.gen";
 
 export type MarketplaceSourceKind = "url" | "github" | "directory";
@@ -24,10 +26,13 @@ export interface MarketplaceDraft {
   path: string;
 }
 
+function isOfferedKind(kind: string): kind is MarketplaceSourceKind {
+  return MARKETPLACE_SOURCE_OPTIONS.some((option) => option.value === kind);
+}
+
 export function marketplaceDraftFor(entry: MarketplaceEntry): MarketplaceDraft {
   const { source } = entry;
-  const kind: MarketplaceSourceKind =
-    source.kind === "github" ? "github" : source.kind === "directory" ? "directory" : "url";
+  const kind: MarketplaceSourceKind = isOfferedKind(source.kind) ? source.kind : "url";
   return {
     name: entry.name,
     kind,
@@ -37,36 +42,48 @@ export function marketplaceDraftFor(entry: MarketplaceEntry): MarketplaceDraft {
   };
 }
 
-function sourceFromDraft(draft: MarketplaceDraft): MarketplaceSourceInput {
-  if (draft.kind === "github") return { kind: "github", repo: draft.repo.trim() };
-  if (draft.kind === "directory") return { kind: "directory", path: draft.path.trim() };
-  return { kind: "url", url: draft.url.trim() };
+/** The one field the draft's kind reads. The others hold whatever the user
+ * last typed under another kind and are ignored. */
+function draftValue(draft: MarketplaceDraft): string {
+  if (draft.kind === "github") return draft.repo.trim();
+  if (draft.kind === "directory") return draft.path.trim();
+  return draft.url.trim();
 }
 
-/** Whether the draft still describes the entry's own source. A git-subdir
- * entry renders as its URL under the url kind, so it is unchanged exactly
- * when that URL is untouched. */
+function sourceFromDraft(entry: MarketplaceEntry, draft: MarketplaceDraft): MarketplaceSourceInput {
+  const value = draftValue(draft);
+  if (draft.kind === "github") return { kind: "github", repo: value };
+  if (draft.kind === "directory") return { kind: "directory", path: value };
+  // A kind the picker cannot offer shows its URL here, so editing that URL
+  // re-points the source it already is - dropping to a plain url would
+  // silently change which catalog the marketplace reads.
+  if (!isOfferedKind(entry.source.kind)) return { ...entry.source, url: value };
+  return { kind: "url", url: value };
+}
+
+/** Whether the draft still describes the entry's own source. */
 function sourceUnchanged(entry: MarketplaceEntry, draft: MarketplaceDraft): boolean {
   const { source } = entry;
-  if (source.kind === "git-subdir") return draft.kind === "url" && draft.url.trim() === (source.url ?? "");
-  const next = sourceFromDraft(draft);
+  const next = sourceFromDraft(entry, draft);
   if (next.kind !== source.kind) return false;
   if (next.kind === "github") return next.repo === (source.repo ?? "");
   if (next.kind === "directory") return next.path === (source.path ?? "");
   return next.url === (source.url ?? "");
 }
 
-/** The request carrying exactly what changed, or null when nothing did. */
+/** The request carrying exactly what changed, or null when nothing did. An
+ * emptied field is nothing changed rather than a change to nothing: the
+ * server ignores an empty newName and cannot fetch an empty source. */
 export function marketplaceEditParams(entry: MarketplaceEntry, draft: MarketplaceDraft): MarketplaceEditParams | null {
   const params: MarketplaceEditParams = { name: entry.name };
   let changed = false;
   const name = draft.name.trim();
-  if (name !== entry.name) {
+  if (name && name !== entry.name) {
     params.newName = name;
     changed = true;
   }
-  if (!sourceUnchanged(entry, draft)) {
-    params.source = sourceFromDraft(draft);
+  if (draftValue(draft) && !sourceUnchanged(entry, draft)) {
+    params.source = sourceFromDraft(entry, draft);
     changed = true;
   }
   return changed ? params : null;
