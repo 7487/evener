@@ -944,6 +944,9 @@ func TestSessionRecoveryRejectsOldActionsAfterExplicitResume(t *testing.T) {
 	cfg := hubcore.WebConfig{ResumeLocks: hubcore.NewResumeLocks()}
 	oldEpoch := sessionRecoveryState(cfg, "local:stable", "").Epoch
 	finish := cfg.ResumeLocks.BeginForceStop([]string{"stable", "current"})
+	if err := cfg.ResumeLocks.PersistForceStop([]string{"stable", "current"}, "current"); err != nil {
+		t.Fatal(err)
+	}
 	finish(true)
 	epoch := sessionRecoveryState(cfg, "local:current", "").Epoch
 	if err := cfg.ResumeLocks.ExplicitResumeCompleted("current", epoch); err != nil {
@@ -970,6 +973,9 @@ func TestTurnStartDoesNotRetryRecoveryRejectionAfterExplicitResume(t *testing.T)
 	const ref = "local:recovery-waiter"
 	oldEpoch := sessionRecoveryState(cfg, ref, "").Epoch
 	finish := cfg.ResumeLocks.BeginForceStop([]string{"recovery-waiter"})
+	if err := cfg.ResumeLocks.PersistForceStop([]string{"recovery-waiter"}, "recovery-waiter"); err != nil {
+		t.Fatal(err)
+	}
 	finish(true)
 	if err := cfg.ResumeLocks.ExplicitResumeCompleted("recovery-waiter", cfg.ResumeLocks.RecoveryState("recovery-waiter").Epoch); err != nil {
 		t.Fatal(err)
@@ -1150,11 +1156,17 @@ func TestRecoveryAdmissionUsesNativeTargetAndPreservesRetryEpoch(t *testing.T) {
 				t.Fatalf("admission=%+v present=%v", admission, ok)
 			}
 			other := cfg.ResumeLocks.BeginForceStop([]string{"unrelated"})
+			if err := cfg.ResumeLocks.PersistForceStop([]string{"unrelated"}, "unrelated"); err != nil {
+				t.Fatal(err)
+			}
 			other(true)
 			if err := sessionActionRecoveryError(t.Context(), cfg, "", tc.target, sessionRequestRecoveryEpoch(ctx, cfg, "", tc.target)); err != nil {
 				t.Fatalf("another session invalidated this admission: %v", err)
 			}
 			finish := cfg.ResumeLocks.BeginForceStop([]string{tc.target})
+			if err := cfg.ResumeLocks.PersistForceStop([]string{tc.target}, tc.target); err != nil {
+				t.Fatal(err)
+			}
 			finish(true)
 			if err := cfg.ResumeLocks.ExplicitResumeCompleted(tc.target, cfg.ResumeLocks.RecoveryState(tc.target).Epoch); err != nil {
 				t.Fatal(err)
@@ -1214,6 +1226,9 @@ func TestSandboxApprovalCannotCrossSessionRecovery(t *testing.T) {
 					ctx = admitSessionRecovery(ctx, cfg, message)
 				}
 				finish := cfg.ResumeLocks.BeginForceStop([]string{"owner"})
+				if err := cfg.ResumeLocks.PersistForceStop([]string{"owner"}, "owner"); err != nil {
+					t.Fatal(err)
+				}
 				finish(true)
 				if err := cfg.ResumeLocks.ExplicitResumeCompleted("owner", cfg.ResumeLocks.RecoveryState("owner").Epoch); err != nil {
 					t.Fatal(err)
@@ -1272,6 +1287,9 @@ func TestCapturedSessionActionsRejectAdmissionBeforeRecovery(t *testing.T) {
 			}
 			ctx := admitSessionRecovery(t.Context(), cfg, appwire.RequestMessage(appwire.NewIntID(1), method, params))
 			finish := cfg.ResumeLocks.BeginForceStop([]string{"admitted-session"})
+			if err := cfg.ResumeLocks.PersistForceStop([]string{"admitted-session"}, "admitted-session"); err != nil {
+				t.Fatal(err)
+			}
 			finish(true)
 			if err := cfg.ResumeLocks.ExplicitResumeCompleted("admitted-session", cfg.ResumeLocks.RecoveryState("admitted-session").Epoch); err != nil {
 				t.Fatal(err)
@@ -1342,6 +1360,9 @@ func TestConnectionRecoveryFenceIncludesUnreadActionsAndConnectionsBornDuringSto
 	before := admitSessionConnection(t.Context(), cfg)
 	finish := cfg.ResumeLocks.BeginForceStop([]string{"stable", "current"})
 	during := admitSessionConnection(t.Context(), cfg)
+	if err := cfg.ResumeLocks.PersistForceStop([]string{"stable", "current"}, "current"); err != nil {
+		t.Fatal(err)
+	}
 	finish(true)
 	if err := cfg.ResumeLocks.ExplicitResumeCompleted("stable", cfg.ResumeLocks.RecoveryState("stable").Epoch); err != nil {
 		t.Fatal(err)
@@ -1378,6 +1399,9 @@ func TestConnectionRecoveryFenceIncludesUnreadActionsAndConnectionsBornDuringSto
 		t.Fatal("fresh connection remained stale")
 	}
 	finish = cfg.ResumeLocks.BeginForceStop([]string{"current"})
+	if err := cfg.ResumeLocks.PersistForceStop([]string{"current"}, "current"); err != nil {
+		t.Fatal(err)
+	}
 	finish(true)
 	fresh = admitSessionConnection(t.Context(), cfg)
 	if _, err := hubThreadAutoResume(fresh, cfg, appsource.NewRegistry(), appwire.ThreadResumeParams{Session: "current"}); err == nil {

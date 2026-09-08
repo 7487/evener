@@ -411,3 +411,57 @@ func TestRecoveryTargetSurvivesPartialGroupOverlap(t *testing.T) {
 		t.Fatal("old clear changed newer target")
 	}
 }
+
+func TestFailedOverlappingStopPreservesCommittedGroup(t *testing.T) {
+	for _, renamed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before rename", true: "after rename"}[renamed], func(t *testing.T) {
+			locks, err := NewPersistentResumeLocks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			finish := locks.BeginForceStop([]string{"A", "B"})
+			if err := locks.PersistForceStop([]string{"A", "B"}, "B"); err != nil {
+				t.Fatal(err)
+			}
+			finish(true)
+			oldEpoch := locks.RecoveryState("B").Epoch
+			finish = locks.BeginForceStop([]string{"B", "C"})
+			boom := errors.New("disk failure")
+			if renamed {
+				locks.store.faults.AfterRename = func() error { return boom }
+			} else {
+				locks.store.faults.BeforeRename = func() error { return boom }
+			}
+			if err := locks.PersistForceStop([]string{"B", "C"}, "C"); !errors.Is(err, boom) {
+				t.Fatalf("write error=%v", err)
+			}
+			finish(false)
+			wantTarget := "B"
+			if renamed {
+				wantTarget = "C"
+			}
+			if got := locks.RecoveryState("B").ResumeSessionID; got != wantTarget {
+				t.Fatalf("committed target=%q want=%q", got, wantTarget)
+			}
+			if got := locks.RecoveryState("C").ResumeRequired; got != renamed {
+				t.Fatalf("overlapping obligation=%v want=%v", got, renamed)
+			}
+			locks.store.faults = recoveryStoreFaults{}
+			if err := locks.ExplicitResumeCompleted("B", oldEpoch); err != nil {
+				t.Fatal(err)
+			}
+			if !locks.RecoveryState("B").ResumeRequired {
+				t.Fatal("old epoch cleared recovery")
+			}
+			if err := locks.ExplicitResumeCompleted("B", locks.RecoveryState("B").Epoch); err != nil {
+				t.Fatal(err)
+			}
+			if got := locks.RecoveryState("A").ResumeRequired; got != renamed {
+				t.Fatalf("original group obligation=%v want=%v", got, renamed)
+			}
+			if locks.RecoveryState("C").ResumeRequired {
+				t.Fatal("new group alias remained after its resume")
+			}
+		})
+	}
+}

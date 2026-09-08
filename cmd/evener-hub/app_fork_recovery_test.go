@@ -25,6 +25,9 @@ func TestForkRespectsSourceRecoveryAdmission(t *testing.T) {
 			}
 			queued := admitSessionRecovery(t.Context(), cfg, appwire.RequestMessage(appwire.NewIntID(1), appwire.MethodThreadFork, params))
 			finish := locks.BeginForceStop([]string{parent})
+			if err := locks.PersistForceStop([]string{parent}, parent); err != nil {
+				t.Fatal(err)
+			}
 			assertBlocked := func() {
 				t.Helper()
 				if _, err := hubThreadFork(queued, cfg, nil, params); !isSessionRecoveryAdmissionError(err) {

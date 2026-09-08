@@ -268,6 +268,9 @@ func TestResumeIgnoresOnlyVerifiedExitedTranscriptClaims(t *testing.T) {
 			// A previous force-stop and Resume obligation is already cleared. A later
 			// daemon clear keeps the workspace alias but advances its current transcript.
 			finish := cfg.ResumeLocks.BeginForceStop([]string{"stable", "old"})
+			if err := cfg.ResumeLocks.PersistForceStop([]string{"stable", "old"}, "old"); err != nil {
+				t.Fatal(err)
+			}
 			finish(true)
 			if err := cfg.ResumeLocks.ExplicitResumeCompleted("stable", cfg.ResumeLocks.RecoveryState("stable").Epoch); err != nil {
 				t.Fatal(err)
@@ -586,6 +589,9 @@ func TestResumeRejectsCompletedRedirectCycle(t *testing.T) {
 	locks := hubcore.NewResumeLocks()
 	for _, pair := range [][2]string{{"A", "B"}, {"B", "C"}, {"C", "A"}} {
 		finish := locks.BeginForceStop([]string{pair[0]})
+		if err := locks.PersistForceStop([]string{pair[0]}, pair[0]); err != nil {
+			t.Fatal(err)
+		}
 		finish(true)
 		epoch := locks.RecoveryState(pair[0]).Epoch
 		if err := locks.ExplicitResumeCompleted(pair[0], epoch); err != nil {
@@ -863,6 +869,9 @@ func TestRepeatedRecoveryRetainsCrashMarkersAndPendingGroups(t *testing.T) {
 func TestCompletedSelfTargetDoesNotOverrideUnresolvedExitedSuccessor(t *testing.T) {
 	locks := hubcore.NewResumeLocks()
 	finish := locks.BeginForceStop([]string{"A", "B"})
+	if err := locks.PersistForceStop([]string{"A", "B"}, "B"); err != nil {
+		t.Fatal(err)
+	}
 	finish(true)
 	epoch := locks.RecoveryState("A").Epoch
 	if err := locks.ExplicitResumeCompleted("A", epoch); err != nil {
@@ -882,5 +891,47 @@ func TestCompletedSelfTargetDoesNotOverrideUnresolvedExitedSuccessor(t *testing.
 	}
 	if launches != 0 {
 		t.Fatalf("completed self-target launched superseded B %d times", launches)
+	}
+}
+
+func TestFailedForceStopPreservesCompletedRoutingAfterMarkerRemoval(t *testing.T) {
+	locks := hubcore.NewResumeLocks()
+	finish := locks.BeginForceStop([]string{"stable", "current"})
+	if err := locks.PersistForceStop([]string{"stable", "current"}, "current"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	epoch := locks.RecoveryState("stable").Epoch
+	if err := locks.ExplicitResumeCompleted("stable", epoch); err != nil {
+		t.Fatal(err)
+	}
+	locks.RecordResolvedSession("stable", "current", epoch)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+		cancel()
+		return nil, daemonprocess.ErrExited
+	})}
+	entry := rendezvous.Entry{PID: 101, SessionID: "current", ThreadID: "current", WorkspaceRef: "local:stable"}
+	writeRendezvous(t, cfg.RunDir, entry)
+	if err := forceStopThread(ctx, cfg, appwire.ThreadForceStopParams{Ref: "local:stable"}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stop error=%v", err)
+	}
+	if err := rendezvous.Remove(cfg.RunDir, entry.PID); err != nil {
+		t.Fatal(err)
+	}
+	launches := 0
+	cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		launches++
+		if req.SessionID != "current" {
+			t.Errorf("launched superseded target %q", req.SessionID)
+		}
+		return rendezvous.Entry{}, errors.New("launcher observed")
+	}}
+	for _, alias := range []string{"stable", "current"} {
+		_, _ = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:" + alias})
+	}
+	if launches != 2 {
+		t.Fatalf("failed stop lost completed routing: launches=%d", launches)
 	}
 }

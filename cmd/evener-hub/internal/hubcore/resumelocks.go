@@ -85,8 +85,10 @@ func (r *ResumeLocks) PersistForceStop(aliases []string, sessionID string) error
 		if r.recovery == nil {
 			r.recovery = make(map[string]SessionRecoveryState)
 		}
+		group := &sessionRecoveryGroup{aliases: slices.Clone(aliases)}
 		for _, alias := range aliases {
 			state := r.recovery[alias]
+			state.group = group
 			state.ResumeRequired = true
 			state.durableGroup = id
 			state.ResumeSessionID = sessionID
@@ -183,20 +185,19 @@ func (r *ResumeLocks) RecoverySequence() uint64 {
 }
 
 // BeginForceStop blocks new actions and invalidates existing ownership waiters.
-// A failed stop releases the active fence without declaring the session stopped.
+// Temporary fences preserve committed alias routing. PersistForceStop installs
+// a new group only once its recovery authority may have reached durable storage.
 func (r *ResumeLocks) BeginForceStop(aliases []string) func(bool) {
 	r.mu.Lock()
 	if r.recovery == nil {
 		r.recovery = make(map[string]SessionRecoveryState)
 	}
 	r.sequence++
-	group := &sessionRecoveryGroup{aliases: append([]string(nil), aliases...)}
 	for _, id := range aliases {
 		state := r.recovery[id]
 		state.Epoch++
 		state.LastRecoverySequence = r.sequence
 		state.Stopping++
-		state.group = group
 		r.recovery[id] = state
 	}
 	r.mu.Unlock()

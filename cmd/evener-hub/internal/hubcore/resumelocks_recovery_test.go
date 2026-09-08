@@ -7,9 +7,15 @@ func TestExplicitResumePreservesNewerAliasRecovery(t *testing.T) {
 		t.Run(map[bool]string{false: "during exit", true: "after exit"}[complete], func(t *testing.T) {
 			locks := NewResumeLocks()
 			finishOld := locks.BeginForceStop([]string{"A", "B"})
+			if err := locks.PersistForceStop([]string{"A", "B"}, "B"); err != nil {
+				t.Fatal(err)
+			}
 			finishOld(true)
 			epochA := locks.RecoveryState("A").Epoch
 			finishNew := locks.BeginForceStop([]string{"B", "C"})
+			if err := locks.PersistForceStop([]string{"B", "C"}, "C"); err != nil {
+				t.Fatal(err)
+			}
 			if complete {
 				finishNew(true)
 			}
@@ -58,6 +64,9 @@ func TestResolvedSessionMappingRequiresCompletedCurrentEpoch(t *testing.T) {
 		t.Fatal("completed target was not shared across aliases")
 	}
 	newer := locks.BeginForceStop([]string{"stable", "next"})
+	if err := locks.PersistForceStop([]string{"stable", "next"}, "next"); err != nil {
+		t.Fatal(err)
+	}
 	newer(true)
 	locks.RecordResolvedSession("stable", "current", epoch)
 	if locks.ResolvedSessionID("stable") != "" {
