@@ -2,10 +2,12 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { FakeClient } from "../../../../protocol/testing/fakeClient";
-import type { InstanceEntry } from "../../../../protocol/types.gen";
+import type { InstanceEntry, ProviderDescriptor } from "../../../../protocol/types.gen";
 import { connectionStore } from "../../../../stores/connection";
 import { credentialsStore, resetCredentialsStoreForTests } from "../../../../stores/credentials";
-import { InstanceDetailSheet } from "./InstanceDetailSheet";
+import { Toast } from "../../../../widgets";
+import { getToasts, resetToastStoreForTests } from "../../../../widgets/toast/store";
+import { InstanceSheet } from "./InstanceSheet";
 
 function instance(overrides: Partial<InstanceEntry> & Pick<InstanceEntry, "name" | "providerId">): InstanceEntry {
   return {
@@ -26,7 +28,7 @@ function noopHandlers() {
     onSetApiKey: vi.fn(),
     onSetCredentialJson: vi.fn(),
     onOAuthStart: vi.fn(),
-    onEdit: vi.fn(),
+    onRenamed: vi.fn(),
     onClear: vi.fn(),
     onClearStoredKey: vi.fn(),
     onRemove: vi.fn(),
@@ -34,17 +36,27 @@ function noopHandlers() {
   };
 }
 
-function renderSheet(inst: InstanceEntry | null, extra: Partial<Parameters<typeof InstanceDetailSheet>[0]> = {}) {
+function renderSheet(
+  inst: InstanceEntry | null,
+  extra: Partial<Parameters<typeof InstanceSheet>[0]> = {},
+  providers: ProviderDescriptor[] = [],
+) {
   const handlers = noopHandlers();
   const onClose = vi.fn();
-  credentialsStore.setState({ instances: inst === null ? [] : [inst] });
-  render(<InstanceDetailSheet name={inst?.name ?? null} onClose={onClose} {...handlers} {...extra} />);
+  credentialsStore.setState({ instances: inst === null ? [] : [inst], availableProviders: providers });
+  render(
+    <>
+      <Toast />
+      <InstanceSheet name={inst?.name ?? null} onClose={onClose} {...handlers} {...extra} />
+    </>,
+  );
   return { handlers, onClose };
 }
 
 beforeEach(() => {
   connectionStore.setState({ state: "idle", serverInfo: undefined, client: null });
   resetCredentialsStoreForTests();
+  resetToastStoreForTests();
   const fake = new FakeClient("ready");
   connectionStore.getState().connect(fake);
 });
@@ -141,33 +153,6 @@ describe("credential display", () => {
   });
 });
 
-describe("the meta table", () => {
-  test("shows the instance's provider and its protocol/base URL", () => {
-    renderSheet(
-      instance({
-        name: "a",
-        providerId: "openai",
-        protocol: "openai-responses",
-        baseUrl: "https://x",
-        hasStoredFile: true,
-        activeSource: "store",
-      }),
-    );
-    expect(screen.getByText("Provider")).toBeTruthy();
-    expect(screen.getByText("openai")).toBeTruthy();
-    expect(screen.getByText("openai-responses · base https://x")).toBeTruthy();
-  });
-
-  // protocol has no omitempty on the wire, so the API row always has
-  // something to show.
-  test("the API row shows the protocol alone when no base URL is set", () => {
-    renderSheet(
-      instance({ name: "a", providerId: "x", protocol: "openai-chat", hasStoredFile: true, activeSource: "store" }),
-    );
-    expect(screen.getByText("openai-chat")).toBeTruthy();
-  });
-});
-
 describe("actions are conditionally rendered", () => {
   test("Set key only when authModes includes apiKey", () => {
     renderSheet(instance({ name: "a", providerId: "x", authModes: ["oauth"] }));
@@ -239,18 +224,17 @@ describe("actions are conditionally rendered", () => {
     expect(screen.queryByRole("button", { name: "Clear stored key" })).toBeNull();
   });
 
-  test("Edit and Remove are both offered for a non-implicit instance", () => {
+  test("Remove is offered for a non-implicit instance", () => {
     renderSheet(instance({ name: "a", providerId: "x" }));
-    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
   });
 
   // Removing an implicit instance is refused server-side (spec §11.3), so
-  // the sheet must not even offer the button; Edit stays, since editing an
-  // implicit instance writes a shadow rather than changing it.
-  test("an implicit instance offers Edit but no Remove", () => {
+  // the sheet must not even offer the button; the form stays, since editing
+  // an implicit instance writes a shadow rather than changing it.
+  test("an implicit instance offers the form but no Remove", () => {
     renderSheet(instance({ name: "groq", providerId: "groq", implicit: true }));
-    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect(screen.getByLabelText("Base URL")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
   });
 
@@ -412,8 +396,6 @@ describe("action callbacks fire", () => {
     expect(handlers.onSetApiKey).toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Clear" }));
     expect(handlers.onClear).toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    expect(handlers.onEdit).toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Remove" }));
     expect(handlers.onRemove).toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: /make default/i }));
@@ -454,7 +436,6 @@ describe("action callbacks fire", () => {
   test("pending verification disables only the Test credentials action", () => {
     renderSheet(instance({ name: "a", providerId: "x" }), { testCredentialsPending: true });
     expect((screen.getByRole("button", { name: "Testing credentials…" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Edit" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -481,9 +462,8 @@ describe("action callbacks fire", () => {
 // credentials store or an OAuth record, never providers.toml, so they stay
 // live.
 describe("writesRefused disables instance-CRUD actions only", () => {
-  test("disables Edit, Remove, and make default", () => {
+  test("disables Remove and make default", () => {
     renderSheet(instance({ name: "a", providerId: "x", isDefault: false }), { writesRefused: true });
-    expect((screen.getByRole("button", { name: "Edit" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /make default/i }) as HTMLButtonElement).disabled).toBe(true);
   });
@@ -514,5 +494,237 @@ describe("writesRefused disables instance-CRUD actions only", () => {
   test("an implicit instance under writesRefused still has no Remove button at all", () => {
     renderSheet(instance({ name: "groq", providerId: "groq", implicit: true }), { writesRefused: true });
     expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+  });
+});
+
+describe("the form", () => {
+  const OPENAI: ProviderDescriptor = { id: "openai", protocol: "openai-chat", auth: "bearer", implicit: true };
+  // BASE_URL's key differs from its label on purpose: a template var is
+  // KEYED by placeholder name and LABELLED by the env var name the docs tell
+  // users to set. With key == label everywhere, a component that mixed the
+  // two up would still pass (real templates differ - see vars_env in
+  // llm/registry/data/providers_overlay.toml).
+  const VERTEX: ProviderDescriptor = {
+    id: "google-vertex-anthropic",
+    protocol: "anthropic",
+    auth: "gcp-adc",
+    implicit: true,
+    vars: {
+      GOOGLE_VERTEX_PROJECT: "GOOGLE_VERTEX_PROJECT",
+      GOOGLE_VERTEX_LOCATION: "GOOGLE_VERTEX_LOCATION",
+      BASE_URL: "GOOGLE_VERTEX_BASE_URL",
+    },
+  };
+  const WORK = instance({
+    name: "work",
+    providerId: "openai",
+    protocol: "openai-responses",
+    surface: "generic",
+    baseUrl: "https://gw.example.test/v1",
+    apiKeyEnv: "PORTKEY_KEY",
+    credentialHeader: "Authorization=Bearer $PORTKEY_KEY",
+    hasStoredFile: true,
+    activeSource: "store",
+  });
+
+  function field(label: string): HTMLInputElement {
+    return screen.getByLabelText(label) as HTMLInputElement;
+  }
+  function select(label: string): HTMLSelectElement {
+    return screen.getByLabelText(label) as HTMLSelectElement;
+  }
+  function saveButton(): HTMLButtonElement {
+    return screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  }
+
+  test("prefills every field from the instance and shows the base provider as a fact", () => {
+    renderSheet(WORK, {}, [OPENAI]);
+    expect(field("Name").value).toBe("work");
+    expect(field("Base URL").value).toBe("https://gw.example.test/v1");
+    expect(select("Protocol").value).toBe("openai-responses");
+    expect(select("Surface").value).toBe("generic");
+    expect(field("API key environment variable").value).toBe("PORTKEY_KEY");
+    expect(field("Credential header").value).toBe("Authorization=Bearer $PORTKEY_KEY");
+    // "openai" is also a Surface option's text, so read the meta row's value cell.
+    expect(screen.getByText("Base provider").nextElementSibling?.textContent).toBe("openai");
+  });
+
+  test("renders one input per base-provider variable, labelled by env var name, plus authored extras", () => {
+    renderSheet(
+      instance({ name: "v", providerId: "google-vertex-anthropic", vars: { GOOGLE_VERTEX_PROJECT: "p1", EXTRA: "e" } }),
+      {},
+      [VERTEX],
+    );
+    expect(field("GOOGLE_VERTEX_PROJECT").value).toBe("p1");
+    expect(field("GOOGLE_VERTEX_LOCATION").value).toBe("");
+    expect(field("EXTRA").value).toBe("e");
+    // Labelled by env var name, keyed by template name: the row exists under
+    // the label, and nothing renders under the bare key.
+    expect(field("GOOGLE_VERTEX_BASE_URL").value).toBe("");
+    expect(screen.queryByLabelText("BASE_URL")).toBeNull();
+  });
+
+  test("a template var whose key differs from its label is sent under the KEY", async () => {
+    const V = instance({ name: "v", providerId: "google-vertex-anthropic" });
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", (params) => {
+      expect(params).toEqual({ name: "v", vars: { BASE_URL: "https://vx.example.test" } });
+      return { instances: [V], availableProviders: [VERTEX] };
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(V, {}, [VERTEX]);
+    const user = userEvent.setup();
+    await user.type(field("GOOGLE_VERTEX_BASE_URL"), "https://vx.example.test");
+    await user.click(saveButton());
+    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+  });
+
+  test("Save is disabled until a field changes, and while writesRefused", async () => {
+    renderSheet(WORK, {}, [OPENAI]);
+    expect(saveButton().disabled).toBe(true);
+    const user = userEvent.setup();
+    await user.type(field("Base URL"), "/x");
+    expect(saveButton().disabled).toBe(false);
+
+    cleanup();
+    renderSheet(WORK, { writesRefused: true }, [OPENAI]);
+    await user.type(field("Base URL"), "/x");
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  test("an implicit instance's Name is disabled with the environment note", () => {
+    renderSheet(instance({ name: "groq", providerId: "groq", implicit: true }));
+    expect(field("Name").disabled).toBe(true);
+    expect(screen.getByText(/comes from the environment/)).toBeTruthy();
+  });
+
+  test("changing the name shows the rename note", async () => {
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+    expect(screen.getByText(/reference "work" keep the old name/)).toBeTruthy();
+  });
+
+  test("Save sends only the changed fields", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", (params) => {
+      expect(params).toEqual({ name: "work", baseUrl: "https://gw.example.test/v1/x" });
+      return { instances: [{ ...WORK, baseUrl: "https://gw.example.test/v1/x" }], availableProviders: [OPENAI] };
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Base URL"), "/x");
+    await user.click(saveButton());
+    await waitFor(() => expect(getToasts().some((t) => t.text === "Saved work")).toBe(true));
+    expect(fake.calls.filter((c) => c.method === "evener/instance/edit")).toHaveLength(1);
+    // Reseeded from the refreshed instance: clean again.
+    expect(saveButton().disabled).toBe(true);
+    expect(field("Base URL").value).toBe("https://gw.example.test/v1/x");
+  });
+
+  test("emptying Base URL shows the reset note and sends clearBaseUrl", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", (params) => {
+      expect(params).toEqual({ name: "work", clearBaseUrl: true });
+      return { instances: [WORK], availableProviders: [OPENAI] };
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.clear(field("Base URL"));
+    expect(screen.getByText("Resets the endpoint to the provider's default.")).toBeTruthy();
+    await user.click(saveButton());
+    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+  });
+
+  test("choosing inherit from base sends clearProtocol", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", (params) => {
+      expect(params).toEqual({ name: "work", clearProtocol: true });
+      return { instances: [WORK], availableProviders: [OPENAI] };
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.selectOptions(select("Protocol"), "");
+    await user.click(saveButton());
+    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+  });
+
+  test("emptying a var sends it empty so the hub deletes it", async () => {
+    const V = instance({ name: "v", providerId: "google-vertex-anthropic", vars: { GOOGLE_VERTEX_PROJECT: "p1" } });
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", (params) => {
+      expect(params).toEqual({ name: "v", vars: { GOOGLE_VERTEX_PROJECT: "" } });
+      return { instances: [V], availableProviders: [VERTEX] };
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(V, {}, [VERTEX]);
+    const user = userEvent.setup();
+    await user.clear(field("GOOGLE_VERTEX_PROJECT"));
+    await user.click(saveButton());
+    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+  });
+
+  test("a credential header without $ is refused inline, with no RPC", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => {
+      throw new Error("must not be called");
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.clear(field("Credential header"));
+    await user.type(field("Credential header"), "Authorization=Bearer sk-literal");
+    await user.click(saveButton());
+    expect(screen.getByRole("alert").textContent).toContain("$VARIABLE");
+    expect(fake.calls.filter((c) => c.method === "evener/instance/edit")).toHaveLength(0);
+  });
+
+  test("an emptied name is refused inline, with no RPC", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => {
+      throw new Error("must not be called");
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.clear(field("Name"));
+    await user.type(field("Base URL"), "/x");
+    await user.click(saveButton());
+    expect(screen.getByRole("alert").textContent).toContain("Name cannot be empty");
+    expect(fake.calls.filter((c) => c.method === "evener/instance/edit")).toHaveLength(0);
+  });
+
+  test("a failed save shows the error inline and toasts Save failed", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => {
+      throw new Error("providers.toml: write: read-only");
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Base URL"), "/x");
+    await user.click(saveButton());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("read-only"));
+    expect(getToasts().some((t) => t.text.startsWith("Save failed"))).toBe(true);
+    expect(field("Base URL").value).toBe("https://gw.example.test/v1/x");
+  });
+
+  test("a rename toasts the new name, calls onRenamed, and does not close the sheet", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", (params) => {
+      expect(params).toEqual({ name: "work", newName: "work2" });
+      return { instances: [{ ...WORK, name: "work2" }], availableProviders: [OPENAI] };
+    });
+    connectionStore.getState().connect(fake);
+    const { handlers, onClose } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+    await user.click(saveButton());
+    await waitFor(() => expect(handlers.onRenamed).toHaveBeenCalledWith("work2"));
+    expect(getToasts().some((t) => t.text === "Saved work2")).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
