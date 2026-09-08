@@ -377,7 +377,7 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 			}
 			state := cfg.ResumeLocks.RecoveryState(id)
 			if state.Epoch != epochs[id] || state.Stopping > 0 || (automatic && state.ResumeRequired) {
-				return appwire.ThreadResumeResponse{}, appwire.Unavailable("session recovery requires a fresh explicit thread/resume request")
+				return appwire.ThreadResumeResponse{}, sessionRecoveryAdmissionError{appwire.Unavailable("session recovery requires a fresh explicit thread/resume request")}
 			}
 		}
 		currentTarget, currentAliases, err := resumeOwnership(cfg, requestedID, requestedRefID)
@@ -768,9 +768,13 @@ func hubThreadFork(ctx context.Context, cfg hubcore.WebConfig, sources *appsourc
 			return source.ForkThread(ctx, params)
 		})
 	}
+	epoch := sessionRequestRecoveryEpoch(ctx, cfg, params.Ref, ref.ThreadID)
 	unlockDeletionTarget := lockDeletionTarget(cfg, params.Ref, ref.ThreadID)
 	defer unlockDeletionTarget()
 	if err := deletionFenceError(cfg, params.Ref, ref.ThreadID, ""); err != nil {
+		return appwire.ThreadForkResponse{}, err
+	}
+	if err := sessionActionRecoveryError(ctx, cfg, params.Ref, ref.ThreadID, epoch); err != nil {
 		return appwire.ThreadForkResponse{}, err
 	}
 	if params.Aside {
