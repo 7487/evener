@@ -1,6 +1,7 @@
-// instanceDialogs.tsx: the 3 instance-CRUD editors (parity-m7-settings.md
-// §7d-§7f) - Add, Edit, and Set/Replace API key. Each owns its own client
-// validation, store call, inline error, and toast; the parent
+// instanceDialogs.tsx: the instance-CRUD editors that stay dialogs (spec
+// 2026-09-07 §2): Add, plus Set/Replace API key and credential JSON.
+// Editing an existing instance lives in InstanceSheet. Each owns its own
+// client validation, store call, inline error, and toast; the parent
 // (CredentialsSection) only needs to close the single open editor via
 // `onSuccess`/`onCancel` - it never has to distinguish success from failure
 // itself.
@@ -184,94 +185,6 @@ export function AddInstanceDialog({ availableProviders, onCancel, onSuccess }: A
         <div className={CLASS.actions}>
           <Button type="submit" disabled={busy}>
             Create
-          </Button>
-          <Button type="button" variant="quiet" onClick={onCancel} disabled={busy}>
-            Cancel
-          </Button>
-        </div>
-      </form>
-    </Dialog>
-  );
-}
-
-export interface EditInstanceDialogProps {
-  instance: InstanceEntry;
-  onCancel: () => void;
-  onSuccess: () => void;
-}
-
-/** The Edit form (parity-m7-settings.md §7e, updated for the registry's
- * instance shape): Base URL only, sent only when it actually changed.
- * InstanceEditParams also carries protocol/surface/vars overrides, but the
- * pane's only spec-mandated way to set those is the Add form's
- * provider-driven fields (spec §11.3 only calls out VarsEnv driving the add
- * form) - Edit's job is nudging an existing instance's endpoint, not
- * re-deriving its whole shape, and editing an implicit instance already
- * writes a shadow that carries only what changed here. */
-export function EditInstanceDialog({ instance, onCancel, onSuccess }: EditInstanceDialogProps) {
-  const [baseUrl, setBaseUrl] = useState(instance.baseUrl || "");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const toast = useToasts();
-  const active = useEditorLifetime();
-
-  // InstanceEditParams keeps baseUrl's old "empty means unchanged" meaning
-  // (v3, unchanged by #711) and adds clearBaseUrl as an additive clear
-  // signal: an old hub ignores the unknown field and treats the request as
-  // an ordinary no-op, never a silent wrong clear. Emptying a field that
-  // had a value takes that clear path below, so note what saving will do.
-  const trimmedBaseUrl = baseUrl.trim();
-  const displayedBaseUrl = instance.baseUrl || "";
-  const clearingBaseUrl = Boolean(instance.baseUrl) && trimmedBaseUrl === "";
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setError(null);
-    setBusy(true);
-    try {
-      await credentialsStore.getState().edit({
-        name: instance.name,
-        baseUrl: trimmedBaseUrl !== displayedBaseUrl && trimmedBaseUrl !== "" ? trimmedBaseUrl : undefined,
-        clearBaseUrl: clearingBaseUrl ? true : undefined,
-      });
-      if (!active.current) return;
-      toast.push("success", `Saved ${instance.name}`);
-      onSuccess();
-    } catch (err) {
-      if (!active.current) return;
-      const message = errorText(err);
-      setError(message);
-      toast.push("error", `Edit failed: ${message}`);
-    } finally {
-      if (active.current) setBusy(false);
-    }
-  }
-
-  return (
-    <Dialog open onClose={onCancel} title={`Edit ${instance.name}`}>
-      <form className={CLASS.body} onSubmit={(event) => void handleSubmit(event)}>
-        <FormRow label="Base URL (optional)" htmlFor="edit-instance-baseurl">
-          <Input
-            id="edit-instance-baseurl"
-            value={baseUrl}
-            onChange={(event) => setBaseUrl(event.target.value)}
-            placeholder="https://…"
-            disabled={busy}
-          />
-        </FormRow>
-        {clearingBaseUrl && (
-          <p className={CLASS.error} role="status">
-            Resets the endpoint to the provider's default.
-          </p>
-        )}
-        {error && (
-          <p className={CLASS.error} role="alert">
-            {error}
-          </p>
-        )}
-        <div className={CLASS.actions}>
-          <Button type="submit" disabled={busy}>
-            Save
           </Button>
           <Button type="button" variant="quiet" onClick={onCancel} disabled={busy}>
             Cancel
