@@ -518,6 +518,10 @@ func (s *Server) RecordDescendantAppEvent(ownerThreadID string, event events.Ses
 			s.mu.Unlock()
 			return nil
 		}
+		parentRef := s.appRef
+		if parentRef == "" {
+			parentRef = appwire.Ref{SourceID: sourceIDForProjection(s.appSourceID), ThreadID: ownerThreadID}.String()
+		}
 		projection := s.appDescendants[threadID]
 		if projection == nil {
 			sourceID := s.appSourceID
@@ -532,7 +536,7 @@ func (s *Server) RecordDescendantAppEvent(ownerThreadID string, event events.Ses
 					ID:        threadID,
 					SessionID: threadID,
 					Source:    sourceID,
-					Evener:    appwire.EvenerThread{Ref: ref, Kind: "subagent", ParentRef: appwire.Ref{SourceID: sourceID, ThreadID: ownerThreadID}.String()},
+					Evener:    appwire.EvenerThread{Ref: ref, Kind: "subagent", ParentRef: parentRef},
 				},
 			}
 			s.installCostLookup(projection.projector)
@@ -567,7 +571,7 @@ func (s *Server) RecordDescendantAppEvent(ownerThreadID string, event events.Ses
 					startSeed = currentWorkSeedWithoutTasks(startSeed)
 				}
 				mergeStartCurrentWork(&params.Thread.Evener, cachedTasks, projection.thread.Evener.Goal, startSeed)
-				params.Thread.Evener.ParentRef = appwire.Ref{SourceID: projection.thread.Source, ThreadID: ownerThreadID}.String()
+				params.Thread.Evener.ParentRef = parentRef
 				projection.thread = params.Thread
 				projection.thread.Evener.Kind = "subagent"
 				projection.thread.Evener.Tasks = cloneTaskAggregate(params.Thread.Evener.Tasks)
