@@ -488,3 +488,21 @@ test("a job-less watch card still shows no identity fields", () => {
   expect(screen.queryByTestId("notification-field-job-id")).toBeNull();
   expect(screen.queryByTestId("notification-field-watch-id")).toBeNull();
 });
+
+test("a watch card never labels the session source as a job id (RoboRev PR #954, finding M4)", () => {
+  render(
+    <NotificationCard
+      notification={notif({
+        type: "watch",
+        title: "Watch auto-cleared",
+        tone: "neutral",
+        secondary: "watch cleared: self matched 50 times",
+        jobId: "self",
+        prose: "watch cleared: self matched 50 times",
+        rawText:
+          '<job-notification job_id="self" event="watch" job_type="watch" status="watch" reason="watch cleared: self matched 50 times" output_bytes="0">watch cleared: self matched 50 times</job-notification>',
+      })}
+    />,
+  );
+  expect(screen.queryByTestId("notification-field-job-id")).toBeNull();
+});

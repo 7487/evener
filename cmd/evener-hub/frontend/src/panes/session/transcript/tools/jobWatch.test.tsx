@@ -182,7 +182,11 @@ test("list rows are buttons that expand the row's detail sentence (RoboRev PR #9
   render(<Body item={watchItem({ operation: "list" }, LIST_RAW)} live={false} />);
   const rows = screen.getAllByTestId("job-watch-row");
   expect(rows).toHaveLength(3);
-  for (const row of rows) expect(row.tagName).toBe("BUTTON");
+  // Only rows that CAN expand are buttons; the ended row is plain text
+  // (RoboRev PR #954 combined review: no focusable no-op controls).
+  expect(rows[0]!.tagName).toBe("BUTTON");
+  expect(rows[1]!.tagName).toBe("BUTTON");
+  expect(rows[2]!.tagName).not.toBe("BUTTON");
   // Detail hidden until tapped.
   expect(screen.queryByTestId("job-watch-row-detail")).toBeNull();
   await user.click(rows[1]!);
@@ -362,6 +366,9 @@ test("every list row form expands a detail sentence; no expandable row is a no-o
   );
   const rows = screen.getAllByTestId("job-watch-row");
   expect(rows).toHaveLength(3);
+  // Every expandable row opens its detail; static rows (none here — all
+  // three watch with parseable conditions) are never buttons.
+  for (const row of rows) expect(row.tagName).toBe("BUTTON");
   for (const [index, row] of rows.entries()) {
     await user.click(row);
     const details = screen.getAllByTestId("job-watch-row-detail");
@@ -628,4 +635,174 @@ test("a progress-only create summarizes the heartbeat (finding F)", () => {
     fired: false,
   };
   expect(d.summary(watchItem({ operation: "create" }, raw))).toBe("Watch job_a1b2 · every 2m");
+});
+
+// --- RoboRev PR #954 combined review (ba9a9d0): watch-state honesty ---------
+// The producer's inspect grammar (agent/session_tools_jobs.go
+// formatJobWatchInspect) is three-way: watching; end_reason set (ended);
+// source set without end_reason (pending — a detached watch still holding
+// frames); neither (not found). "ended" for all three misreports pending
+// watches and invents an ending for missing ones.
+
+test("inspect summary distinguishes pending from ended (finding M1)", () => {
+  const d = toolRendererFor("job_watch");
+  // Detached pending: source present, no end_reason — the terminal-flush rail
+  // still holds its frames, so it is not ended.
+  expect(
+    d.summary(
+      watchItem(
+        { operation: "inspect", watch_id: "watch_p" },
+        { watch_id: "watch_p", source: "job_a1b2", watching: false },
+      ),
+    ),
+  ).toBe("Inspected watch_p · pending");
+  // Truly ended: end_reason present.
+  expect(
+    d.summary(
+      watchItem(
+        { operation: "inspect", watch_id: "watch_e" },
+        { watch_id: "watch_e", source: "job_a1b2", watching: false, end_reason: "budget_exhausted" },
+      ),
+    ),
+  ).toBe("Inspected watch_e · ended");
+  // Missing: neither source nor end_reason — not an ending at all.
+  expect(
+    d.summary(watchItem({ operation: "inspect", watch_id: "watch_m" }, { watch_id: "watch_m", watching: false })),
+  ).toBe("Inspected watch_m · not found");
+});
+
+test("inspect body of a missing watch names no source (finding M1)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem({ operation: "inspect", watch_id: "watch_m" }, { watch_id: "watch_m", watching: false })}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("not found");
+  expect(body).not.toContain("this session");
+});
+
+test("inspect body of a pending watch reads pending, never ended (finding M1)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "inspect", watch_id: "watch_p" },
+        { watch_id: "watch_p", source: "job_a1b2", watching: false },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("pending");
+  expect(body).not.toContain("ended");
+});
+
+test("a pending list row chips pending and the summary counts it (finding M1)", () => {
+  const d = toolRendererFor("job_watch");
+  const raw = {
+    watches: [{ watch_id: "watch_p", source: "job_a1b2", watching: false }],
+    count: 1,
+  };
+  expect(d.summary(watchItem({ operation: "list" }, raw))).toBe("Listed watches (0 active · 1 pending)");
+  const Body = d.body!;
+  render(<Body item={watchItem({ operation: "list" }, raw)} live={false} />);
+  expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("pending");
+});
+
+// --- RoboRev PR #954 combined review (ba9a9d0): non-interactive rows --------
+// A row that cannot expand must not be a focusable <button> with a no-op
+// onClick: ended rows have no detail sentence, and neither do watching rows
+// whose condition parses to nothing.
+
+test("ended rows are not focusable buttons (finding M2)", async () => {
+  const user = userEvent.setup();
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(<Body item={watchItem({ operation: "list" }, LIST_RAW)} live={false} />);
+  const rows = screen.getAllByTestId("job-watch-row");
+  expect(rows).toHaveLength(3);
+  // The two watching rows stay buttons; the ended row is plain text.
+  expect(rows[0]!.tagName).toBe("BUTTON");
+  expect(rows[1]!.tagName).toBe("BUTTON");
+  expect(rows[2]!.tagName).not.toBe("BUTTON");
+  expect(rows[2]!.textContent ?? "").toContain("ended");
+  // Clicking the ended row opens nothing.
+  await user.click(rows[2]!);
+  expect(screen.queryByTestId("job-watch-row-detail")).toBeNull();
+});
+
+test("watching rows with unparsable conditions are not buttons (finding M2)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "list" },
+        {
+          watches: [{ watch_id: "watch_x", source: "self", watching: true, condition: "note: just a note" }],
+          count: 1,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const row = screen.getByTestId("job-watch-row");
+  expect(row.tagName).not.toBe("BUTTON");
+});
+
+// --- RoboRev PR #954 combined review (ba9a9d0): lows ------------------------
+// An unrecognized object raw ({} or a legacy/future shape) must fall back to
+// the raw footer text — never an empty card with a "Watch this session"
+// summary that invents state.
+
+test("an unrecognized object raw falls back to the raw footer (finding L2)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  const footer = "[watching self · something the future invented]";
+  render(<Body item={watchItem({ operation: "create" }, {}, footer)} live={false} />);
+  expect(screen.getByText(footer)).toBeTruthy();
+  expect(screen.queryByTestId("job-watch-body")).toBeNull();
+  expect(d.summary(watchItem({ operation: "create" }, {}))).toBe("job_watch: create");
+});
+
+test("a tool-only filter sentence reads matching with the tool named (finding L3)", () => {
+  // The dead ternary's two "matching" branches are collapsed to one path:
+  // a tool-only filter reads "makes a tool call matching on <tool>". (A bare
+  // filter with neither tool nor status cannot reach this sentence — with no
+  // status/tool the events branch wins first, or the row has no detail at
+  // all — so there is no second case to distinguish.)
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "create", source: "dlg_7Hk2" },
+        {
+          watch_id: "watch_toolonly",
+          source: "dlg_7Hk2",
+          watching: true,
+          events: ["assistant.tool"],
+          event_filter: { tool_name: "read_file" },
+          replaced_existing: false,
+          fired: false,
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("matching");
+  expect(body).toContain("read_file");
+});
+
+test("an inspect with no id falls back to the operation verb (finding L4)", () => {
+  const d = toolRendererFor("job_watch");
+  expect(d.summary(watchItem({ operation: "inspect" }, { source: "job_a1b2", watching: true }))).toBe(
+    "job_watch: inspect",
+  );
 });

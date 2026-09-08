@@ -143,7 +143,11 @@ function NotificationMetadata({ notification }: { notification: ParsedNotificati
   // card's one identity line, labelled as what it is (never a watch id),
   // with every echo field still suppressed. A job-less watch names nothing.
   if (notification.type === "watch") {
-    if (!notification.jobId) return null;
+    // "self" is the watch SOURCE vocabulary (watchPublicSource), never a job
+    // id — a job-targeted fire carries a concrete job_* id. If a sentinel
+    // ever lands in the job id slot, it names the session, not a job, so it
+    // must not render as "Job id: self" (RoboRev PR #954 combined review).
+    if (!notification.jobId || notification.jobId === "self") return null;
     return (
       <div className={CLASS.metadata}>
         <Field key="job-id" label="Job id" value={notification.jobId} testId="notification-field-job-id" />

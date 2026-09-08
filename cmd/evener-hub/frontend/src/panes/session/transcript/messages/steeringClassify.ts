@@ -328,19 +328,36 @@ function titleForJobNotification(attrs: Record<string, string>, type: string, pr
 // canonical humanizeSeconds/humanizeInterval, but this file is a message
 // parser and must not import a tool renderer for one of its descriptors —
 // the parser stays independent of any single tool's rendering layer — so the
-// tiny minutes math is duplicated here instead of cross-imported.
+// tiny minutes math is duplicated here instead of cross-imported. The hour
+// branch matches the renderer's grammar (whole hours "1h", else "1h05m") so
+// a day-long timer never reads "after 1440m" (RoboRev PR #954 combined
+// review: valid timers run to 86,400s).
 function humanizeTimerAfter(totalSeconds: number): string {
   if (totalSeconds < 60) return `after ${Math.round(totalSeconds)}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const leftover = Math.round(totalSeconds % 60);
-  return leftover === 0 ? `after ${minutes}m` : `after ${minutes}m${String(leftover).padStart(2, "0")}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const leftoverSeconds = Math.round(totalSeconds % 60);
+  if (totalMinutes < 60) {
+    return leftoverSeconds === 0
+      ? `after ${totalMinutes}m`
+      : `after ${totalMinutes}m${String(leftoverSeconds).padStart(2, "0")}s`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `after ${hours}h` : `after ${hours}h${String(minutes).padStart(2, "0")}m`;
 }
 
 function humanizeTimerEvery(totalSeconds: number): string {
   if (totalSeconds < 60) return `every ${Math.round(totalSeconds)}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const leftover = Math.round(totalSeconds % 60);
-  return leftover === 0 ? `every ${minutes}m` : `every ${minutes}m${String(leftover).padStart(2, "0")}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const leftoverSeconds = Math.round(totalSeconds % 60);
+  if (totalMinutes < 60) {
+    return leftoverSeconds === 0
+      ? `every ${totalMinutes}m`
+      : `every ${totalMinutes}m${String(leftoverSeconds).padStart(2, "0")}s`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `every ${hours}h` : `every ${hours}h${String(minutes).padStart(2, "0")}m`;
 }
 
 // timerSecondaryFromProse humanizes a bare timer reason ("after"/"repeat")
@@ -389,6 +406,43 @@ function notificationSecondary(
   return bits.join(" · ");
 }
 
+// watchProse is a watch notification's card prose. Most watch bodies ARE
+// their content (timer sentences, teardown notices, event bodies) and pass
+// through verbatim. The one exception is a job-targeted CONDITION fire: the
+// producer's non-empty-job_id path emits only the generic "Job <id> <event>."
+// sentence (formatJobNotificationBlock's fallthrough — the excerpt is ignored
+// for watch frames), keeping the trigger in the escaped reason attr. For that
+// shape the card synthesizes prose from the reason so the expanded card shows
+// what fired instead of the generic sentence (RoboRev PR #954 combined
+// review). The synthesis names the trigger, never invented output context —
+// the reason carries the matched pattern / event name, not surrounding
+// output.
+function watchProse(attrs: Record<string, string>, bodyText: string): string {
+  const jobId = (attrs.job_id ?? "").trim();
+  if (!jobId) return bodyText;
+  const reason = decodeNotificationEntities(attrs.reason ?? "").trim();
+  if (reason.startsWith("watch ended:") || reason.startsWith("watch cleared:")) return bodyText;
+  // Timer fires with a job_id are not a producer shape (timers emit watch_id
+  // with an empty job_id), but if one ever arrives the body is already its
+  // content — leave it alone.
+  if (/^timer fired/i.test(bodyText)) return bodyText;
+  const outputMatch = /^output_match:\s*(.+)$/.exec(reason)?.[1]?.trim();
+  if (outputMatch) return `Matched output_match: ${outputMatch} on ${jobId}.`;
+  const eventFire = /^event:\s*(.+)$/.exec(reason)?.[1]?.trim();
+  if (eventFire) return `Watch event triggered: ${eventFire} on ${jobId}.`;
+  if (/^progress_tick$/.test(reason)) return `Progress tick on ${jobId}.`;
+  // Not a recognized trigger reason — the body is whatever the producer
+  // sent; only the exact generic sentence is worth replacing, with the raw
+  // reason as the honest fallback.
+  const generic = new RegExp(`^Job ${escapeRegExp(jobId)} \\S+\\.`);
+  if (generic.test(bodyText.trim())) return reason || bodyText;
+  return bodyText;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function parseJobNotification(block: string): ParsedNotification | null {
   const m = block.match(/^<job-notification\s+([^>]*)>([\s\S]*)<\/job-notification>$/);
   if (!m) return null;
@@ -401,12 +455,16 @@ function parseJobNotification(block: string): ParsedNotification | null {
   // delivery, with prose worth keeping and no echo metadata worth showing.
   if (attrs.event === "watch" || attrs.status === "watch") type = "watch";
   if (attrs.event === "watch_send") type = "watch-send";
-  // A watch notification's body is all prose (the fired sentence plus the
-  // watch's own note); only a job report carries an excerpt of job output. The
-  // tag attributes already say which this is, so decide before splitting -
-  // otherwise a note line reading "excerpt:" would hand the rest of the note
-  // to the excerpt preview.
-  const { prose, excerpt } = type === "watch" ? { prose: bodyText, excerpt: "" } : splitNotificationExcerpt(bodyText);
+  // A job-targeted watch fire's body is the producer's generic "Job <id>
+  // <event>." sentence (formatJobNotificationBlock's fallthrough: the excerpt
+  // is ignored for watch frames, so there is no matched output to carry).
+  // The reason attr holds the actual trigger ("output_match: …" /
+  // "event: …"), so the card synthesizes its prose from the reason instead
+  // of showing the generic sentence (RoboRev PR #954 combined review).
+  // Teardown notices ("watch ended:" / "watch cleared:") and timer/event
+  // bodies already carry their own prose and pass through untouched.
+  const { prose, excerpt } =
+    type === "watch" ? { prose: watchProse(attrs, bodyText), excerpt: "" } : splitNotificationExcerpt(bodyText);
   // A communicate envelope can only ride a delegate's report (the delegate
   // calls communicate to produce it - agent/session_tools_communicate.go).
   // Gate on the actual job type, not on whether the excerpt happens to parse

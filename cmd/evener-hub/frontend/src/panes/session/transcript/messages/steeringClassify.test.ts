@@ -514,8 +514,13 @@ watch ended: job_x is terminal (status=completed reason=done output_bytes=10); c
 });
 
 test("a budget auto-clear notice titles Watch auto-cleared, not a trigger", () => {
-  const block = `<job-notification job_id="self" event="watch" job_type="watch" status="watch" reason="watch cleared: self matched 50 times; re-arm with a tighter condition (higher every or narrower output_match)" output_bytes="0">
-watch cleared: self matched 50 times; re-arm with a tighter condition (higher every or narrower output_match)
+  // Backend truth: autoClearWatchOverBudgetNotification passes "" as the
+  // job id (agent/job_watch.go) — the cleared target rides the reason, never
+  // a job_id attr. (An earlier revision of this fixture used job_id="self";
+  // no producer emits that — the NotificationCard "self" guard test pins the
+  // defensive rendering instead.)
+  const block = `<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="watch cleared: job_a1b2 matched 50 times; re-arm with a tighter condition (higher every or narrower output_match)" output_bytes="0">
+watch cleared: job_a1b2 matched 50 times; re-arm with a tighter condition (higher every or narrower output_match)
 </job-notification>`;
   const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
   expect(n.type).toBe("watch");
@@ -579,4 +584,60 @@ Something else entirely.
 </job-notification>`;
   const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
   expect(n.secondary).toBe("after");
+});
+
+// --- RoboRev PR #954 combined review (ba9a9d0): job-targeted watch bodies ---
+// The producer's non-empty-job_id watch path (agent/job_notify.go
+// formatJobNotificationBlock) emits the generic body "Job <id> watch." with
+// the real trigger only in the escaped reason attr. The card must synthesize
+// its prose from the reason instead of showing the generic sentence.
+
+test("a job-targeted output_match fire synthesizes prose from the reason (finding M3)", () => {
+  const block = `<job-notification job_id="job_a1b2" event="watch" job_type="watch" status="watch" reason="output_match: ready" output_bytes="0">
+Job job_a1b2 watch. Output is available through read_transcript if needed.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.type).toBe("watch");
+  expect(n.title).toBe("Output matched on job_a1b2");
+  expect(n.prose).toContain("ready");
+  expect(n.prose).not.toContain("Job job_a1b2 watch.");
+});
+
+test("a job-targeted event fire synthesizes prose from the reason (finding M3)", () => {
+  const block = `<job-notification job_id="job_a1b2" event="watch" job_type="watch" status="watch" reason="event: job.notification" output_bytes="0">
+Job job_a1b2 watch. Output is available through read_transcript if needed.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.type).toBe("watch");
+  expect(n.title).toBe("Event on job_a1b2: job.notification");
+  expect(n.prose).toContain("job.notification");
+  expect(n.prose).not.toContain("Job job_a1b2 watch.");
+});
+
+test("a teardown notice keeps its own prose (finding M3)", () => {
+  const block = `<job-notification job_id="job_x" event="watch" job_type="watch" status="watch" reason="watch ended: job_x is terminal (status=completed reason=done output_bytes=10); condition never matched" output_bytes="0">
+watch ended: job_x is terminal (status=completed reason=done output_bytes=10); condition never matched
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.prose).toContain("condition never matched");
+});
+
+// --- RoboRev PR #954 combined review (ba9a9d0): timer hours (finding L1) ----
+// Valid timers run to 86,400s. The dedicated renderer already formats those
+// as hours — the notification humanizers must too, not "after 1440m".
+
+test("an hour-long after-timer humanizes to hours, not minutes", () => {
+  const block = `<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="after" output_bytes="0" watch_id="w9">
+Timer fired after 3600s.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.secondary).toBe("after 1h");
+});
+
+test("a day-long repeat-timer humanizes to hours, not minutes", () => {
+  const block = `<job-notification job_id="" event="watch" job_type="watch" status="watch" reason="repeat" output_bytes="0" watch_id="w9">
+Timer fired (every 86400s).
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.secondary).toBe("every 24h");
 });

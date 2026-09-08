@@ -30,6 +30,7 @@ const CLASS = {
   trigger: requireClass(styles.trigger, "jobWatch.module.css", "trigger"),
   mono: requireClass(styles.mono, "jobWatch.module.css", "mono"),
   row: requireClass(styles.row, "jobWatch.module.css", "row"),
+  rowStatic: requireClass(styles.rowStatic, "jobWatch.module.css", "rowStatic"),
   rowId: requireClass(styles.rowId, "jobWatch.module.css", "rowId"),
   rowCondition: requireClass(styles.rowCondition, "jobWatch.module.css", "rowCondition"),
   disclosureSummary: requireClass(styles.disclosureSummary, "jobWatch.module.css", "disclosureSummary"),
@@ -202,6 +203,43 @@ function isTerminalCatchup(raw: JsonObject): boolean {
 
 function isWatching(raw: JsonObject): boolean {
   return boolField(raw, "watching");
+}
+
+// isRecognizedWatchResult gates the structured renderer: the raw must carry
+// at least one field from the producer's result shapes (create:
+// watching/timer/condition/note/catch-up/identity; list: watches arrays;
+// inspect: watching/deliveries/created_at/end_reason/watch_id). An
+// unrecognized object — {} or a legacy/future shape — falls back to the raw
+// footer text instead of rendering an empty card with an invented "Watch this
+// session" summary (RoboRev PR #954 combined review). The fallback direction
+// is deliberate: unknown shapes show the producer's own words, never an
+// empty card.
+const WATCH_RESULT_FIELDS = [
+  "watching",
+  "watches",
+  "recent_watches",
+  "watch_id",
+  "source",
+  "after_seconds",
+  "repeat_seconds",
+  "output_match",
+  "events",
+  "event_filter",
+  "every",
+  "progress_interval_ms",
+  "note",
+  "deliveries",
+  "created_at",
+  "end_reason",
+  "ended_at",
+  "terminal_catchup",
+  "fired",
+  "status",
+  "replaced_existing",
+];
+
+function isRecognizedWatchResult(raw: JsonObject): boolean {
+  return WATCH_RESULT_FIELDS.some((field) => raw[field] !== undefined);
 }
 
 // jobWatchOperation prefers the call's own operation arg (the verb the model
@@ -414,74 +452,112 @@ function parseConditionText(condition: string): ParsedCondition {
 // prose, machine tokens in mono. Shared by list rows (short form) and
 // inspect bodies (full form) so the two never drift.
 function rowConditionPhrase(row: WatchRow): string {
-  if (!row.watching) {
-    return row.endReason ? `ended: ${row.endReason}` : "ended";
+  const state = watchState(row);
+  if (state === "watching") {
+    if (row.condition) {
+      const parsed = parseConditionText(row.condition);
+      const source = sourceLabel(row.source);
+      if (parsed.afterSeconds !== undefined) return `${humanizeSeconds(parsed.afterSeconds)} · ${source}`;
+      if (parsed.repeatSeconds !== undefined) {
+        return `every ${humanizeInterval(parsed.repeatSeconds).replace(/^every /, "")} · ${source}`;
+      }
+      const bits: string[] = [];
+      if (parsed.outputMatch) bits.push(`“${parsed.outputMatch}”`);
+      // The every throttle rides the events bit when one renders, else the
+      // filter bit — it is one shared throttle ("events: […] every N where …"),
+      // so it must never print twice. Parens match the create summary's
+      // "(every N)" shape (RoboRev PR #954 review 3).
+      const every = parsed.every !== undefined ? ` (every ${parsed.every})` : "";
+      if (parsed.events.length > 0) {
+        const names = parsed.events.includes("*") ? "any event" : parsed.events.join(", ");
+        bits.push(`${names}${every}`);
+      }
+      if (parsed.filterToolName || parsed.filterStatus) {
+        bits.push(`${filterSummaryPhrase(parsed)}${parsed.events.length === 0 ? every : ""}`);
+      }
+      if (parsed.progressIntervalMS !== undefined) {
+        bits.push(humanizeInterval(parsed.progressIntervalMS / 1000));
+      }
+      if (bits.length > 0) return `${bits.join(" · ")} · ${source}`;
+      return `${row.condition} · ${source}`;
+    }
+    return sourceLabel(row.source);
   }
-  if (row.condition) {
-    const parsed = parseConditionText(row.condition);
-    const source = sourceLabel(row.source);
-    if (parsed.afterSeconds !== undefined) return `${humanizeSeconds(parsed.afterSeconds)} · ${source}`;
-    if (parsed.repeatSeconds !== undefined) {
-      return `every ${humanizeInterval(parsed.repeatSeconds).replace(/^every /, "")} · ${source}`;
-    }
-    const bits: string[] = [];
-    if (parsed.outputMatch) bits.push(`“${parsed.outputMatch}”`);
-    // The every throttle rides the events bit when one renders, else the
-    // filter bit — it is one shared throttle ("events: […] every N where …"),
-    // so it must never print twice. Parens match the create summary's
-    // "(every N)" shape (RoboRev PR #954 review 3).
-    const every = parsed.every !== undefined ? ` (every ${parsed.every})` : "";
-    if (parsed.events.length > 0) {
-      const names = parsed.events.includes("*") ? "any event" : parsed.events.join(", ");
-      bits.push(`${names}${every}`);
-    }
-    if (parsed.filterToolName || parsed.filterStatus) {
-      bits.push(`${filterSummaryPhrase(parsed)}${parsed.events.length === 0 ? every : ""}`);
-    }
-    if (parsed.progressIntervalMS !== undefined) {
-      bits.push(humanizeInterval(parsed.progressIntervalMS / 1000));
-    }
-    if (bits.length > 0) return `${bits.join(" · ")} · ${source}`;
-    return `${row.condition} · ${source}`;
-  }
-  return sourceLabel(row.source);
+  // A missing watch has no source to name — sourceLabel would invent "this
+  // session" for a watch that is not there (RoboRev PR #954 combined review).
+  if (state === "missing") return "not found";
+  if (state === "pending") return `pending · ${sourceLabel(row.source)}`;
+  return row.endReason ? `ended: ${row.endReason}` : "ended";
 }
 
-function listCounts(raw: JsonObject): { active: number; ended: number } {
+// watchState reads a watch row/inspect result's lifecycle state in the
+// producer's own three-way grammar (agent/session_tools_jobs.go
+// formatJobWatchInspect, which is also what watchInspectFound in the same file
+// gates on): watching; end_reason set (ended); source set without end_reason
+// (pending — a detached watch on the terminal-flush rail still holding
+// frames); neither (not found — inspectWatchByID's empty return). Collapsing
+// pending and missing into "ended" misreports both (RoboRev PR #954 combined
+// review).
+type WatchState = "watching" | "pending" | "ended" | "missing";
+
+function watchState(entry: { watching: boolean; source?: string; endReason?: string }): WatchState {
+  if (entry.watching) return "watching";
+  if (entry.endReason) return "ended";
+  if (entry.source) return "pending";
+  return "missing";
+}
+
+function listCounts(raw: JsonObject): { active: number; pending: number; ended: number } {
   const live = Array.isArray(raw.watches) ? raw.watches : [];
   const recent = Array.isArray(raw.recent_watches) ? raw.recent_watches : [];
   let active = 0;
-  let ended = 0;
+  let pending = 0;
   for (const entry of live) {
     const row = normalizeRow(entry);
     if (!row) continue;
+    // A live non-watching row is a detached watch on the terminal-flush rail
+    // (inspectResultFromDetachedWatchConfig) — the producer's own list footer
+    // calls it "pending", never "ended" (formatJobWatchList).
     if (row.watching) active += 1;
-    else ended += 1;
+    else pending += 1;
   }
-  ended += recent.filter((entry) => normalizeRow(entry) !== undefined).length;
-  return { active, ended };
+  // Recent watches are history entries: they ended (inspectResultFromWatchHistory).
+  const ended = recent.filter((entry) => normalizeRow(entry) !== undefined).length;
+  return { active, pending, ended };
 }
 
 function summarizeList(raw: JsonObject): string {
-  const { active, ended } = listCounts(raw);
+  const { active, pending, ended } = listCounts(raw);
   const activeWord = active === 1 ? "1 active" : `${active} active`;
-  if (ended === 0) return `Listed watches (${activeWord})`;
-  const endedWord = ended === 1 ? "1 ended" : `${ended} ended`;
-  return `Listed watches (${activeWord} · ${endedWord})`;
+  const rest: string[] = [];
+  if (pending > 0) rest.push(pending === 1 ? "1 pending" : `${pending} pending`);
+  if (ended > 0) rest.push(ended === 1 ? "1 ended" : `${ended} ended`);
+  return rest.length > 0 ? `Listed watches (${activeWord} · ${rest.join(" · ")})` : `Listed watches (${activeWord})`;
 }
 
 function summarizeInspect(item: ItemModel, raw: JsonObject): string {
   const args = parseArgs(item.argumentsJSON);
   const id = strField(raw, "watch_id") ?? str(args, "watch_id") ?? "";
-  const state = isWatching(raw) ? "watching" : "ended";
+  // No id anywhere (neither the result nor the call names one): there is
+  // nothing to point at, so degrade to the operation verb rather than
+  // rendering "Inspected  · …" with an empty id (RoboRev PR #954 combined
+  // review).
+  if (!id) return "job_watch: inspect";
+  const state = watchState({
+    watching: isWatching(raw),
+    source: strField(raw, "source"),
+    endReason: strField(raw, "end_reason"),
+  });
   const deliveries = typeof raw.deliveries === "number" ? raw.deliveries : undefined;
   // Deliveries used measures against the delivery budget ("3 of 50 used")
   // — the same budget the Go side's own notices name. Ended or
   // not-yet-delivered watches carry no count to render.
-  if (deliveries !== undefined && isWatching(raw)) {
-    return `Inspected ${id} · ${state} · ${deliveries} of ${WATCH_DELIVERY_BUDGET} used`;
+  if (deliveries !== undefined && state === "watching") {
+    return `Inspected ${id} · watching · ${deliveries} of ${WATCH_DELIVERY_BUDGET} used`;
   }
-  return `Inspected ${id} · ${state}`;
+  // The summary speaks the producer's footer words ("not found"), not the
+  // internal state name (formatJobWatchInspect).
+  return `Inspected ${id} · ${state === "missing" ? "not found" : state}`;
 }
 
 function jobWatchSummary(item: ItemModel): string {
@@ -490,7 +566,7 @@ function jobWatchSummary(item: ItemModel): string {
   // the normalizer doesn't recognize) fall back to the call's own verb —
   // the same "job_watch: <operation>" the family fallback rendered, so the
   // row never regresses to a bare tool name.
-  if (!raw) {
+  if (!raw || !isRecognizedWatchResult(raw)) {
     const args = parseArgs(item.argumentsJSON);
     const operation = str(args, "operation");
     return operation ? `job_watch: ${operation}` : (item.toolName ?? "job_watch");
@@ -563,6 +639,9 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
         on <span className={CLASS.mono}>{spec.filterToolName}</span>
       </>
     ) : null;
+    // Both non-status filters (tool-only, or a bare filter with neither
+    // field) read "matching" — a single path, no dead ternary (RoboRev PR
+    // #954 combined review). The tool rides along in {tool} when present.
     const outcome =
       spec.filterStatus === "error" ? (
         <span>
@@ -572,8 +651,6 @@ function ConditionSentence({ source, spec }: { source: string; spec: ConditionSp
         <span>
           ending in <span className={CLASS.mono}>ok</span>
         </span>
-      ) : spec.filterToolName ? (
-        "matching"
       ) : (
         "matching"
       );
@@ -645,28 +722,47 @@ function CreateBody({ raw, item }: { raw: JsonObject; item: ItemModel }) {
 function WatchRow({ row }: { row: WatchRow }) {
   const [open, setOpen] = useState(false);
   // Rows are real buttons (mockup §C: tappable rows opening the watch's
-  // details). Expanding shows the row's own detail sentence inline — the
-  // same humanized grammar as the inspect body, minus deliveries/created
-  // which list raw does not carry.
+  // details) — but only when they CAN expand. Expanding shows the row's own
+  // detail sentence inline — the same humanized grammar as the inspect body,
+  // minus deliveries/created which list raw does not carry. A row with no
+  // detail sentence (an ended/pending/missing row, or a watching row whose
+  // condition parses to nothing) renders as a plain div: a focusable button
+  // with a no-op onClick is a control that does nothing (RoboRev PR #954
+  // combined review).
   const detail = row.watching ? rowDetailPhrase(row) : undefined;
+  const state = watchState(row);
+  const chip = state === "watching" ? "watching" : state === "missing" ? "not found" : state;
+  if (!detail) {
+    return (
+      <div key={row.id}>
+        <div className={CLASS.rowStatic} data-testid="job-watch-row">
+          <Chip>{chip}</Chip>
+          <span className={CLASS.rowId} title={row.id}>
+            {clipJobID(row.id)}
+          </span>
+          <span className={CLASS.rowCondition}>{rowConditionPhrase(row)}</span>
+        </div>
+      </div>
+    );
+  }
   return (
     <div key={row.id}>
       <button
         type="button"
         className={CLASS.row}
         data-testid="job-watch-row"
-        aria-expanded={detail ? open : undefined}
+        aria-expanded={open}
         onClick={() => {
-          if (detail) setOpen((previous) => !previous);
+          setOpen((previous) => !previous);
         }}
       >
-        <Chip>{row.watching ? "watching" : "ended"}</Chip>
+        <Chip>{chip}</Chip>
         <span className={CLASS.rowId} title={row.id}>
           {clipJobID(row.id)}
         </span>
         <span className={CLASS.rowCondition}>{rowConditionPhrase(row)}</span>
       </button>
-      {detail && open ? (
+      {open ? (
         <div className={CLASS.section} data-testid="job-watch-row-detail">
           <div className={CLASS.trigger}>{detail}</div>
         </div>
@@ -754,8 +850,38 @@ function formatCreatedDate(createdAt: string | undefined): string | undefined {
 }
 
 function InspectBody({ raw }: { raw: JsonObject }) {
+  const state = watchState({
+    watching: isWatching(raw),
+    source: strField(raw, "source"),
+    endReason: strField(raw, "end_reason"),
+  });
+  // A missing watch has no source to name — sourceLabel would invent "this
+  // session" for a watch that is not there. Pending is a live detached watch
+  // on the terminal-flush rail, not an ending (RoboRev PR #954 combined
+  // review; grammar mirrors formatJobWatchInspect).
+  if (state === "missing") {
+    return (
+      <div className={CLASS.section}>
+        <div className={CLASS.trigger} data-testid="job-watch-trigger">
+          <span>Watch not found.</span>
+        </div>
+      </div>
+    );
+  }
+  if (state === "pending") {
+    const source = sourceLabel(strField(raw, "source"));
+    return (
+      <div className={CLASS.section}>
+        <div className={CLASS.trigger} data-testid="job-watch-trigger">
+          <span>
+            Watch on <span className={CLASS.mono}>{source}</span> is pending.
+          </span>
+        </div>
+      </div>
+    );
+  }
   const source = sourceLabel(strField(raw, "source"));
-  if (!isWatching(raw)) {
+  if (state === "ended") {
     const endReason = strField(raw, "end_reason");
     return (
       <div className={CLASS.section}>
@@ -862,7 +988,7 @@ function JobWatchBody(props: ToolRenderProps) {
   // the normalizer doesn't recognize) fall back to the raw footer text —
   // the call's only useful output (RoboRev PR #954). The structured bodies
   // above replace the mono wall only when there is structure to render.
-  if (!raw) return <HeadClippedOutputBody item={item} live={live} />;
+  if (!raw || !isRecognizedWatchResult(raw)) return <HeadClippedOutputBody item={item} live={live} />;
   const operation = jobWatchOperation(item, raw);
   switch (operation) {
     case "list":
