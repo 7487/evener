@@ -46,8 +46,22 @@ func (c *hubInstancesController) List() appwire.InstanceListResponse {
 	userLayer := ""
 	r := c.reg.Get()
 	if r != nil {
+		// The authored layer is what the sheet's form edits, so the entry
+		// carries the authored credential fields alongside the registry's
+		// resolved view. A file that cannot be read right now simply
+		// prefills nothing; the refusal itself is already in Diagnostics.
+		var layer *registry.Layer
+		if l, exists, err := c.read(); err == nil && exists {
+			layer = l
+		}
 		for _, inst := range r.Instances() {
-			entries = append(entries, c.entryFor(inst))
+			var authored *registry.Provider
+			if layer != nil {
+				if p, ok := layer.Providers[inst.Name]; ok {
+					authored = &p
+				}
+			}
+			entries = append(entries, c.entryFor(inst, authored))
 		}
 		for _, id := range r.ProviderIDs() {
 			p, ok := r.Provider(id)
@@ -84,9 +98,9 @@ func (c *hubInstancesController) List() appwire.InstanceListResponse {
 
 // entryFor is the wire view of one instance: the registry's own description
 // plus the credential status the auth controller derives for it.
-func (c *hubInstancesController) entryFor(inst registry.Instance) appwire.InstanceEntry {
+func (c *hubInstancesController) entryFor(inst registry.Instance, authored *registry.Provider) appwire.InstanceEntry {
 	status := c.auth.instanceStatus(inst)
-	return appwire.InstanceEntry{
+	entry := appwire.InstanceEntry{
 		Name:               inst.Name,
 		Base:               inst.Base,
 		ProviderID:         inst.ProviderID,
@@ -108,6 +122,36 @@ func (c *hubInstancesController) entryFor(inst registry.Instance) appwire.Instan
 		CredentialRequired: inst.Auth != registry.AuthNone && inst.Auth != registry.AuthOptionalBearer,
 		Warnings:           inst.Warnings,
 	}
+	if authored != nil {
+		if len(authored.APIKeyEnv) > 0 {
+			entry.APIKeyEnv = authored.APIKeyEnv[0]
+		}
+		entry.CredentialHeader = credentialHeaderField(authored.CredentialHeaders)
+	}
+	return entry
+}
+
+// credentialHeaderField renders the authored credential_headers map as the
+// single NAME=VALUE field the forms use; credentialHeaderFrom is its
+// inverse. Several headers are possible by hand-editing the file, never
+// through the pane; the first in sorted order is the one the form edits, and
+// editing that field replaces the whole map.
+//
+// A value the authoring rule would refuse is omitted rather than sent.
+// registry.CheckCredentialHeaderValue guards evener's own authoring surfaces
+// only — the loader's checkEnvRefs passes anything without a '$' — so a
+// hand-written literal secret loads fine, and it must not reach a client.
+// Prefilling one would also build a form Edit refuses to save.
+func credentialHeaderField(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	names := slices.Sorted(maps.Keys(headers))
+	value := headers[names[0]]
+	if registry.CheckCredentialHeaderValue(value) != nil {
+		return ""
+	}
+	return names[0] + "=" + value
 }
 
 // sanitizeEndpointURL keeps only the non-secret endpoint identity exposed to

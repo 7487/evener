@@ -925,3 +925,43 @@ func readConfigProviders(t *testing.T, path string) map[string]registry.Provider
 	}
 	return l.Providers
 }
+
+// TestInstances_ListReportsAuthoredCredentialFields: the sheet's form
+// prefills api_key_env and the credential header from what the user
+// authored, and only that — an implicit instance inherits both from the
+// registry and shows neither.
+func TestInstances_ListReportsAuthoredCredentialFields(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk", "PORTKEY_KEY": "pk"})
+	if err := f.ctl.Create(appwire.InstanceCreateParams{
+		Name: "work", Base: "openai", APIKeyEnv: "PORTKEY_KEY", CredentialHeader: "Authorization=Bearer $PORTKEY_KEY",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	work := entry(t, f.ctl.List(), "work")
+	if work.APIKeyEnv != "PORTKEY_KEY" {
+		t.Fatalf("APIKeyEnv = %q, want PORTKEY_KEY", work.APIKeyEnv)
+	}
+	if work.CredentialHeader != "Authorization=Bearer $PORTKEY_KEY" {
+		t.Fatalf("CredentialHeader = %q", work.CredentialHeader)
+	}
+	groq := entry(t, f.ctl.List(), "groq")
+	if groq.APIKeyEnv != "" || groq.CredentialHeader != "" {
+		t.Fatalf("an implicit instance has nothing authored, got apiKeyEnv=%q credentialHeader=%q", groq.APIKeyEnv, groq.CredentialHeader)
+	}
+}
+
+func TestCredentialHeaderField_RendersTheFirstHeaderInSortedOrder(t *testing.T) {
+	if got := credentialHeaderField(nil); got != "" {
+		t.Fatalf("nil = %q", got)
+	}
+	got := credentialHeaderField(map[string]string{"X-Key": "$B", "Authorization": "Bearer $A"})
+	if got != "Authorization=Bearer $A" {
+		t.Fatalf("got %q", got)
+	}
+	// A literal only reaches credential_headers by hand-editing the file:
+	// the loader accepts it, both authoring surfaces refuse it, and it must
+	// never be broadcast to a client.
+	if got := credentialHeaderField(map[string]string{"Authorization": "Bearer sk-literal"}); got != "" {
+		t.Fatalf("a hand-authored literal reached the wire: %q", got)
+	}
+}
