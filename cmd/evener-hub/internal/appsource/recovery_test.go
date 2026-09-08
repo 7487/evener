@@ -110,3 +110,67 @@ func TestRecoveryCancelsInitializedDaemonRPC(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryAllowsReadOnlyRelayReplacementWithoutAdmittingDaemonActions(t *testing.T) {
+	entry := relayEntry("thread")
+	entry.PID = 4242
+	entry.StartedAt = time.Now()
+	entry.StateDir = t.TempDir()
+	entries := []rendezvous.Entry{entry}
+	// This external transport accepts only initialization and subscribed reads;
+	// any attempted mutation makes connection recovery fail instead of succeeding.
+	source, daemon := newRelayTestSource(t, entries)
+	params := appwire.ThreadReadParams{Ref: "local:thread", Subscribe: true}
+	lease, err := source.acquireRelaySession(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	deliveries, err := lease.Listen(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := readRelayAsync(t.Context(), lease, params)
+	initialCall := <-daemon.reads
+	initialCall.transport.recv <- appwire.ResponseMessage(initialCall.request.ID, relaySnapshot("thread", "initial"))
+	initialResult := <-initial
+	if initialResult.err != nil {
+		t.Fatal(initialResult.err)
+	}
+	if !initialResult.result.Handoff.Commit() {
+		t.Fatal("initial feed was not committed")
+	}
+	release := source.BeginRecovery(entry)
+	defer release()
+	replacement := entry
+	replacement.PID++
+	replacement.Endpoint = "ws://replacement"
+	// An externally present replacement is observation, not a hub daemon launch.
+	entries[0] = replacement
+	if err := initialCall.transport.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replacementRead := <-daemon.reads
+	replacementRead.transport.recv <- appwire.ResponseMessage(replacementRead.request.ID, relaySnapshot("thread", "replacement"))
+	resync := <-deliveries
+	if resync.Notification.Method != appwire.NotifyEvenerThreadResync {
+		t.Fatalf("replacement feed did not invalidate old state: %s", resync.Notification.Method)
+	}
+	resync.Acknowledge()
+	replacementRead.transport.recv <- appwire.Message{Notification: new(relayDelta("thread", "observed"))}
+	observed := <-deliveries
+	if got := decodeRelayDelta(t, observed.Notification); got != "observed" {
+		t.Fatalf("replacement observation=%q", got)
+	}
+	observed.Acknowledge()
+	if got := daemon.dials.Load(); got != 2 {
+		t.Fatalf("read-only connection count=%d", got)
+	}
+	_, err = source.StartTurnAtEntry(t.Context(), entry, appwire.TurnStartParams{Ref: "local:thread", ClientMutationID: "blocked"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("recovery admitted direct action: %v", err)
+	}
+	if got := daemon.dials.Load(); got != 2 {
+		t.Fatalf("blocked action opened a connection: %d", got)
+	}
+}

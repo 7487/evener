@@ -27,6 +27,8 @@ func recoveryIdentity(entry rendezvous.Entry) daemonIdentity {
 // BeginRecovery cancels outstanding direct RPCs and rejects new ones for this
 // process until the caller releases its ownership reservation. Cancellation is
 // deliberately not session-unavailable: callers must not auto-resume it.
+// Read-only relay feeds own their connection epochs separately. Observing a
+// replacement neither launches a daemon nor acknowledges hub recovery authority.
 func (s *LocalDaemonSource) BeginRecovery(entry rendezvous.Entry) func() {
 	s.callsMu.Lock()
 	key := recoveryIdentity(entry)
