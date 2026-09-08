@@ -2682,9 +2682,10 @@ type InstanceEntry struct {
 	// APIKeyEnv and CredentialHeader are the AUTHORED api_key_env (its first
 	// entry) and credential header (as NAME=VALUE) from providers.toml, so
 	// the sheet's form can prefill them. Never the registry's own defaults
-	// for an implicit instance, and never a secret: a credential header
-	// value is a $VAR template by construction
-	// (registry.CheckCredentialHeaderValue refuses a literal).
+	// for an implicit instance, and never a secret: the loader accepts a
+	// hand-written literal that both authoring surfaces would refuse
+	// (registry.CheckCredentialHeaderValue guards those, not the file), so
+	// the hub omits a header value that rule rejects rather than sending it.
 	APIKeyEnv        string `json:"apiKeyEnv,omitempty"`
 	CredentialHeader string `json:"credentialHeader,omitempty"`
 	// Implicit is true for an instance that exists from the environment
@@ -2784,7 +2785,7 @@ type InstanceCreateParams struct {
 // BaseURL and ClearBaseURL are never both meaningful in the same request: send
 // one or the other.
 //
-// The 2026-09-07 sheet-editor additions keep the same rule. NewName renames
+// The rename and credential fields obey the same rule. NewName renames
 // the instance (empty means unchanged). APIKeyEnv/ClearAPIKeyEnv and
 // CredentialHeader/ClearCredentialHeader set or drop the authored
 // api_key_env and credential_headers; CredentialHeader is NAME=VALUE with a
