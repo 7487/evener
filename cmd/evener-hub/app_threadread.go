@@ -86,7 +86,7 @@ func unavailableThreadReadResponse(ctx context.Context, cfg hubcore.WebConfig, s
 		return appwire.ThreadReadResponse{}, false, err
 	}
 	for _, thread := range listed.Data {
-		matches := thread.ID == params.ThreadID
+		matches := thread.ID == params.ThreadID || thread.Evener.Ref == localAppRef(params.ThreadID)
 		if params.Ref != "" {
 			matches = thread.Evener.Ref == params.Ref || localAppRef(thread.ID) == params.Ref
 		}

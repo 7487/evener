@@ -1614,3 +1614,28 @@ func TestHubClearedOwnerReleasesHistoricalDelegate(t *testing.T) {
 		})
 	}
 }
+
+func TestHubColdReadFindsIncompatibleDaemonByStableThreadID(t *testing.T) {
+	runDir := t.TempDir()
+	roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+	hub := newHubRPCTestServer(t, hubcore.WebConfig{Roster: roster})
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{ProtocolVersion: appwire.ProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	// The owner appears after hub initialization. Its current session differs
+	// from the stable workspace, and no past index can supply an alias row.
+	entry := rendezvous.Entry{PID: os.Getpid(), Protocol: "evener-appwire-v4", Endpoint: protocolMismatchPeer(t), SourceID: "local", ThreadID: "current", SessionID: "current", WorkspaceRef: "local:stable"}
+	writeRendezvous(t, runDir, entry)
+	for _, subscribe := range []bool{false, true} {
+		read, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{ThreadID: "stable", IncludeTurns: true, Subscribe: subscribe})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if read.Thread.ID != "current" || read.Thread.Evener.Ref != "local:stable" || read.Thread.Status.Type != appwire.ThreadStatusRestartRequired || read.Thread.Evener.Capabilities != (appwire.ThreadCapabilities{}) || len(read.Thread.Turns) != 0 {
+			t.Fatalf("stable-ID read lost the incompatible owner: %+v", read.Thread)
+		}
+	}
+}
