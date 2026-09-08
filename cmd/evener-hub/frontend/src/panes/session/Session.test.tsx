@@ -2146,6 +2146,7 @@ test.each(["success", "refused"])(
     );
     await waitFor(() => expect(fake.calls.some((call) => call.method === "thread/read")).toBe(true));
     expect(threadsStore.getState().threads.has(ref)).toBe(false);
+    const refresh = vi.spyOn(threadsStore.getState(), "refreshThread");
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Force stop…" }));
     expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
@@ -2155,6 +2156,12 @@ test.each(["success", "refused"])(
     await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
     if (outcome === "success") {
       expect(await screen.findByRole("button", { name: "Resume session" })).toBeTruthy();
+      // Hydration publishes Resume before storage reconciliation completes.
+      // The dialog closes only when the complete refresh promise settles.
+      expect(refresh).toHaveBeenCalledWith(ref);
+      await act(async () => {
+        await refresh.mock.results[0]?.value;
+      });
       expect(screen.queryByRole("dialog")).toBeNull();
     } else {
       expect(await screen.findByText("no direct daemon ownership claim")).toBeTruthy();
@@ -2187,6 +2194,7 @@ test.each(["success", "refused"])("hydrated restart recovery works without navig
     </ClientProvider>,
   );
   await screen.findByRole("button", { name: "Refresh session" });
+  const refresh = vi.spyOn(threadsStore.getState(), "refreshThread");
   const user = userEvent.setup();
   await user.click(screen.getByRole("button", { name: "Force stop…" }));
   expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
@@ -2206,6 +2214,12 @@ test.each(["success", "refused"])("hydrated restart recovery works without navig
     expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("restartRequired");
   } else {
     const resume = await screen.findByRole("button", { name: "Resume session" });
+    // Hydration publishes Resume before storage reconciliation completes.
+    // The dialog closes only when the complete refresh promise settles.
+    expect(refresh).toHaveBeenCalledWith(ref);
+    await act(async () => {
+      await refresh.mock.results[0]?.value;
+    });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("notLoaded");
     await user.click(resume);
