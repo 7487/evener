@@ -576,6 +576,103 @@ func TestEditMarketplace_RestoresDirectoriesWhenARenameStepFails(t *testing.T) {
 	}
 }
 
+// Once the staged clone is swapped in, the old clone's contents are gone, so
+// the undo cannot restore them — renaming the directory back would leave the
+// new source's files wearing the old name while the store still recorded the
+// old source, and RefreshMarketplace pulls the clone's own origin, so every
+// later refresh would serve the new remote forever. Removing the swapped-in
+// clone leaves the recorded install location missing, which a refresh heals by
+// recloning the recorded source.
+func TestEditMarketplace_RegistrySaveFailureDropsTheSwappedInClone(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	repoA := makeMarketplaceRepoWithPlugin(t, "acme", "widget")
+	repoB := makeMarketplaceRepoWithPlugin(t, "acme", "gadget")
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: repoA}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", "acme"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// The last step before the marketplaces file, and the only one that runs
+	// after the swap on a rename.
+	origSave := installSaveRegistry
+	installSaveRegistry = func(string, Registry) error { return errors.New("boom") }
+	t.Cleanup(func() { installSaveRegistry = origSave })
+
+	if _, err := m.EditMarketplace(ctx, "acme", "beta", &Source{Kind: SourceURL, URL: repoB}); err == nil {
+		t.Fatal("expected the registry save to fail")
+	}
+	installSaveRegistry = origSave
+
+	for _, dir := range []string{"acme", "beta"} {
+		if _, err := os.Stat(m.marketplaceDir(dir)); !os.IsNotExist(err) {
+			t.Fatalf("clone directory %s outlived the failed save: %v", m.marketplaceDir(dir), err)
+		}
+	}
+	list, _ := m.ListMarketplaces()
+	ref, ok := list["acme"]
+	if !ok || len(list) != 1 || ref.Source.URL != repoA {
+		t.Fatalf("the failed edit changed the store: %v", list)
+	}
+	reg, _ := m.loadRegistry()
+	if _, ok := reg.Plugins[registryKey("widget", "acme")]; !ok {
+		t.Fatalf("registry changed after a failed save: %v", reg.Plugins)
+	}
+	// The recorded source is what a refresh brings back, not the source the
+	// failed edit had already fetched.
+	if err := m.RefreshMarketplace(ctx, "acme"); err != nil {
+		t.Fatalf("the refresh did not heal the missing clone: %v", err)
+	}
+	cat, err := m.Browse(ctx, "acme")
+	if err != nil || len(cat.Plugins) != 1 || cat.Plugins[0].Name != "widget" {
+		t.Fatalf("Browse acme = %+v, %v; want the recorded source's catalog", cat, err)
+	}
+}
+
+// The marketplaces file is saved last and deliberately runs no undo — on a
+// rename the registry is already committed to the new cache directory — but a
+// clone the swap has already replaced still has to go, or a re-source that
+// failed at that save keeps serving the new remote while recording the old.
+func TestEditMarketplace_MarketplacesSaveFailureDropsTheSwappedInClone(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	repoA := makeMarketplaceRepoWithPlugin(t, "acme", "widget")
+	repoB := makeMarketplaceRepoWithPlugin(t, "acme", "gadget")
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: repoA}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+
+	// saveMarketplaces is the only writer through this seam, so the edit gets
+	// all the way past the swap before it fails.
+	origWrite := marketplaceAtomicWriteFile
+	marketplaceAtomicWriteFile = func(string, []byte, os.FileMode) error { return errors.New("boom") }
+	t.Cleanup(func() { marketplaceAtomicWriteFile = origWrite })
+
+	if _, err := m.EditMarketplace(ctx, "acme", "", &Source{Kind: SourceURL, URL: repoB}); err == nil {
+		t.Fatal("expected the save to fail")
+	}
+	marketplaceAtomicWriteFile = origWrite
+
+	if _, err := os.Stat(m.marketplaceDir("acme")); !os.IsNotExist(err) {
+		t.Fatalf("the swapped-in clone outlived the failed save: %v", err)
+	}
+	if err := m.RefreshMarketplace(ctx, "acme"); err != nil {
+		t.Fatalf("the refresh did not heal the missing clone: %v", err)
+	}
+	cat, err := m.Browse(ctx, "acme")
+	if err != nil || len(cat.Plugins) != 1 || cat.Plugins[0].Name != "widget" {
+		t.Fatalf("Browse acme = %+v, %v; want the recorded source's catalog", cat, err)
+	}
+}
+
 func TestEditMarketplace_RefusesALeftoverPluginCache(t *testing.T) {
 	if !gitAvailable() {
 		t.Skip("git not available")

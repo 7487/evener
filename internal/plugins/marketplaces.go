@@ -237,14 +237,15 @@ func (m *Manager) RemoveMarketplace(ctx context.Context, name string) error {
 
 // EditMarketplace renames a registered marketplace and/or replaces its
 // source (spec 2026-09-07 §3). The order is chosen so the one step that can
-// take a long time or fail for reasons outside the store - fetching the new
-// source - happens before anything on disk moves, and every directory rename
+// take a long time or fail for reasons outside the store — fetching the new
+// source — happens before anything on disk moves, and every directory rename
 // is undone if a later step fails before the files are saved. The undo
-// restores each directory's NAME, not its former contents: a rename plus a
-// re-source that fails at the save leaves the new source's files sitting under
-// the old name, and nothing later reconciles that. A refresh pulls the clone's
-// own origin, which is now the new remote, so the store keeps serving the new
-// source's catalog while recording the old one until the edit is retried.
+// restores each directory's NAME, not its former contents, so a clone the new
+// source has already been swapped into is REMOVED instead. The recorded
+// install location — still the old source's — is then missing, which
+// RefreshMarketplace heals by recloning the recorded source; a directory
+// renamed back would instead have served the new remote under the old
+// source's name forever.
 //
 //  1. fetch a changed source into staging and parse its catalog (Add's own
 //     staging discipline: a bad source never half-registers);
@@ -309,7 +310,25 @@ func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src
 	// From here until the files are saved, a failure runs undo in reverse
 	// and sweeps staging.
 	var undo []func()
+	// swappedIn holds the install location once swapInClone has replaced its
+	// contents with the new source's. The old clone is gone by then, so no
+	// later failure can put it back: renaming the directory to the old name
+	// would leave the new source's files wearing it while the store still
+	// recorded the old source, and RefreshMarketplace pulls the clone's own
+	// origin — the new remote — so every later refresh would serve the new
+	// source's catalog under the old source's name, permanently. Removing it
+	// leaves the recorded install location missing, which a refresh heals by
+	// recloning the recorded source at the cost of one re-download.
+	swappedIn := ""
+	dropSwappedClone := func() {
+		if swappedIn != "" {
+			_ = marketplaceRemoveAll(swappedIn)
+		}
+	}
 	fail := func(err error) (MarketplaceRef, error) {
+		// Before undo, which restores directory NAMES: this one's former
+		// contents no longer exist to be restored under either name.
+		dropSwappedClone()
 		for _, fn := range slices.Backward(undo) {
 			fn()
 		}
@@ -327,7 +346,11 @@ func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src
 				if err := marketplaceRename(oldDir, newDir); err != nil {
 					return fail(fmt.Errorf("renaming marketplace clone: %w", err))
 				}
-				undo = append(undo, func() { _ = marketplaceRename(newDir, oldDir) })
+				undo = append(undo, func() {
+					if swappedIn == "" {
+						_ = marketplaceRename(newDir, oldDir)
+					}
+				})
 			}
 			ref.InstallLocation = newDir
 		}
@@ -364,6 +387,7 @@ func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src
 			if err := m.swapInClone(staging, dest); err != nil {
 				return fail(err)
 			}
+			swappedIn = dest
 			ref.InstallLocation = dest
 		}
 		ref.Source = *src
@@ -383,6 +407,10 @@ func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src
 	}
 	mk[target] = ref
 	if err := m.saveMarketplaces(mk); err != nil {
+		// No undo here — on a rename the registry above is already committed to
+		// the new cache directory — but the clone whose contents the swap
+		// replaced still has to go, for the reason swappedIn describes.
+		dropSwappedClone()
 		if renaming {
 			return MarketplaceRef{}, fmt.Errorf("marketplace %q renamed in %s but not in %s: %w", name, registryFileName, marketplacesFileName, err)
 		}
