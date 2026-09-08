@@ -323,3 +323,38 @@ func TestRecoveryIntentNormalizesAliasesAndPreservesMemorySemantics(t *testing.T
 		}
 	}
 }
+
+func TestRecoveryPersistenceUnderTraversalOnlyAncestor(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	ancestor := t.TempDir()
+	root := filepath.Join(ancestor, "hub")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(ancestor, 0111); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chmod(ancestor, 0700); err != nil {
+			t.Error(err)
+		}
+	}()
+	locks, err := NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := locks.BeginForceStop([]string{"A"})
+	defer finish(false)
+	if err := locks.PersistForceStop([]string{"A"}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened.RecoveryState("A").ResumeRequired {
+		t.Fatal("persisted obligation missing")
+	}
+}

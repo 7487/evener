@@ -33,17 +33,23 @@ type recoveryStoreFaults struct {
 // recoveryStore is serialized by ResumeLocks.persistenceMu, independently of
 // the admission mutex. Its state follows the visible file even on sync failure.
 type recoveryStore struct {
-	fs     afero.Fs
-	root   string
-	state  map[string]string
-	faults recoveryStoreFaults
+	fs            afero.Fs
+	root          string
+	directoryBase string
+	state         map[string]string
+	faults        recoveryStoreFaults
 }
 
 func openRecoveryStore(fs afero.Fs, root string) (*recoveryStore, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("recovery state root is required")
 	}
-	store := &recoveryStore{fs: fs, root: root, state: map[string]string{}}
+	root = filepath.Clean(root)
+	base, err := existingRecoveryDirectory(fs, root)
+	if err != nil {
+		return nil, err
+	}
+	store := &recoveryStore{fs: fs, root: root, directoryBase: base, state: map[string]string{}}
 	data, err := afero.ReadFile(fs, filepath.Join(root, "recovery", "state.json"))
 	if os.IsNotExist(err) {
 		return store, nil
@@ -101,7 +107,7 @@ func (s *recoveryStore) commit(next map[string]string) (bool, error) {
 
 func (s *recoveryStore) write(data []byte) (renamed bool, err error) {
 	dir := filepath.Join(s.root, "recovery")
-	if err := createRecoveryDirectory(s.fs, dir); err != nil {
+	if err := createRecoveryDirectory(s.fs, dir, s.directoryBase); err != nil {
 		return false, err
 	}
 	temp, err := afero.TempFile(s.fs, dir, "state.json.tmp-*")
@@ -144,12 +150,38 @@ func (s *recoveryStore) write(data []byte) (renamed bool, err error) {
 	return true, syncRecoveryDirectory(s.fs, dir)
 }
 
+// The existing hierarchy is owned by the caller. Retain its boundary across
+// retries so links created by this store are synced even after a failed sync,
+// without requiring read access to unrelated traversal-only ancestors.
+func existingRecoveryDirectory(fs afero.Fs, dir string) (string, error) {
+	for {
+		info, err := fs.Stat(dir)
+		if err == nil {
+			if !info.IsDir() {
+				return "", fmt.Errorf("recovery state parent %q is not a directory", dir)
+			}
+			return dir, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", err
+		}
+		dir = parent
+	}
+}
+
 // Every missing directory is linked durably in its parent before intent can
 // authorize a signal. Unsupported sync is an error, never claimed as durable.
-func createRecoveryDirectory(fs afero.Fs, dir string) error {
+func createRecoveryDirectory(fs afero.Fs, dir, base string) error {
+	if dir == base {
+		return nil
+	}
 	parent := filepath.Dir(dir)
 	if parent != dir {
-		if err := createRecoveryDirectory(fs, parent); err != nil {
+		if err := createRecoveryDirectory(fs, parent, base); err != nil {
 			return err
 		}
 	}
