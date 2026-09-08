@@ -15,12 +15,14 @@
 // in-progress edits survive another client's change. The sheet closes
 // itself when its instance disappears - except across its own rename,
 // where the section re-selects the new name (onRenamed) and the vanish is
-// the rename landing, not a removal.
+// the rename landing, not a removal. Across that vanish the sheet goes on
+// showing the instance the rename went out for (renamingFrom), so it never
+// unmounts itself mid-rename.
 //
 // Owns the one mutation it edits (evener/instance/edit); the section still
 // owns what every other action DOES (opening an editor, a confirm, or
 // calling the store), the same division of labor as before.
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { errorText } from "../../../../protocol/errors";
 import type { AuthTestResponse, InstanceEntry } from "../../../../protocol/types.gen";
 import { useIsMobile } from "../../../../shell/useIsMobile";
@@ -108,16 +110,22 @@ export function InstanceSheet({
   const toast = useToasts();
   const ids = useId();
 
-  const instance = name === null ? undefined : instances.find((i) => i.name === name);
-  const template = instance === undefined ? undefined : availableProviders.find((p) => p.id === instance.providerId);
-
   const [initial, setInitial] = useState<InstanceDraft | null>(null);
   const [draft, setDraft] = useState<InstanceDraft | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Set for the span of a rename request: the old name vanishes from the
-  // store when the response lands, and that vanish must not close the sheet.
-  const pendingRename = useRef<string | null>(null);
+  // The instance a rename of this sheet's own went out for, held for the span
+  // of the request: the old name leaves the store when the response lands, a
+  // beat before the section re-selects the new one, so for that beat the
+  // sheet's subject is in neither place. Keeping it here is what carries the
+  // sheet across - an `open` that dips false unmounts the panel, replaying
+  // its slide-in from off-screen and throwing focus out of the form - and it
+  // is also the guard that keeps that vanish from closing the sheet.
+  const [renamingFrom, setRenamingFrom] = useState<InstanceEntry | undefined>(undefined);
+
+  const stored = name === null ? undefined : instances.find((i) => i.name === name);
+  const instance = stored ?? renamingFrom;
+  const template = instance === undefined ? undefined : availableProviders.find((p) => p.id === instance.providerId);
 
   function seed(inst: InstanceEntry): void {
     const seeded = draftFor(
@@ -144,14 +152,16 @@ export function InstanceSheet({
   // under an open sheet (its own Remove completing, or another client's
   // change), and an editor for a thing that no longer exists closes itself
   // rather than offering actions on a ghost. Its own rename is the one
-  // vanish that is not a removal.
+  // vanish that is not a removal, and renamingFrom is what tells them apart:
+  // across a rename `instance` is still the held one, so this stays quiet.
   useEffect(() => {
-    if (name !== null && instance === undefined && pendingRename.current === null) onClose();
+    if (name !== null && instance === undefined) onClose();
   }, [name, instance, onClose]);
-  // The section moved the selection to the new name: the guard is spent.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: name is a deliberate trigger-only dep - the body only clears a ref, but must re-run on every name change to spend the guard
+  // The section moved the selection to the new name: the held instance has
+  // done its job, and holding it any longer would keep a ghost on screen.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: name is a deliberate trigger-only dep - the body only drops the held instance, but must re-run on every name change to release it
   useEffect(() => {
-    pendingRename.current = null;
+    setRenamingFrom(undefined);
   }, [name]);
 
   const open = name !== null && instance !== undefined;
@@ -185,7 +195,7 @@ export function InstanceSheet({
     }
     setFormError(null);
     setBusy(true);
-    if (params.newName !== undefined) pendingRename.current = params.newName;
+    if (params.newName !== undefined) setRenamingFrom(instance);
     try {
       await credentialsStore.getState().edit(params);
       toast.push("success", `Saved ${params.newName ?? instance.name}`);
@@ -196,7 +206,7 @@ export function InstanceSheet({
         if (refreshed !== undefined) seed(refreshed);
       }
     } catch (err) {
-      pendingRename.current = null;
+      setRenamingFrom(undefined);
       const message = errorText(err);
       setFormError(message);
       toast.push("error", `Save failed: ${message}`);

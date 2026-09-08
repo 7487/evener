@@ -549,6 +549,32 @@ describe("the form", () => {
     await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
     return fake.calls.find((c) => c.method === "evener/instance/edit")?.params;
   }
+  /** Watches the document for the removal of nodes that have to stay put, and
+   * answers with the labels of the ones that were taken out. A before/after
+   * snapshot cannot see a transient unmount, and the transient frame is the
+   * whole defect: an unmounted panel replays its slide-in from off-screen. */
+  function watchRemovals(watched: Record<string, Node>): () => string[] {
+    const gone: string[] = [];
+    // Called from the observer's own microtask (and once more at the end for
+    // undelivered records), so the removed subtree still contains what it
+    // took with it - containment read later would miss a re-parented node.
+    const collect = (records: MutationRecord[]): void => {
+      for (const record of records) {
+        for (const removed of record.removedNodes) {
+          for (const [label, node] of Object.entries(watched)) {
+            if (removed === node || removed.contains(node)) gone.push(label);
+          }
+        }
+      }
+    };
+    const observer = new MutationObserver(collect);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      collect(observer.takeRecords());
+      observer.disconnect();
+      return gone;
+    };
+  }
 
   test("prefills every field from the instance and shows the base provider as a fact", () => {
     renderSheet(WORK, {}, [OPENAI]);
@@ -784,5 +810,68 @@ describe("the form", () => {
       credentialsStore.setState({ instances: [] });
     });
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  // The rename lands in the store before the section re-selects the new name,
+  // so for that beat the sheet's own name is in neither place. A sheet that
+  // reads only the store goes `open === false` there and UNMOUNTS: the panel
+  // and its scrim are rebuilt as new nodes, the slide-in animation replays
+  // (~200ms of the sheet sliding back in from off-screen, backdrop dim gone -
+  // measured live), and FocusScope's mount hook throws focus out of the form.
+  // Node identity pins the remount; the removal watch pins the empty frame,
+  // which a before/after snapshot cannot see.
+  test("a rename keeps the same panel and form nodes, with no frame in between", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => ({
+      instances: [{ ...WORK, name: "work2" }],
+      availableProviders: [OPENAI],
+    }));
+    connectionStore.getState().connect(fake);
+    const { handlers, selectName } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+
+    const panel = screen.getByRole("dialog");
+    const form = screen.getByRole("form", { name: "Edit work" });
+    const removals = watchRemovals({ panel, form });
+
+    await user.click(saveButton());
+    await waitFor(() => expect(handlers.onRenamed).toHaveBeenCalledWith("work2"));
+    selectName("work2");
+    await waitFor(() => expect(field("Name").value).toBe("work2"));
+
+    expect(removals()).toEqual([]);
+    expect(screen.getByRole("dialog")).toBe(panel);
+    expect(screen.getByRole("form", { name: "Edit work2" })).toBe(form);
+  });
+
+  // The same remount, seen from the keyboard: FocusScope moves focus to the
+  // first tabbable descendant every time it mounts, and at that moment `busy`
+  // still disables every field, so the grab lands on the first action button -
+  // measured live, `Test credentials`. What this pins is the absence of that
+  // grab. It is not the whole of "focus does not move": a real browser also
+  // blurs the field the save disables (focus falls to <body> there, on a plain
+  // save as much as on a rename), which jsdom does not model.
+  test("a rename does not hand focus to the first action button", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => ({
+      instances: [{ ...WORK, name: "work2" }],
+      availableProviders: [OPENAI],
+    }));
+    connectionStore.getState().connect(fake);
+    const { handlers, selectName } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+    // Submitting the form rather than clicking Save leaves focus in the field
+    // being edited, so a remount's focus grab has something to take it from.
+    field("Name").focus();
+    const focused = document.activeElement;
+    fireEvent.submit(screen.getByRole("form", { name: "Edit work" }));
+
+    await waitFor(() => expect(handlers.onRenamed).toHaveBeenCalledWith("work2"));
+    selectName("work2");
+    await waitFor(() => expect(field("Name").value).toBe("work2"));
+
+    expect(document.activeElement).toBe(focused);
   });
 });
