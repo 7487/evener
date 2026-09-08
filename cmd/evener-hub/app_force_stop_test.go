@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -1270,5 +1271,44 @@ func TestBlockedAdmissionMetadataPreservesWrappedRecoveryCause(t *testing.T) {
 		if _, changed := original["clientMutationId"]; changed {
 			t.Fatal("annotation mutated original error data")
 		}
+	}
+}
+
+func TestHubForceStopUnconfirmedExitReadAfterOwnershipDisappears(t *testing.T) {
+	cfg, sessionID, resumes := parityResumeFixture(t, func(*appserver.Server) {})
+	cfg.ResumeLocks = hubcore.NewResumeLocks()
+	entry := rendezvous.Entry{PID: 4242, SessionID: sessionID, ThreadID: sessionID, StateDir: t.TempDir(), StartedAt: time.Now()}
+	writeRendezvous(t, cfg.RunDir, entry)
+	var events []string
+	cfg.DaemonProcesses = forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+		return &forceStopProcess{events: &events, waitErr: context.DeadlineExceeded}, nil
+	})
+	ref := "local:" + sessionID
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: ref}, nil); err == nil {
+		t.Fatal("unconfirmed exit reported success")
+	}
+	if !slices.Contains(events, "kill") {
+		t.Fatal("termination was not requested")
+	}
+	// Exit can finish after the caller's confirmation deadline.
+	if err := rendezvous.Remove(cfg.RunDir, entry.PID); err != nil {
+		t.Fatal(err)
+	}
+	hub := newHubRPCTestServer(t, cfg)
+	defer hub.Close()
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := client.ThreadRead(t.Context(), appwire.ThreadReadParams{Ref: ref, IncludeTurns: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Thread.Status.Type != "notLoaded" || !read.Thread.Evener.ResumeRequired || read.Thread.Evener.Capabilities.Send || len(read.Thread.Turns) == 0 {
+		t.Fatalf("unconfirmed stopped snapshot = %+v", read.Thread)
+	}
+	if *resumes != 0 {
+		t.Fatal("read automatically resumed a stopped session")
 	}
 }

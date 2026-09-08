@@ -2752,7 +2752,17 @@ export const threadsStore = createStore<ThreadsStoreState>(() => ({
   },
 
   async forceStop(ref) {
-    await requireClient().forceStop(ref);
+    try {
+      await requireClient().forceStop(ref);
+    } catch (error) {
+      // The signal may have succeeded despite failed exit confirmation.
+      // Reconcile the hub's recovery requirement without delaying this error.
+      void threadsStore
+        .getState()
+        .refreshThread(ref)
+        .catch(() => {});
+      throw error;
+    }
     threadsStore.setState((state) => ({
       restartBlockingObligations: new Map(state.restartBlockingObligations).set(ref, Symbol()),
     }));
