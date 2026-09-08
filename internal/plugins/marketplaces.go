@@ -333,6 +333,13 @@ func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src
 		}
 		oldCache, newCache := filepath.Join(m.cacheDir(), name), filepath.Join(m.cacheDir(), newName)
 		if _, err := marketplaceStat(oldCache); err == nil {
+			// Removing a marketplace drops its clone and its registration but
+			// never its plugin cache, so the new name's cache dir can outlive
+			// the marketplace that made it. Renaming onto it fails with a bare
+			// "file exists"; say what is in the way instead.
+			if _, err := marketplaceStat(newCache); err == nil {
+				return fail(fmt.Errorf("plugin cache %s already exists; a removed marketplace left it behind and it must be deleted before %q can be reused", newCache, newName))
+			}
 			if err := marketplaceRename(oldCache, newCache); err != nil {
 				return fail(fmt.Errorf("renaming plugin cache: %w", err))
 			}
@@ -390,12 +397,20 @@ func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src
 // rekeyRegistry moves every <plugin>@oldName entry to <plugin>@newName and
 // rewrites the install paths that lived under the renamed cache directory;
 // entries for other marketplaces, and paths outside the cache, are untouched.
+// A <plugin>@newName key can already be taken by an orphan — RemoveMarketplace
+// drops a marketplace's registration but not its registry entries — so the copy
+// pass runs first and the moved entries overwrite it, dropping the orphan
+// rather than letting map order decide whether a ghost replaces a live install.
 func rekeyRegistry(reg Registry, oldName, newName, oldCache, newCache string) Registry {
 	out := Registry{Version: reg.Version, Plugins: make(map[string][]InstallEntry, len(reg.Plugins))}
 	for key, entries := range reg.Plugins {
+		if _, marketplace := splitKey(key); marketplace != oldName {
+			out.Plugins[key] = entries
+		}
+	}
+	for key, entries := range reg.Plugins {
 		plugin, marketplace := splitKey(key)
 		if marketplace != oldName {
-			out.Plugins[key] = entries
 			continue
 		}
 		moved := make([]InstallEntry, 0, len(entries))

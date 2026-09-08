@@ -3,6 +3,7 @@ package plugins
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -575,6 +576,46 @@ func TestEditMarketplace_RestoresDirectoriesWhenARenameStepFails(t *testing.T) {
 	}
 }
 
+func TestEditMarketplace_RefusesALeftoverPluginCache(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	mktRepo, name := makeInstallableMarketplace(t)
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: mktRepo}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", name); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// What removing a marketplace named beta leaves behind: RemoveMarketplace
+	// drops the clone and the registration, never the plugin cache.
+	leftover := filepath.Join(m.cacheDir(), "beta")
+	if err := os.MkdirAll(filepath.Join(leftover, "widget", "deadsha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := m.EditMarketplace(ctx, name, "beta", nil)
+	if err == nil {
+		t.Fatal("expected the rename to be refused")
+	}
+	// Where an os.Rename LinkError said only "directory not empty".
+	if want := fmt.Sprintf("plugin cache %s already exists", leftover); !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want it to contain %q", err, want)
+	}
+	if _, err := os.Stat(m.marketplaceDir(name)); err != nil {
+		t.Fatalf("the clone was not restored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(m.cacheDir(), name)); err != nil {
+		t.Fatalf("the plugin cache moved anyway: %v", err)
+	}
+	list, _ := m.ListMarketplaces()
+	if _, ok := list[name]; !ok || len(list) != 1 {
+		t.Fatalf("list changed after a refused rename: %v", list)
+	}
+}
+
 func TestEditMarketplace_Refusals(t *testing.T) {
 	m := NewManager(t.TempDir())
 	ctx := context.Background()
@@ -619,13 +660,17 @@ func TestRekeyRegistry(t *testing.T) {
 		registryKey("widget", "acme"):    {{InstallPath: filepath.Join(oldCache, "widget", "abc")}},
 		registryKey("other", "zeta"):     {{InstallPath: filepath.Join("cache", "zeta", "other", "def")}},
 		registryKey("elsewhere", "acme"): {{InstallPath: filepath.Join("somewhere", "else")}},
+		// An orphan a removed marketplace named beta left behind: removal drops
+		// the registration but not the registry entries, so the rename target's
+		// key is already taken and the live install has to win it.
+		registryKey("widget", "beta"): {{InstallPath: filepath.Join(newCache, "widget", "ghost")}},
 	}}
 	got := rekeyRegistry(reg, "acme", "beta", oldCache, newCache)
 	if _, still := got.Plugins[registryKey("widget", "acme")]; still {
 		t.Fatal("old key survived")
 	}
 	if p := got.Plugins[registryKey("widget", "beta")][0].InstallPath; p != filepath.Join(newCache, "widget", "abc") {
-		t.Fatalf("InstallPath = %q", p)
+		t.Fatalf("InstallPath = %q, want the moved entry to beat the orphan already under that key", p)
 	}
 	if p := got.Plugins[registryKey("other", "zeta")][0].InstallPath; p != filepath.Join("cache", "zeta", "other", "def") {
 		t.Fatalf("an unrelated entry changed: %q", p)
