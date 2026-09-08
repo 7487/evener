@@ -600,19 +600,20 @@ func streamDeltaForMethod(method string) streamDeltaKind {
 	return streamDeltaNone
 }
 
-// streamDeltaChunk is the shared delta envelope: routing fields plus the one
-// text chunk the frame carries. All three delta params shapes decode into it
-// (unknown fields are ignored), so N chunks in one frame pay one unmarshal
-// each with no per-kind typed struct, and one reducer build + apply total.
-type streamDeltaChunk = appwire.ToolOutputDeltaParams
+// The three delta notifications share one params shape once the fields each
+// one omits are ignored, and appwire.ToolOutputDeltaParams is that shape: it
+// carries the routing fields plus the chunk, and its CallID is simply absent
+// from the other two. Decoding every kind into it keeps the wire contract in
+// the package that owns it, so N chunks in one frame still pay one unmarshal
+// each with no per-kind typed struct.
 
 // decodeStreamDeltaChunk extracts the shared delta envelope from raw params.
 // It reports false for malformed frames, mirroring the old per-kind behavior
 // of dropping a frame whose params fail to decode.
-func decodeStreamDeltaChunk(raw json.RawMessage) (streamDeltaChunk, bool) {
-	var chunk streamDeltaChunk
+func decodeStreamDeltaChunk(raw json.RawMessage) (appwire.ToolOutputDeltaParams, bool) {
+	var chunk appwire.ToolOutputDeltaParams
 	if len(raw) == 0 || json.Unmarshal(raw, &chunk) != nil {
-		return streamDeltaChunk{}, false
+		return appwire.ToolOutputDeltaParams{}, false
 	}
 	return chunk, true
 }
@@ -668,7 +669,7 @@ func (m *hubModel) applyHubStreamDeltaFast(notification appwire.Notification) bo
 
 // streamChunkMatchesCurrentSession is notificationMatchesCurrentSession over
 // an already-decoded delta envelope: same comparisons, no second unmarshal.
-func (m *hubModel) streamChunkMatchesCurrentSession(chunk streamDeltaChunk) bool {
+func (m *hubModel) streamChunkMatchesCurrentSession(chunk appwire.ToolOutputDeltaParams) bool {
 	detailRef := strings.TrimSpace(m.detail.Ref)
 	if chunk.Ref != "" && detailRef != "" {
 		return chunk.Ref == detailRef
