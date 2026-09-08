@@ -213,7 +213,7 @@ Pushed to subscribed connections; no `id`. The web client maps these in
 | `evener/attention/changed` | `AttentionChangedPayload` | Hub-derived attention transitions for live sessions plus authoritative badge summary. Hub-originated; never sent by daemons. |
 | `evener/navigation/invalidated` | `NavigationInvalidatedPayload` | Hub-derived scoped navigation-resource invalidation. Clients conditionally revalidate only the named loaded resources. |
 | `evener/marketplace/updated` | `EmptyParams` | Broadcast after a marketplace mutation (add/edit/remove/refresh); no payload. Clients refresh the marketplace list. |
-| `evener/plugin/updated` | `EmptyParams` | Broadcast after a plugin mutation (install/upgrade/remove/enable/disable/setAutoUpgrade, or a marketplace rename re-keying installs); no payload. Clients refresh the plugin list. |
+| `evener/plugin/updated` | `EmptyParams` | Broadcast after a plugin mutation (install/upgrade/remove/enable/disable/setAutoUpgrade, or a marketplace edit that can re-key installs); no payload. Clients refresh the plugin list. |
 | `evener/thread/resync` | `ThreadResyncParams` | Hub-originated hint asking clients to re-read one thread after relay recovery. |
 | `evener/task/updated` | `TaskUpdatedParams` | The session's task-list outcome counts (total/done/cancelled/remaining) changed. |
 | `evener/goal/updated` | `GoalUpdatedParams` | The session's complete structured goal state changed; null clears it. |

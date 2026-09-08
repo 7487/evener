@@ -286,7 +286,7 @@ var Notifications = []NotificationSpec{
 	{NotifyEvenerAttentionChanged, AttentionChangedPayload{}, "Hub-derived attention transitions for live sessions plus authoritative badge summary. Hub-originated; never sent by daemons."},
 	{NotifyEvenerNavigationInvalidated, NavigationInvalidatedPayload{}, "Hub-derived scoped navigation-resource invalidation. Clients conditionally revalidate only the named loaded resources."},
 	{NotifyEvenerMarketplaceUpdated, EmptyParams{}, "Broadcast after a marketplace mutation (add/edit/remove/refresh); no payload. Clients refresh the marketplace list."},
-	{NotifyEvenerPluginUpdated, EmptyParams{}, "Broadcast after a plugin mutation (install/upgrade/remove/enable/disable/setAutoUpgrade, or a marketplace rename re-keying installs); no payload. Clients refresh the plugin list."},
+	{NotifyEvenerPluginUpdated, EmptyParams{}, "Broadcast after a plugin mutation (install/upgrade/remove/enable/disable/setAutoUpgrade, or a marketplace edit that can re-key installs); no payload. Clients refresh the plugin list."},
 	{NotifyEvenerThreadResync, ThreadResyncParams{}, "Hub-originated hint asking clients to re-read one thread after relay recovery."},
 	{NotifyEvenerTaskUpdated, TaskUpdatedParams{}, "The session's task-list outcome counts (total/done/cancelled/remaining) changed."},
 	{NotifyEvenerGoalUpdated, GoalUpdatedParams{}, "The session's complete structured goal state changed; null clears it."},

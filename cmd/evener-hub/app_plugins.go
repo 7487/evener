@@ -257,8 +257,8 @@ func (c *hubPluginsController) RefreshMarketplace(ctx context.Context, params ap
 
 // EditMarketplace renames a marketplace and/or replaces its source and
 // returns the updated list. The manager's sentinels become the wire's own
-// refusal classes - a taken name is the caller's Conflict, an unknown name
-// their InvalidParams - while a fetch failure or a rename the filesystem
+// refusal classes — a taken name is the caller's Conflict, an unknown name
+// their InvalidParams — while a fetch failure or a rename the filesystem
 // refused stays the hub's plain error.
 func (c *hubPluginsController) EditMarketplace(ctx context.Context, params appwire.MarketplaceEditParams) (appwire.MarketplaceListResponse, error) {
 	var src *plugins.Source

@@ -365,6 +365,31 @@ func TestPlugins_Marketplace_EditRenamesAndReturnsTheList(t *testing.T) {
 	}
 }
 
+// A present Source is the only path through marketplaceSourceFromWire on this
+// method, and the frontend's re-source flow is entirely that path.
+func TestPlugins_Marketplace_EditReplacesTheSource(t *testing.T) {
+	ctl := newTestPluginsController(t)
+	dir := t.TempDir()
+	writeTestMarketplace(t, dir)
+	addTestMarketplace(t, ctl, dir)
+	moved := t.TempDir()
+	writeTestMarketplace(t, moved)
+
+	resp, err := ctl.EditMarketplace(context.Background(), appwire.MarketplaceEditParams{
+		Name:   "acme",
+		Source: &appwire.MarketplaceSourceInput{Kind: "directory", Path: moved},
+	})
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if len(resp.Marketplaces) != 1 || resp.Marketplaces[0].Name != "acme" {
+		t.Fatalf("EditMarketplace response = %+v, want one entry named acme", resp.Marketplaces)
+	}
+	if got := resp.Marketplaces[0].Source; got.Kind != "directory" || got.Path != moved {
+		t.Fatalf("Source = %+v, want directory %q", got, moved)
+	}
+}
+
 func TestPlugins_Marketplace_EditRefusalsAreWireErrors(t *testing.T) {
 	ctl := newTestPluginsController(t)
 	dir := t.TempDir()
