@@ -32,11 +32,9 @@ export class MutationDispatcher {
     await Promise.all([...new Set(targetRefs)].map((targetRef) => this.#dispatchTarget(targetRef)));
   }
 
-  // restoreProvenAbsent reopens dispatch for blockedUnknown records the
-  // authoritative read proved the daemon never accepted (see the storage
-  // method's comment for why absence is proof). Runs beside
-  // reconcileIdentities on the hydration publish path: reconcile settles what
-  // the authority knows, this restores what it provably does not.
+  // Reopen unresolved records beside receipt reconciliation. A live snapshot
+  // may omit accepted work, so dispatch preserves each original mutation ID
+  // and payload for journal replay and instance-fence validation.
   async restoreProvenAbsent(targetRef: string, authoritativeIds: ReadonlySet<string>): Promise<void> {
     const restored = await this.#storage.restoreProvenAbsent(targetRef, authoritativeIds);
     if (restored.length > 0) this.#onStorageChange([targetRef]);
