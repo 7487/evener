@@ -248,7 +248,7 @@ func admitSessionRecovery(ctx context.Context, cfg hubcore.WebConfig, message ap
 			return ctx
 		}
 		rawRef, id = params.Ref, strings.TrimSpace(params.ThreadID)
-	case appwire.MethodThreadModelSet, appwire.MethodThreadVisionModelSet,
+	case appwire.MethodEvenerThreadNameSet, appwire.MethodThreadModelSet, appwire.MethodThreadVisionModelSet,
 		appwire.MethodThreadReasoningEffortSet, appwire.MethodThreadCompactStart,
 		appwire.MethodThreadClear, appwire.MethodThreadShutdown, appwire.MethodGoalSet,
 		appwire.MethodTurnQueue, appwire.MethodTurnDrainAsSteer,
