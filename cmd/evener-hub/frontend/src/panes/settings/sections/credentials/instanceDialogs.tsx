@@ -7,10 +7,10 @@
 // itself.
 //
 // Updated for the provider registry's instance shape (spec §11.3): Type
-// becomes Base provider over availableProviders, the openai-only API-style
-// radio is gone (Protocol is no longer openai-specific data the form
-// special-cases), and the Add form gains a dynamic Input per the selected
-// provider's Vars entry plus api-key-env/credential-header fields
+// becomes Base provider over availableProviders, Protocol and Surface are
+// plain selects over the registry's vocabularies (instanceEdit.ts),
+// defaulting to inherit, and the Add form gains a dynamic Input per the
+// selected provider's Vars entry plus api-key-env/credential-header fields
 // mirroring the CLI's --api-key-env/--credential-header flags (§11.2).
 // Vars maps template placeholder name -> environment variable name
 // (roborev round 1, F3): the input is labeled by the env name (what the
@@ -23,6 +23,7 @@ import { credentialsStore } from "../../../../stores/credentials";
 import { Button, Dialog, FormRow, Input, Select, type SelectOption, useToasts } from "../../../../widgets";
 import { requireClass } from "../../../../widgets/internal/requireClass";
 import styles from "./instanceDialogs.module.css";
+import { PROTOCOL_OPTIONS, SURFACE_OPTIONS } from "./instanceEdit";
 
 import { useEditorLifetime } from "./useEditorLifetime";
 
@@ -55,6 +56,8 @@ export function AddInstanceDialog({ availableProviders, onCancel, onSuccess }: A
   const [base, setBase] = useState("");
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [protocol, setProtocol] = useState("");
+  const [surface, setSurface] = useState("");
   const [vars, setVars] = useState<Record<string, string>>({});
   const [apiKeyEnv, setApiKeyEnv] = useState("");
   const [credentialHeader, setCredentialHeader] = useState("");
@@ -101,6 +104,8 @@ export function AddInstanceDialog({ availableProviders, onCancel, onSuccess }: A
         name: trimmedName,
         base,
         baseUrl: baseUrl.trim(),
+        protocol: protocol || undefined,
+        surface: surface || undefined,
         vars: nonEmptyVars(vars),
         apiKeyEnv: apiKeyEnv.trim() || undefined,
         credentialHeader: trimmedCredentialHeader || undefined,
@@ -144,6 +149,28 @@ export function AddInstanceDialog({ availableProviders, onCancel, onSuccess }: A
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
             placeholder="https://…"
+            disabled={busy}
+          />
+        </FormRow>
+        <FormRow
+          label="Protocol"
+          htmlFor="add-instance-protocol"
+          help="Leave on inherit unless the endpoint speaks a different wire protocol than its base."
+        >
+          <Select
+            id="add-instance-protocol"
+            value={protocol}
+            onChange={(event) => setProtocol(event.target.value)}
+            options={PROTOCOL_OPTIONS}
+            disabled={busy}
+          />
+        </FormRow>
+        <FormRow label="Surface" htmlFor="add-instance-surface">
+          <Select
+            id="add-instance-surface"
+            value={surface}
+            onChange={(event) => setSurface(event.target.value)}
+            options={SURFACE_OPTIONS}
             disabled={busy}
           />
         </FormRow>

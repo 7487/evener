@@ -281,6 +281,36 @@ describe("AddInstanceDialog", () => {
     expect(screen.getAllByText("Create failed: name already exists").length).toBeGreaterThan(0);
     expect(onSuccess).not.toHaveBeenCalled();
   });
+
+  test("Protocol and Surface default to inherit and are sent only when chosen", async () => {
+    const fake = connectFakeClient();
+    fake.on("evener/instance/create", (params) => {
+      expect(params).toEqual({
+        name: "work",
+        base: "anthropic",
+        baseUrl: "",
+        protocol: "openai-responses",
+        surface: "generic",
+      });
+      return { instances: [], availableProviders: [] };
+    });
+    const onSuccess = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <>
+        <AddInstanceDialog availableProviders={[ANTHROPIC]} onCancel={() => {}} onSuccess={onSuccess} />
+        <Toast />
+      </>,
+    );
+    expect((screen.getByLabelText("Protocol") as HTMLSelectElement).value).toBe("");
+    expect((screen.getByLabelText("Surface") as HTMLSelectElement).value).toBe("");
+    await user.selectOptions(screen.getByLabelText("Base provider"), "anthropic");
+    await user.type(screen.getByLabelText("Name"), "work");
+    await user.selectOptions(screen.getByLabelText("Protocol"), "openai-responses");
+    await user.selectOptions(screen.getByLabelText("Surface"), "generic");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+  });
 });
 
 describe("ApiKeyDialog", () => {
