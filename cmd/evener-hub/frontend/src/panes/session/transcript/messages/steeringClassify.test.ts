@@ -641,3 +641,45 @@ Timer fired (every 86400s).
   const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
   expect(n.secondary).toBe("every 24h");
 });
+
+// --- RoboRev combined review (43fe73f): teardown generic bodies (M1) --------
+// A job-targeted teardown notice's body is ALSO the generic "Job <id> watch."
+// sentence (formatJobNotificationBlock's non-empty-JobID fallthrough covers
+// teardown reasons too, not just condition fires). The card must surface the
+// reason, not the generic sentence.
+
+test("a job-targeted teardown notice surfaces the reason, not the generic body (M1)", () => {
+  const block = `<job-notification job_id="job_x" event="watch" job_type="watch" status="watch" reason="watch ended: job_x is terminal (status=completed reason=done output_bytes=10); condition never matched" output_bytes="0">
+Job job_x watch. Output is available through read_transcript if needed.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.type).toBe("watch");
+  expect(n.title).toBe("Watch ended");
+  expect(n.prose).toContain("condition never matched");
+  expect(n.prose).not.toContain("Job job_x watch.");
+});
+
+// --- RoboRev combined review (43fe73f): single entity decode (L1) -----------
+// The producer escapes once; the card decodes once. A matched pattern that
+// literally contains "&lt;" arrives double-escaped ("&amp;lt;") and must
+// decode to the literal "&lt;" text — never all the way to "<".
+
+test("a literal entity sequence in a job-targeted reason decodes exactly once (L1)", () => {
+  const block = `<job-notification job_id="job_a1b2" event="watch" job_type="watch" status="watch" reason="output_match: a &amp;lt; b" output_bytes="0">
+Job job_a1b2 watch. Output is available through read_transcript if needed.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.prose).toContain("a &lt; b");
+  expect(n.prose).not.toContain("a < b");
+});
+
+test("a status-only watch frame earns no tone chip (combined review M2)", () => {
+  // The parser types event OR status "watch"; the tone short-circuit must
+  // mirror it. A frame with only status="watch" is still a watch delivery.
+  const block = `<job-notification job_id="job_a1b2" status="watch" job_type="watch" reason="output_match: ready" output_bytes="0">
+Job job_a1b2 watch. Output is available through read_transcript if needed.
+</job-notification>`;
+  const n = notif(notificationsOf(parseSteeringNotifications(block)), 0);
+  expect(n.type).toBe("watch");
+  expect(n.tone).toBe("neutral");
+});

@@ -209,7 +209,7 @@ const INSPECT_RAW = {
 test("inspect summary names the id, watching state, and deliveries used", () => {
   const d = toolRendererFor("job_watch");
   expect(d.summary(watchItem({ operation: "inspect", watch_id: "watch_09QmWzRtNvxK" }, INSPECT_RAW))).toBe(
-    "Inspected watch_09QmWzRtNvxK · watching · 3 of 50 used",
+    "Inspected watch_09QmWzRtNvxK · watching · 3 deliveries",
   );
 });
 
@@ -220,7 +220,7 @@ test("inspect body is one sentence with the source, pattern, and budget use", ()
   const body = screen.getByTestId("job-watch-body").textContent ?? "";
   expect(body).toContain("job_a1b2");
   expect(body).toContain("ready|done");
-  expect(body).toContain("3 of 50");
+  expect(body).toContain("3 deliveries");
 });
 
 test("inspect body humanizes the embedded heartbeat instead of raw milliseconds (RoboRev PR #954)", () => {
@@ -805,4 +805,87 @@ test("an inspect with no id falls back to the operation verb (finding L4)", () =
   expect(d.summary(watchItem({ operation: "inspect" }, { source: "job_a1b2", watching: true }))).toBe(
     "job_watch: inspect",
   );
+});
+
+// --- RoboRev combined review (43fe73f): combined triggers (M3) --------------
+// output_match + progress_interval_ms combine freely on a concrete job
+// (only timer fields are mutually exclusive with conditions). The summary
+// and inspect body must name BOTH the pattern and the heartbeat.
+
+test("a combined pattern + heartbeat watch names both (M3)", () => {
+  const d = toolRendererFor("job_watch");
+  const raw = {
+    watch_id: "watch_combo",
+    source: "job_a1b2",
+    watching: true,
+    output_match: "ready|done",
+    progress_interval_ms: 120000,
+    replaced_existing: false,
+    fired: false,
+  };
+  const summary = d.summary(watchItem({ operation: "create" }, raw));
+  expect(summary).toContain("ready|done");
+  expect(summary).toContain("every 2m");
+  const Body = d.body!;
+  render(<Body item={watchItem({ operation: "create" }, raw)} live={false} />);
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("ready|done");
+  expect(body).toContain("every 2m");
+});
+
+test("a combined pattern + heartbeat inspect names both (M3)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  render(
+    <Body
+      item={watchItem(
+        { operation: "inspect", watch_id: "watch_combo" },
+        {
+          watch_id: "watch_combo",
+          source: "job_a1b2",
+          watching: true,
+          condition: "output_match: ready|done; progress_interval_ms: 120000",
+          deliveries: 1,
+          created_at: "2026-09-06T09:41:00-07:00",
+        },
+      )}
+      live={false}
+    />,
+  );
+  const body = screen.getByTestId("job-watch-body").textContent ?? "";
+  expect(body).toContain("ready|done");
+  expect(body).toContain("every 2m");
+});
+
+// --- RoboRev combined review (43fe73f): empty create card (L2) --------------
+// A recognized create with only a source (no timer, no condition) has no
+// sentence to render — the summary ("Watch this session") IS the rendering,
+// so the body must be null, not an empty bordered card.
+
+test("a sourceless-condition create renders no body card (L2)", () => {
+  const d = toolRendererFor("job_watch");
+  const Body = d.body!;
+  const { container } = render(
+    <Body
+      item={watchItem({ operation: "create" }, { watch_id: "watch_bare", source: "self", watching: true })}
+      live={false}
+    />,
+  );
+  expect(container.textContent?.trim() ?? "").toBe("");
+});
+
+// --- RoboRev combined review (43fe73f): live ended rows count ended (L3) ----
+// A live row carrying an end_reason is ended, not pending — the summary must
+// agree with the row chip.
+
+test("a live row with an end_reason counts as ended (L3)", () => {
+  const d = toolRendererFor("job_watch");
+  const raw = {
+    watches: [{ watch_id: "watch_e", source: "job_a1b2", watching: false, end_reason: "cleared" }],
+    count: 1,
+  };
+  expect(d.summary(watchItem({ operation: "list" }, raw))).toBe("Listed watches (0 active · 1 ended)");
+  const Body = d.body!;
+  render(<Body item={watchItem({ operation: "list" }, raw)} live={false} />);
+  expect(screen.getByTestId("job-watch-body").textContent ?? "").toContain("ended");
 });

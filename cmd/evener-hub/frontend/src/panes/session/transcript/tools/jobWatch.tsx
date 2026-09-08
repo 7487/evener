@@ -12,6 +12,8 @@
 // summaries, raw disclosures only); status chips only in list rows, where
 // watching vs ended varies per row; clear and terminal catch-up are quiet
 // one-liners — the summary line IS the rendering, expanded body empty.
+
+import type { ReactNode } from "react";
 import { useState } from "react";
 import type { ItemModel } from "../../../../protocol/model";
 import { Chip } from "../../../../widgets";
@@ -36,10 +38,13 @@ const CLASS = {
   disclosureSummary: requireClass(styles.disclosureSummary, "jobWatch.module.css", "disclosureSummary"),
 };
 
-// watchDeliveryBudget in agent/job_watch.go: the condition-fire budget every
-// inspect summary measures deliveries against. Carried as a literal with the
-// same "budget" framing the Go side's own notices use ("matched 50 times"),
-// not derived — item.raw carries only the used count.
+// watchDeliveryBudget in agent/job_watch.go: the condition-fire budget the
+// Go side's own notices name ("matched 50 times"). It is NOT the denominator
+// for the deliveries count below: cfg.deliveries counts every model-facing
+// delivery including periodic progress/timer ticks that never consume the
+// condition-fire budget (countWatchDeliveryLocked), so "N of 50" can read
+// past the budget ("55 of 50"). The count renders bare, labeled as what it
+// is (combined RoboRev review).
 const WATCH_DELIVERY_BUDGET = 50;
 
 // NOTE_CLAMP_LINES is the note policy, not a measurement: notes at or under
@@ -296,31 +301,32 @@ function summarizeCreate(raw: JsonObject, item: ItemModel): string {
   const source = sourceLabel(strField(raw, "source"));
   const condition = conditionSpec(raw, asJsonObject(parseArgs(item.argumentsJSON)));
   if (!condition) return `Watch ${source}`;
-  if (condition.outputMatch) {
-    const suffix = cadenceSuffix(condition);
-    return suffix
-      ? `Watch ${source} for “${condition.outputMatch}” ${suffix}`
-      : `Watch ${source} for “${condition.outputMatch}”`;
+  // Trigger clauses compose: output_match, events (+every throttle, filter),
+  // and the progress heartbeat combine freely on a live watch (only timer
+  // fields are mutually exclusive with conditions — the producer's own
+  // watchConditionSummary joins every populated clause with "; "). The
+  // summary names every armed clause so none is silently dropped (combined
+  // RoboRev review).
+  const clauses: string[] = [];
+  if (condition.outputMatch) clauses.push(`“${condition.outputMatch}”`);
+  if (condition.events.length > 0) {
+    const throttle = condition.every !== undefined ? ` (every ${condition.every})` : "";
+    clauses.push(`${condition.events.join(", ")}${throttle}`);
   }
   if (condition.filterStatus || condition.filterToolName) {
     // An event-filter watch names the watched shape in words — both
     // statuses explicitly (RoboRev PR #954: status "ok" was discarded).
     // Never the raw filter keys.
-    const what = filterSummaryPhrase(condition);
-    return `Watch ${source} for ${what}`;
+    clauses.push(filterSummaryPhrase(condition));
   }
-  if (condition.events.length > 0) {
-    const suffix = cadenceSuffix(condition);
-    const throttle = condition.every !== undefined ? ` (every ${condition.every})` : "";
-    const named = `${condition.events.join(", ")}${throttle}`;
-    return suffix ? `Watch ${source} for ${named} ${suffix}` : `Watch ${source} for ${named}`;
-  }
-  // A progress-only watch names its heartbeat (RoboRev PR #954 review 3) —
-  // reaching here means only progressIntervalMS is set (output, filter, and
-  // events return above; timers return earlier), so the cadence suffix must
-  // be present.
-  const heartbeat = cadenceSuffix(condition);
-  return heartbeat ? `Watch ${source} ${heartbeat}` : `Watch ${source}`;
+  const cadence = cadenceSuffix(condition);
+  if (cadence) clauses.push(cadence.replace(/^· /, ""));
+  if (clauses.length === 0) return `Watch ${source}`;
+  // A bare heartbeat keeps its established "Watch X · every 2m" shape
+  // (RoboRev PR #954 review 3, finding F) — "for" needs a trigger to read
+  // against.
+  if (clauses.length === 1 && cadence) return `Watch ${source} ${cadence}`;
+  return `Watch ${source} for ${clauses.join(" · ")}`;
 }
 
 // filterSummaryPhrase names an event-filter watch's shape in words, shared by
@@ -512,17 +518,20 @@ function listCounts(raw: JsonObject): { active: number; pending: number; ended: 
   const recent = Array.isArray(raw.recent_watches) ? raw.recent_watches : [];
   let active = 0;
   let pending = 0;
+  let liveEnded = 0;
   for (const entry of live) {
     const row = normalizeRow(entry);
     if (!row) continue;
-    // A live non-watching row is a detached watch on the terminal-flush rail
-    // (inspectResultFromDetachedWatchConfig) — the producer's own list footer
-    // calls it "pending", never "ended" (formatJobWatchList).
-    if (row.watching) active += 1;
-    else pending += 1;
+    // Count by the same state the row chip renders (watchState): a live row
+    // carrying an end_reason is ended, not pending, so the summary can never
+    // disagree with its rows (combined RoboRev review).
+    const state = watchState(row);
+    if (state === "watching") active += 1;
+    else if (state === "pending") pending += 1;
+    else liveEnded += 1;
   }
   // Recent watches are history entries: they ended (inspectResultFromWatchHistory).
-  const ended = recent.filter((entry) => normalizeRow(entry) !== undefined).length;
+  const ended = liveEnded + recent.filter((entry) => normalizeRow(entry) !== undefined).length;
   return { active, pending, ended };
 }
 
@@ -549,11 +558,10 @@ function summarizeInspect(item: ItemModel, raw: JsonObject): string {
     endReason: strField(raw, "end_reason"),
   });
   const deliveries = typeof raw.deliveries === "number" ? raw.deliveries : undefined;
-  // Deliveries used measures against the delivery budget ("3 of 50 used")
-  // — the same budget the Go side's own notices name. Ended or
-  // not-yet-delivered watches carry no count to render.
+  // Deliveries counts every model-facing delivery (condition fires plus
+  // periodic progress/timer ticks) — bare, with no budget denominator.
   if (deliveries !== undefined && state === "watching") {
-    return `Inspected ${id} · watching · ${deliveries} of ${WATCH_DELIVERY_BUDGET} used`;
+    return `Inspected ${id} · watching · ${deliveries} deliveries`;
   }
   // The summary speaks the producer's footer words ("not found"), not the
   // internal state name (formatJobWatchInspect).
@@ -617,89 +625,91 @@ function NoteSection({ note }: { note: string }) {
 // conditionSentence renders the one-sentence body for a condition watch:
 // source + condition + cadence in prose, patterns in mono. Raw field names
 // (progress_interval_ms, output_match:) never surface — the cadence is a
-// heartbeat phrase, the pattern is quoted.
+// heartbeat phrase, the pattern is quoted. Clauses compose: a watch may arm
+// a pattern AND event/filter triggers AND a heartbeat together (only timer
+// fields exclude conditions), so every populated clause renders instead of
+// returning after the first (combined RoboRev review).
 function ConditionSentence({ source, spec }: { source: string; spec: ConditionSpec }) {
   const heartbeat = heartbeatPhrase(spec);
+  const head: ReactNode[] = [];
   if (spec.outputMatch) {
-    return (
-      <span>
-        Wakes you when <span className={CLASS.mono}>{source}</span> outputs{" "}
-        <span className={CLASS.mono}>{spec.outputMatch}</span>
-        {heartbeat ? `, ${heartbeat}` : ""}, auto-clears after {WATCH_DELIVERY_BUDGET} matches.
-      </span>
+    head.push(
+      <span key="pattern">
+        outputs <span className={CLASS.mono}>{spec.outputMatch}</span>
+      </span>,
     );
   }
   if (spec.filterStatus || spec.filterToolName) {
     // Both filter statuses read explicitly (RoboRev PR #954: status "ok"
     // was discarded into a bare tool name). The tool rides along when
     // present; the event name disambiguates in list/inspect context.
-    const tool = spec.filterToolName ? (
-      <>
-        {" "}
-        on <span className={CLASS.mono}>{spec.filterToolName}</span>
-      </>
-    ) : null;
+    if (spec.filterToolName) {
+      head.push(
+        <span key="filter-tool">
+          makes a tool call on <span className={CLASS.mono}>{spec.filterToolName}</span>
+        </span>,
+      );
+    } else {
+      head.push(<span key="filter-tool">makes a tool call</span>);
+    }
     // Both non-status filters (tool-only, or a bare filter with neither
     // field) read "matching" — a single path, no dead ternary (RoboRev PR
-    // #954 combined review). The tool rides along in {tool} when present.
-    const outcome =
-      spec.filterStatus === "error" ? (
-        <span>
-          ending in <span className={CLASS.mono}>error</span>
-        </span>
-      ) : spec.filterStatus === "ok" ? (
-        <span>
-          ending in <span className={CLASS.mono}>ok</span>
-        </span>
-      ) : (
-        "matching"
+    // #954 combined review).
+    if (spec.filterStatus === "error" || spec.filterStatus === "ok") {
+      head.push(
+        <span key="filter-outcome">
+          {" "}
+          ending in <span className={CLASS.mono}>{spec.filterStatus}</span>
+        </span>,
       );
+    } else {
+      head.push(<span key="filter-outcome"> matching</span>);
+    }
     // Name the filtered event: in inspect/list context the events array is
     // not shown separately, and the filter only ever attaches to
     // assistant.tool — without the name the sentence loses what fires.
-    const eventName =
-      spec.events.length === 1 ? (
-        <>
+    if (spec.events.length === 1) {
+      head.push(
+        <span key="filter-event">
           {" "}
           (<span className={CLASS.mono}>{spec.events[0]}</span>)
-        </>
-      ) : null;
+        </span>,
+      );
+    }
     // The every throttle rides the filter sentence too (RoboRev PR #954
     // review 3): a filter Condition carries it ("events: […] every N where
     // …"), and dropping it claims every event fires. Same "(every N)" shape
     // as the events branch below.
+    if (spec.every !== undefined) head.push(<span key="filter-every"> (every {spec.every})</span>);
+  } else if (spec.events.length > 0) {
     const throttle = spec.every !== undefined ? ` (every ${spec.every})` : "";
-    return (
-      <span>
-        Wakes you when <span className={CLASS.mono}>{source}</span> makes a tool call {outcome}
-        {tool}
-        {eventName}
-        {throttle}.
-      </span>
-    );
-  }
-  if (spec.events.length > 0) {
-    const throttle = spec.every !== undefined ? ` (every ${spec.every})` : "";
-    return (
-      <span>
-        Wakes you on <span className={CLASS.mono}>{spec.events.join(", ")}</span>
+    head.push(
+      <span key="events">
+        wakes on <span className={CLASS.mono}>{spec.events.join(", ")}</span>
         {throttle}
-        {heartbeat ? `, ${heartbeat}` : ""}.
-      </span>
+      </span>,
     );
   }
-  if (heartbeat) {
+  if (heartbeat) head.push(<span key="heartbeat">{`, ${heartbeat}`}</span>);
+  if (head.length === 0) {
     return (
       <span>
-        Watches <span className={CLASS.mono}>{source}</span>, {heartbeat}.
+        Watches <span className={CLASS.mono}>{source}</span>.
       </span>
     );
   }
   return (
     <span>
-      Watches <span className={CLASS.mono}>{source}</span>.
+      Wakes you when <span className={CLASS.mono}>{source}</span> {joinNodes(head, ", ")}, auto-clears after{" "}
+      {WATCH_DELIVERY_BUDGET} matches.
     </span>
   );
+}
+
+// joinNodes joins rendered clause nodes with a separator string, keyed so
+// React needs no index keys.
+function joinNodes(nodes: ReactNode[], separator: string): ReactNode[] {
+  return nodes.flatMap((node, i) => (i === 0 ? [node] : [separator, node]));
 }
 
 function CreateBody({ raw, item }: { raw: JsonObject; item: ItemModel }) {
@@ -779,8 +789,7 @@ function rowDetailPhrase(row: WatchRow): string | undefined {
   if (!row.watching || !row.condition) return undefined;
   const parsed = parseConditionText(row.condition);
   const source = sourceLabel(row.source);
-  const deliveries =
-    row.deliveries !== undefined ? ` — ${row.deliveries} of ${WATCH_DELIVERY_BUDGET} deliveries used` : "";
+  const deliveries = row.deliveries !== undefined ? ` — ${row.deliveries} deliveries` : "";
   if (parsed.outputMatch) {
     const heartbeat =
       parsed.progressIntervalMS !== undefined
@@ -903,7 +912,7 @@ function InspectBody({ raw }: { raw: JsonObject }) {
   const parsed = condition ? parseConditionText(condition) : undefined;
   const deliveries = typeof raw.deliveries === "number" ? raw.deliveries : undefined;
   const created = formatCreatedDate(strField(raw, "created_at"));
-  const used = deliveries !== undefined ? ` — ${deliveries} of ${WATCH_DELIVERY_BUDGET} deliveries used` : "";
+  const used = deliveries !== undefined ? ` — ${deliveries} deliveries` : "";
   const since = created ? `, ${created}` : "";
   // Every embedded condition form renders humanized: pattern, timer
   // cadence, heartbeat, events (+every throttle), and filter — the same
@@ -1009,6 +1018,12 @@ function JobWatchBody(props: ToolRenderProps) {
       if (isTerminalCatchup(raw)) return null;
       const timer = timerSpec(raw);
       if (timer && !timer.note) return null;
+      // A recognized create with only a source has no sentence to render —
+      // the summary ("Watch this session") IS the rendering. Returning null
+      // here instead of an empty bordered card (CreateBody also returns null
+      // for this shape, but the wrapper div would still draw the card chrome
+      // around nothing — combined RoboRev review).
+      if (!timer && !conditionSpec(raw, asJsonObject(parseArgs(item.argumentsJSON)))) return null;
       return (
         <div className={CLASS.card} data-testid="job-watch-body">
           <CreateBody raw={raw} item={item} />

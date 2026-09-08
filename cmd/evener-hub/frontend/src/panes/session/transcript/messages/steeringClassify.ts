@@ -281,9 +281,13 @@ function jobNotificationTone(
   // Same §E rule as notificationTone above: watch and watch-send deliveries
   // are expected outcomes. The budget auto-clear notice carries the same
   // watch event as a fire (agent/job_watch.go's watchNotification), so this
-  // covers it too — its "matched 50 times" words carry the signal.
+  // covers it too — its "matched 50 times" words carry the signal. The check
+  // mirrors the parser's type detection (event OR status "watch"): a
+  // status-only watch frame is still a watch delivery, never a chip
+  // (combined RoboRev review).
   const event = (attrs.event ?? "").trim().toLowerCase();
-  if (event === "watch" || event === "watch_send") {
+  const status = (attrs.status ?? "").trim().toLowerCase();
+  if (event === "watch" || event === "watch_send" || status === "watch") {
     return "neutral";
   }
   if ((communicate?.concerns.length ?? 0) > 0 || analysis.disposition === "stopped") {
@@ -421,7 +425,16 @@ function watchProse(attrs: Record<string, string>, bodyText: string): string {
   const jobId = (attrs.job_id ?? "").trim();
   if (!jobId) return bodyText;
   const reason = decodeNotificationEntities(attrs.reason ?? "").trim();
-  if (reason.startsWith("watch ended:") || reason.startsWith("watch cleared:")) return bodyText;
+  // Teardown notices ("watch ended:" / "watch cleared:") keep their own
+  // prose when the producer emitted it — but a job-targeted teardown's body
+  // is the same generic "Job <id> watch." sentence as a condition fire's
+  // (formatJobNotificationBlock's non-empty-JobID fallthrough covers every
+  // reason). Only a body that already carries the reason passes through; a
+  // generic body falls to the reason below (combined RoboRev review).
+  if (reason.startsWith("watch ended:") || reason.startsWith("watch cleared:")) {
+    if (bodyText.includes(reason)) return bodyText;
+    return reason;
+  }
   // Timer fires with a job_id are not a producer shape (timers emit watch_id
   // with an empty job_id), but if one ever arrives the body is already its
   // content — leave it alone.
