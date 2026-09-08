@@ -1046,8 +1046,12 @@ func TestInstances_EditClearsProtocolAndSurface(t *testing.T) {
 	if p := authoredEntry(t, f.tomlPath, "work"); p.Protocol != "" || p.Surface != "" {
 		t.Fatalf("after clearing: protocol %q surface %q", p.Protocol, p.Surface)
 	}
-	if e := entry(t, f.ctl.List(), "work"); e.Protocol == "" {
+	e := entry(t, f.ctl.List(), "work")
+	if e.Protocol == "" {
 		t.Fatal("the resolved protocol must fall back to the base's, not vanish")
+	}
+	if e.Surface != "openai" {
+		t.Fatalf("resolved surface = %q, want the base's", e.Surface)
 	}
 }
 
@@ -1068,4 +1072,133 @@ func TestInstances_EditDeletesAVarGivenAnEmptyValue(t *testing.T) {
 	if got["ZONE"] != "a" {
 		t.Fatalf("an untouched var changed: %v", got)
 	}
+}
+
+func TestInstances_EditRenamesEntryDefaultStoredKeyAndOAuthRecord(t *testing.T) {
+	f := newInstancesFixture(t, nil)
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai-codex"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := f.store.Set("work", "sk-stored"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	// The record has to be one LoadAuth accepts: moving it reads it back.
+	if err := authopenai.SaveAuth(f.stateDir, "work", makeOAuthRecord("work", "")); err != nil {
+		t.Fatalf("SaveAuth: %v", err)
+	}
+	if err := f.ctl.SetDefault(appwire.InstanceSetDefaultParams{Name: "work"}); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
+
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "personal"}); err != nil {
+		t.Fatalf("Edit(rename): %v", err)
+	}
+
+	l, _, err := registry.ReadConfigFile(f.tomlPath)
+	if err != nil {
+		t.Fatalf("ReadConfigFile: %v", err)
+	}
+	if _, still := l.Providers["work"]; still {
+		t.Fatal("[providers.work] survived the rename")
+	}
+	if _, ok := l.Providers["personal"]; !ok {
+		t.Fatalf("[providers.personal] missing; got %v", l.Providers)
+	}
+	if l.Default != "personal" {
+		t.Fatalf("default = %q, want the renamed instance", l.Default)
+	}
+	if v, _ := f.store.Get("personal"); v != "sk-stored" {
+		t.Fatalf("stored key did not move: personal = %q", v)
+	}
+	if v, _ := f.store.Get("work"); v != "" {
+		t.Fatalf("the old stored key was left behind: %q", v)
+	}
+	if _, err := authopenai.LoadAuth(f.stateDir, "personal"); err != nil {
+		t.Fatalf("OAuth record did not move: %v", err)
+	}
+	if _, err := authopenai.LoadAuth(f.stateDir, "work"); !errors.Is(err, authopenai.ErrAuthNotFound) {
+		t.Fatalf("the old OAuth record was left behind (err = %v)", err)
+	}
+	resp := f.ctl.List()
+	e := entry(t, resp, "personal")
+	if !e.IsDefault || !e.HasStoredFile || !e.HasStoredOAuth {
+		t.Fatalf("personal = %+v, want default with the stored key and OAuth record", e)
+	}
+	for _, e := range resp.Instances {
+		if e.Name == "work" {
+			t.Fatal("List still shows the old name")
+		}
+	}
+}
+
+func TestInstances_EditRenameRefusesAnImplicitInstance(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk"})
+	err := f.ctl.Edit(appwire.InstanceEditParams{Name: "groq", NewName: "g2"})
+	var wire appwire.WireError
+	if !errors.As(err, &wire) || wire.Code != appwire.CodeInvalidParams {
+		t.Fatalf("Edit = %v, want an InvalidParams wire error", err)
+	}
+	if l, exists, _ := registry.ReadConfigFile(f.tomlPath); exists {
+		if _, authored := l.Providers["g2"]; authored {
+			t.Fatal("a refused rename authored [providers.g2]")
+		}
+		if _, authored := l.Providers["groq"]; authored {
+			t.Fatal("a refused rename authored a shadow for groq")
+		}
+	}
+}
+
+func TestInstances_EditRenameRefusesATakenName(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk"})
+	for _, name := range []string{"work", "other"} {
+		if err := f.ctl.Create(appwire.InstanceCreateParams{Name: name, Base: "openai"}); err != nil {
+			t.Fatalf("Create %s: %v", name, err)
+		}
+	}
+	for _, taken := range []string{"other", "groq"} {
+		err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: taken})
+		var wire appwire.WireError
+		if !errors.As(err, &wire) || wire.Code != appwire.CodeConflict {
+			t.Fatalf("rename to %q = %v, want a Conflict wire error", taken, err)
+		}
+	}
+	authoredEntry(t, f.tomlPath, "work")
+	authoredEntry(t, f.tomlPath, "other")
+}
+
+func TestInstances_EditRenameRejectsAnInvalidName(t *testing.T) {
+	f := newInstancesFixture(t, nil)
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "Bad/Name"})
+	var wire appwire.WireError
+	if !errors.As(err, &wire) || wire.Code != appwire.CodeInvalidParams {
+		t.Fatalf("Edit = %v, want an InvalidParams wire error", err)
+	}
+	authoredEntry(t, f.tomlPath, "work")
+}
+
+func TestInstances_EditRenameAppliesTheOtherFieldsToo(t *testing.T) {
+	f := newInstancesFixture(t, nil)
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "work2", BaseURL: "https://gw.example.test/v1"}); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	if p := authoredEntry(t, f.tomlPath, "work2"); p.Transport.BaseURL != "https://gw.example.test/v1" {
+		t.Fatalf("work2 base_url = %q", p.Transport.BaseURL)
+	}
+}
+
+func TestInstances_EditSameNameIsNotARename(t *testing.T) {
+	f := newInstancesFixture(t, nil)
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "work"}); err != nil {
+		t.Fatalf("Edit with NewName == Name must be a plain no-op edit: %v", err)
+	}
+	authoredEntry(t, f.tomlPath, "work")
 }

@@ -318,6 +318,10 @@ func (c *hubInstancesController) Create(params appwire.InstanceCreateParams) err
 // merely displayed, which would stop the instance inheriting its provider's
 // key (spec §10, §11.3).
 //
+// A NewName re-keys the entry, follows the default pointer, and then moves
+// the stored key and OAuth record (moveCredentials); it is refused for an
+// implicit instance, an invalid name, or a name any instance already has.
+//
 // Refusals follow Create's convention (#717/#748): the ones that blame the
 // fields the caller sent — an unknown name, an invalid vars key, an edit
 // that would leave the instance unable to load — come back as
@@ -355,6 +359,22 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 			return appwire.InvalidParams(fmt.Sprintf("instance %q not found", name))
 		}
 		p = registry.Provider{ID: name}
+	}
+	newName := strings.TrimSpace(params.NewName)
+	renaming := newName != "" && newName != name
+	if renaming {
+		if !authored {
+			return appwire.InvalidParams(fmt.Sprintf("instance %q comes from the environment and cannot be renamed", name))
+		}
+		if !registry.ValidInstanceName(newName) {
+			return appwire.InvalidParams(fmt.Sprintf("invalid instance name %q (lowercase, no slash)", params.NewName))
+		}
+		if _, taken := l.Providers[newName]; taken {
+			return appwire.Conflict(fmt.Sprintf("instance %q already exists", newName))
+		}
+		if _, taken := c.reg.Get().Instance(newName); taken {
+			return appwire.Conflict(fmt.Sprintf("instance %q already exists", newName))
+		}
 	}
 	if params.ClearBaseURL {
 		// Drops the authored override and goes back to the registry
@@ -398,7 +418,18 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 		}
 		p.Transport.Vars[key] = value
 	}
-	l.Providers[name] = p
+	if renaming {
+		// The map key is the instance name providers.toml is written under;
+		// the default pointer follows so the file still loads.
+		delete(l.Providers, name)
+		p.ID = newName
+		if l.Default == name {
+			l.Default = newName
+		}
+		l.Providers[newName] = p
+	} else {
+		l.Providers[name] = p
+	}
 	if err := c.writeLoadable(l); err != nil {
 		return err
 	}
@@ -418,6 +449,46 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 		}
 		_ = c.reg.Reload() // best-effort: put the last-good registry view back
 		return appwire.InvalidParams(fmt.Sprintf("this edit would leave %q unable to load: %v", name, err))
+	}
+	if renaming {
+		return c.moveCredentials(name, newName)
+	}
+	return nil
+}
+
+// moveCredentials carries an instance's stored key and OAuth record to its
+// new name after a rename. It runs once providers.toml is written and
+// reloaded: the config is already renamed, so a failure here is reported as
+// what was left behind rather than undone - the list stays consistent with
+// the file, and a leftover stays reachable under the old name through
+// evener/auth/apiKey/clear or the state directory. One consequence: the
+// RPC handler broadcasts evener/auth/updated only when Edit returns nil, so
+// on this partial failure other clients keep the old name until their next
+// refresh. The success path — the one the spec's broadcast sentence is
+// about — is unaffected.
+func (c *hubInstancesController) moveCredentials(oldName, newName string) error {
+	var problems []string
+	if value, ok := c.auth.creds.Get(oldName); ok {
+		if err := c.auth.setCredential(newName, value); err != nil {
+			problems = append(problems, fmt.Sprintf("stored key not copied: %v", err))
+		} else if err := c.auth.clearCredential(oldName); err != nil {
+			problems = append(problems, fmt.Sprintf("stored key for %q left behind: %v", oldName, err))
+		}
+	}
+	record, err := c.auth.loadAuth(c.auth.stateDir, oldName)
+	switch {
+	case errors.Is(err, authopenai.ErrAuthNotFound):
+	case err != nil:
+		problems = append(problems, fmt.Sprintf("OAuth record not read: %v", err))
+	default:
+		if err := c.auth.saveAuth(c.auth.stateDir, newName, record); err != nil {
+			problems = append(problems, fmt.Sprintf("OAuth record not copied: %v", err))
+		} else if _, err := c.auth.deleteAuth(c.auth.stateDir, oldName); err != nil {
+			problems = append(problems, fmt.Sprintf("OAuth record for %q left behind: %v", oldName, err))
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("renamed %q to %q, but: %s", oldName, newName, strings.Join(problems, "; "))
 	}
 	return nil
 }
