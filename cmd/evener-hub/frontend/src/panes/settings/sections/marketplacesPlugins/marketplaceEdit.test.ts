@@ -6,6 +6,7 @@ import {
   marketplaceDraftFor,
   marketplaceDraftIncomplete,
   marketplaceEditParams,
+  marketplaceSourceTouched,
 } from "./marketplaceEdit";
 
 const GITHUB: MarketplaceEntry = { name: "acme", source: { kind: "github", repo: "acme/plugins" }, lastUpdated: 1 };
@@ -23,6 +24,9 @@ const FUTURE: MarketplaceEntry = {
   source: { kind: "gitlab", url: "https://gl/x.git", ref: "main" },
   lastUpdated: 1,
 };
+// The same unofferable kind carrying no url at all, so the only draft it can
+// seed is an empty one.
+const FUTURE_NO_URL: MarketplaceEntry = { name: "acme", source: { kind: "gitlab", ref: "main" }, lastUpdated: 1 };
 
 describe("marketplaceDraftFor", () => {
   test("seeds the kind and the matching field, blanking the others", () => {
@@ -154,6 +158,42 @@ describe("marketplaceDraftIncomplete", () => {
     );
     // Only the kind's own field counts - another kind's leftovers don't.
     expect(marketplaceDraftIncomplete({ ...marketplaceDraftFor(URL), url: "", repo: "acme/plugins" })).toBe(true);
+  });
+});
+
+describe("marketplaceSourceTouched", () => {
+  test("false for the draft the entry itself seeds", () => {
+    expect(marketplaceSourceTouched(GITHUB, marketplaceDraftFor(GITHUB))).toBe(false);
+    expect(marketplaceSourceTouched(DIR, marketplaceDraftFor(DIR))).toBe(false);
+    expect(marketplaceSourceTouched(GITHUB, { ...marketplaceDraftFor(GITHUB), repo: " acme/plugins " })).toBe(false);
+    // A rename is not a source edit, and another kind's leftovers are not the
+    // source either.
+    expect(marketplaceSourceTouched(GITHUB, { ...marketplaceDraftFor(GITHUB), name: "beta" })).toBe(false);
+    expect(marketplaceSourceTouched(GITHUB, { ...marketplaceDraftFor(GITHUB), url: "https://x/y.git" })).toBe(false);
+  });
+
+  test("true for a different kind, before that kind's field has anything in it", () => {
+    expect(marketplaceSourceTouched(GITHUB, { ...marketplaceDraftFor(GITHUB), kind: "directory" })).toBe(true);
+    expect(
+      marketplaceSourceTouched(GITHUB, { ...marketplaceDraftFor(GITHUB), kind: "url", url: "https://x/y.git" }),
+    ).toBe(true);
+  });
+
+  test("true for a changed or emptied field of the kind the draft is on", () => {
+    expect(marketplaceSourceTouched(GITHUB, { ...marketplaceDraftFor(GITHUB), repo: "acme/other" })).toBe(true);
+    expect(marketplaceSourceTouched(GITHUB, { ...marketplaceDraftFor(GITHUB), repo: "  " })).toBe(true);
+    expect(marketplaceSourceTouched(DIR, { ...marketplaceDraftFor(DIR), path: "" })).toBe(true);
+  });
+
+  test("a source kind the picker cannot offer is untouched until its URL is edited", () => {
+    expect(marketplaceSourceTouched(SUBDIR, marketplaceDraftFor(SUBDIR))).toBe(false);
+    expect(marketplaceSourceTouched(FUTURE, marketplaceDraftFor(FUTURE))).toBe(false);
+    // Seeded empty, so nothing has been typed and nothing is touched - which
+    // is what leaves such an entry renameable.
+    expect(marketplaceSourceTouched(FUTURE_NO_URL, marketplaceDraftFor(FUTURE_NO_URL))).toBe(false);
+    expect(
+      marketplaceSourceTouched(FUTURE_NO_URL, { ...marketplaceDraftFor(FUTURE_NO_URL), url: "https://gl/z.git" }),
+    ).toBe(true);
   });
 });
 

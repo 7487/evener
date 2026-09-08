@@ -79,6 +79,17 @@ export function marketplaceDraftIncomplete(draft: MarketplaceDraft): boolean {
   return draftValue(draft) === "";
 }
 
+/** Whether the user has moved the source away from the draft the entry seeds -
+ * a different kind, or a different value in that kind's own field. Wider than
+ * marketplaceEditParams reporting a source (a kind picked but not filled in is
+ * touched and not yet a change) and narrower than an empty field (a source
+ * whose kind this frontend cannot represent, and which carries no URL to show,
+ * seeds an empty field nobody touched). */
+export function marketplaceSourceTouched(entry: MarketplaceEntry, draft: MarketplaceDraft): boolean {
+  const seeded = marketplaceDraftFor(entry);
+  return draft.kind !== seeded.kind || draftValue(draft) !== draftValue(seeded);
+}
+
 /** The request carrying exactly what changed, or null when nothing did. An
  * emptied field is nothing changed rather than a change to nothing: the
  * server ignores an empty newName and cannot fetch an empty source. */
