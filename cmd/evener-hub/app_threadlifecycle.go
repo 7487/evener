@@ -494,6 +494,34 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 // resumeOwnership keeps the verified stopped transcript authoritative even when
 // roster cleanup removes its marker, and reserves every retained ownership alias.
 func resumeOwnership(cfg hubcore.WebConfig, requestedID, requestedRefID string) (string, []string, error) {
+	var aliases []string
+	visited := make(map[string]bool)
+	current := requestedID
+	for {
+		if visited[current] {
+			return "", nil, errors.New("completed session aliases contain a cycle; refresh session ownership before resuming")
+		}
+		visited[current] = true
+		target, groupAliases, err := resumeOwnershipStep(cfg, current)
+		if err != nil {
+			return "", nil, err
+		}
+		aliases = append(aliases, groupAliases...)
+		if target == current {
+			break
+		}
+		current = target
+	}
+	if requestedRefID != "" {
+		aliases = append(aliases, requestedRefID)
+	}
+	slices.Sort(aliases)
+	return current, slices.Compact(aliases), nil
+}
+
+// Each completed group can lead to a newer group after daemon clear. Keep every
+// hop's ownership aliases so one reservation covers the complete resolved path.
+func resumeOwnershipStep(cfg hubcore.WebConfig, requestedID string) (string, []string, error) {
 	aliases := cfg.ResumeLocks.RecoveryAliases(requestedID)
 	durableTarget := cfg.ResumeLocks.RecoveryState(requestedID).ResumeSessionID
 	target := durableTarget
@@ -550,11 +578,7 @@ func resumeOwnership(cfg hubcore.WebConfig, requestedID, requestedRefID string) 
 		return "", nil, errors.New("resume target belongs to a newer recovery; resume the current owning session")
 	}
 	aliases = append(aliases, requestedID, target)
-	if requestedRefID != "" {
-		aliases = append(aliases, requestedRefID)
-	}
-	slices.Sort(aliases)
-	return target, slices.Compact(aliases), nil
+	return target, aliases, nil
 }
 
 // Distinct retained transcripts need process evidence: old crash markers are

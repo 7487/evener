@@ -3,7 +3,11 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -486,5 +490,207 @@ func TestResumeConflictingRefSessionChecksDeletionIdentities(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestResumeTraversesTwoCompletedRecoveryCycles(t *testing.T) {
+	a, b, c := hubtest.SessionID(t), hubtest.SessionID(t), hubtest.SessionID(t)
+	endpoints := make(map[string]string)
+	for _, id := range []string{b, c} {
+		daemon := appserver.NewServer(appserver.ServerConfig{ServerName: "daemon", SourceID: "local"})
+		thread := appwire.Thread{ID: id, SessionID: id, Source: "local", Status: appwire.ThreadStatus{Type: "idle"}, Evener: appwire.EvenerThread{Ref: "local:" + id, InstanceID: id}}
+		appserver.HandleTyped(daemon.Router(), appwire.MethodThreadList, func(context.Context, appwire.ThreadListParams) (appwire.ThreadListResponse, error) {
+			return appwire.ThreadListResponse{Data: []appwire.Thread{thread}}, nil
+		})
+		appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(context.Context, appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+			return appwire.ThreadReadResponse{Thread: thread}, nil
+		})
+		server := httptest.NewServer(http.HandlerFunc(daemon.ServeWebSocket))
+		t.Cleanup(server.Close)
+		endpoints[id] = "ws" + strings.TrimPrefix(server.URL, "http")
+	}
+	locks, err := hubcore.NewPersistentResumeLocks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks}
+	cfg.Roster = hubcore.NewRoster(cfg.RunDir, &hubcore.StatusProber{})
+	cfg.DaemonProcesses = forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+		return &forceStopProcess{events: new([]string)}, nil
+	})
+	launches := 0
+	cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		launches++
+		want := c
+		if launches == 1 {
+			want = b
+		}
+		if req.SessionID != want {
+			return rendezvous.Entry{}, fmt.Errorf("launched superseded transcript %s, want %s", req.SessionID, want)
+		}
+		if launches == 3 {
+			for _, alias := range []string{a, b, c} {
+				lock := locks.For(alias)
+				if lock.TryLock() {
+					lock.Unlock()
+					t.Errorf("traversed alias %s was not reserved", alias)
+				}
+			}
+		}
+		entry := rendezvous.Entry{PID: 103, SessionID: req.SessionID, ThreadID: req.SessionID, Protocol: appwire.ProtocolVersion, Endpoint: endpoints[req.SessionID], SourceID: "local", StartedAt: time.Now()}
+		writeRendezvous(t, cfg.RunDir, entry)
+		return entry, nil
+	}}
+	hub := newHubRPCTestServer(t, cfg)
+	defer hub.Close()
+	for _, pair := range [][2]string{{a, b}, {b, c}} {
+		// Clear advances the daemon's transcript and stable workspace identity.
+		writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: pair[1], ThreadID: pair[1], WorkspaceRef: "local:" + pair[0], StartedAt: time.Now()})
+		if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:" + pair[0]}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := rendezvous.Remove(cfg.RunDir, 101); err != nil {
+			t.Fatal(err)
+		}
+		client := dialHubRPC(t, hub)
+		if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+			t.Fatal(err)
+		}
+		_, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + pair[0]})
+		client.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rendezvous.Remove(cfg.RunDir, 103); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := dialHubRPC(t, hub)
+	defer client.Close()
+	if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + a}); err != nil {
+		t.Fatal(err)
+	}
+	if launches != 3 {
+		t.Fatalf("resume launches=%d", launches)
+	}
+}
+
+func TestResumeRejectsCompletedRedirectCycle(t *testing.T) {
+	locks := hubcore.NewResumeLocks()
+	for _, pair := range [][2]string{{"A", "B"}, {"B", "C"}, {"C", "A"}} {
+		finish := locks.BeginForceStop([]string{pair[0]})
+		finish(true)
+		epoch := locks.RecoveryState(pair[0]).Epoch
+		if err := locks.ExplicitResumeCompleted(pair[0], epoch); err != nil {
+			t.Fatal(err)
+		}
+		locks.RecordResolvedSession(pair[0], pair[1], epoch)
+	}
+	launches := 0
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		launches++
+		return rendezvous.Entry{}, errors.New("cyclic target reached launcher")
+	}}}
+	if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:A"}); err == nil {
+		t.Fatal("completed redirect cycle accepted")
+	}
+	if launches != 0 {
+		t.Fatalf("cycle reached launcher %d times", launches)
+	}
+}
+
+func TestResumeCompletedChainRefusesNewPendingRecovery(t *testing.T) {
+	for _, stopping := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stopped", true: "stopping"}[stopping], func(t *testing.T) {
+			locks := hubcore.NewResumeLocks()
+			for _, pair := range [][2]string{{"A", "B"}, {"B", "C"}} {
+				finish := locks.BeginForceStop([]string{pair[0], pair[1]})
+				if err := locks.PersistForceStop([]string{pair[0], pair[1]}, pair[1]); err != nil {
+					t.Fatal(err)
+				}
+				finish(true)
+				epoch := locks.RecoveryState(pair[0]).Epoch
+				if err := locks.ExplicitResumeCompleted(pair[0], epoch); err != nil {
+					t.Fatal(err)
+				}
+				locks.RecordResolvedSession(pair[0], pair[1], epoch)
+			}
+			finish := locks.BeginForceStop([]string{"C", "D"})
+			if err := locks.PersistForceStop([]string{"C", "D"}, "D"); err != nil {
+				t.Fatal(err)
+			}
+			if stopping {
+				defer finish(true)
+			} else {
+				finish(true)
+			}
+			before := locks.RecoveryState("C")
+			launches := 0
+			cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				launches++
+				return rendezvous.Entry{}, errors.New("pending chained recovery reached launcher")
+			}}}
+			if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:A"}); err == nil {
+				t.Fatal("new pending recovery accepted through old chain")
+			}
+			if launches != 0 {
+				t.Fatalf("pending recovery reached launcher %d times", launches)
+			}
+			after := locks.RecoveryState("C")
+			if !after.ResumeRequired || after.Epoch != before.Epoch || after.Stopping != before.Stopping {
+				t.Fatalf("old chain changed newer recovery: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
+func TestResumeCompletedChainPreservesConnectionAdmission(t *testing.T) {
+	locks := hubcore.NewResumeLocks()
+	for _, pair := range [][2]string{{"A", "B"}, {"B", "C"}} {
+		finish := locks.BeginForceStop([]string{pair[0], pair[1]})
+		if err := locks.PersistForceStop([]string{pair[0], pair[1]}, pair[1]); err != nil {
+			t.Fatal(err)
+		}
+		finish(true)
+		epoch := locks.RecoveryState(pair[0]).Epoch
+		if err := locks.ExplicitResumeCompleted(pair[0], epoch); err != nil {
+			t.Fatal(err)
+		}
+		locks.RecordResolvedSession(pair[0], pair[1], epoch)
+	}
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks}
+	stale := admitSessionConnection(t.Context(), cfg)
+	finish := locks.BeginForceStop([]string{"C"})
+	if err := locks.PersistForceStop([]string{"C"}, "C"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	epoch := locks.RecoveryState("C").Epoch
+	if err := locks.ExplicitResumeCompleted("C", epoch); err != nil {
+		t.Fatal(err)
+	}
+	locks.RecordResolvedSession("C", "C", epoch)
+	launches := 0
+	cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		launches++
+		if req.SessionID != "C" {
+			t.Errorf("target=%s", req.SessionID)
+		}
+		return rendezvous.Entry{}, errors.New("launcher observed")
+	}}
+	if _, err := hubThreadResume(stale, cfg, nil, appwire.ThreadResumeParams{Ref: "local:A"}); err == nil {
+		t.Fatal("stale connection admitted through completed chain")
+	}
+	if launches != 0 {
+		t.Fatalf("stale connection launches=%d", launches)
+	}
+	if _, err := hubThreadResume(admitSessionConnection(t.Context(), cfg), cfg, nil, appwire.ThreadResumeParams{Ref: "local:A"}); err == nil {
+		t.Fatal("expected launcher error")
+	}
+	if launches != 1 {
+		t.Fatalf("fresh connection launches=%d", launches)
 	}
 }
