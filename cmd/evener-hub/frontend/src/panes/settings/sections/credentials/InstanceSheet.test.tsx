@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { FakeClient } from "../../../../protocol/testing/fakeClient";
@@ -44,13 +44,17 @@ function renderSheet(
   const handlers = noopHandlers();
   const onClose = vi.fn();
   credentialsStore.setState({ instances: inst === null ? [] : [inst], availableProviders: providers });
-  render(
+  const tree = (name: string | null) => (
     <>
       <Toast />
-      <InstanceSheet name={inst?.name ?? null} onClose={onClose} {...handlers} {...extra} />
-    </>,
+      <InstanceSheet name={name} onClose={onClose} {...handlers} {...extra} />
+    </>
   );
-  return { handlers, onClose };
+  const { rerender } = render(tree(inst?.name ?? null));
+  /** Points the sheet at another instance by name, the way the section does
+   * when it re-selects the new name after a rename. */
+  const selectName = (name: string) => rerender(tree(name));
+  return { handlers, onClose, selectName };
 }
 
 beforeEach(() => {
@@ -536,6 +540,15 @@ describe("the form", () => {
   function saveButton(): HTMLButtonElement {
     return screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
   }
+  /** Waits for the save to reach the wire and answers with the params it
+   * carried. The params are asserted against this OUTSIDE the fake's handler:
+   * a throw inside the handler is only a rejected request, which the sheet
+   * catches into a "Save failed" toast, so an assertion in there can never
+   * fail the test. */
+  async function sentEditParams(fake: FakeClient): Promise<unknown> {
+    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+    return fake.calls.find((c) => c.method === "evener/instance/edit")?.params;
+  }
 
   test("prefills every field from the instance and shows the base provider as a fact", () => {
     renderSheet(WORK, {}, [OPENAI]);
@@ -567,16 +580,13 @@ describe("the form", () => {
   test("a template var whose key differs from its label is sent under the KEY", async () => {
     const V = instance({ name: "v", providerId: "google-vertex-anthropic" });
     const fake = new FakeClient("ready");
-    fake.on("evener/instance/edit", (params) => {
-      expect(params).toEqual({ name: "v", vars: { BASE_URL: "https://vx.example.test" } });
-      return { instances: [V], availableProviders: [VERTEX] };
-    });
+    fake.on("evener/instance/edit", () => ({ instances: [V], availableProviders: [VERTEX] }));
     connectionStore.getState().connect(fake);
     renderSheet(V, {}, [VERTEX]);
     const user = userEvent.setup();
     await user.type(field("GOOGLE_VERTEX_BASE_URL"), "https://vx.example.test");
     await user.click(saveButton());
-    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+    expect(await sentEditParams(fake)).toEqual({ name: "v", vars: { BASE_URL: "https://vx.example.test" } });
   });
 
   test("Save is disabled until a field changes, and while writesRefused", async () => {
@@ -625,46 +635,37 @@ describe("the form", () => {
 
   test("emptying Base URL shows the reset note and sends clearBaseUrl", async () => {
     const fake = new FakeClient("ready");
-    fake.on("evener/instance/edit", (params) => {
-      expect(params).toEqual({ name: "work", clearBaseUrl: true });
-      return { instances: [WORK], availableProviders: [OPENAI] };
-    });
+    fake.on("evener/instance/edit", () => ({ instances: [WORK], availableProviders: [OPENAI] }));
     connectionStore.getState().connect(fake);
     renderSheet(WORK, {}, [OPENAI]);
     const user = userEvent.setup();
     await user.clear(field("Base URL"));
     expect(screen.getByText("Resets the endpoint to the provider's default.")).toBeTruthy();
     await user.click(saveButton());
-    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+    expect(await sentEditParams(fake)).toEqual({ name: "work", clearBaseUrl: true });
   });
 
   test("choosing inherit from base sends clearProtocol", async () => {
     const fake = new FakeClient("ready");
-    fake.on("evener/instance/edit", (params) => {
-      expect(params).toEqual({ name: "work", clearProtocol: true });
-      return { instances: [WORK], availableProviders: [OPENAI] };
-    });
+    fake.on("evener/instance/edit", () => ({ instances: [WORK], availableProviders: [OPENAI] }));
     connectionStore.getState().connect(fake);
     renderSheet(WORK, {}, [OPENAI]);
     const user = userEvent.setup();
     await user.selectOptions(select("Protocol"), "");
     await user.click(saveButton());
-    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+    expect(await sentEditParams(fake)).toEqual({ name: "work", clearProtocol: true });
   });
 
   test("emptying a var sends it empty so the hub deletes it", async () => {
     const V = instance({ name: "v", providerId: "google-vertex-anthropic", vars: { GOOGLE_VERTEX_PROJECT: "p1" } });
     const fake = new FakeClient("ready");
-    fake.on("evener/instance/edit", (params) => {
-      expect(params).toEqual({ name: "v", vars: { GOOGLE_VERTEX_PROJECT: "" } });
-      return { instances: [V], availableProviders: [VERTEX] };
-    });
+    fake.on("evener/instance/edit", () => ({ instances: [V], availableProviders: [VERTEX] }));
     connectionStore.getState().connect(fake);
     renderSheet(V, {}, [VERTEX]);
     const user = userEvent.setup();
     await user.clear(field("GOOGLE_VERTEX_PROJECT"));
     await user.click(saveButton());
-    await waitFor(() => expect(fake.calls.some((c) => c.method === "evener/instance/edit")).toBe(true));
+    expect(await sentEditParams(fake)).toEqual({ name: "v", vars: { GOOGLE_VERTEX_PROJECT: "" } });
   });
 
   test("a credential header without $ is refused inline, with no RPC", async () => {
@@ -697,6 +698,22 @@ describe("the form", () => {
     expect(fake.calls.filter((c) => c.method === "evener/instance/edit")).toHaveLength(0);
   });
 
+  // Save's disabled attribute guards the BUTTON; the form can be submitted
+  // without it (Enter, or any submit control a later change adds), so the
+  // write providers.toml has refused has to be refused by the action itself.
+  test("submitting the form under writesRefused sends nothing", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => {
+      throw new Error("must not be called");
+    });
+    connectionStore.getState().connect(fake);
+    renderSheet(WORK, { writesRefused: true }, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Base URL"), "/x");
+    fireEvent.submit(screen.getByRole("form", { name: "Edit work" }));
+    expect(fake.calls.filter((c) => c.method === "evener/instance/edit")).toHaveLength(0);
+  });
+
   test("a failed save shows the error inline and toasts Save failed", async () => {
     const fake = new FakeClient("ready");
     fake.on("evener/instance/edit", () => {
@@ -726,5 +743,46 @@ describe("the form", () => {
     await waitFor(() => expect(handlers.onRenamed).toHaveBeenCalledWith("work2"));
     expect(getToasts().some((t) => t.text === "Saved work2")).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // The draft is seeded per instance, not per render: another client's change
+  // to the SAME instance hands the sheet a fresh InstanceEntry, and reseeding
+  // from it would silently discard whatever the user has typed.
+  test("another client's change to the same instance leaves an in-progress edit alone", async () => {
+    renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Base URL"), "/x");
+    act(() => {
+      credentialsStore.setState({ instances: [{ ...WORK, baseUrl: "https://changed.example.test" }] });
+    });
+    expect(field("Base URL").value).toBe("https://gw.example.test/v1/x");
+    expect(saveButton().disabled).toBe(false);
+  });
+
+  // The guard that keeps a rename's vanish from closing the sheet is spent by
+  // the section's re-selection: a guard that outlived the rename would swallow
+  // the next genuine removal too, leaving an editor open on a ghost.
+  test("a rename keeps the sheet open, and a later removal still closes it", async () => {
+    const fake = new FakeClient("ready");
+    fake.on("evener/instance/edit", () => ({
+      instances: [{ ...WORK, name: "work2" }],
+      availableProviders: [OPENAI],
+    }));
+    connectionStore.getState().connect(fake);
+    const { handlers, onClose, selectName } = renderSheet(WORK, {}, [OPENAI]);
+    const user = userEvent.setup();
+    await user.type(field("Name"), "2");
+    await user.click(saveButton());
+    await waitFor(() => expect(handlers.onRenamed).toHaveBeenCalledWith("work2"));
+    expect(onClose).not.toHaveBeenCalled();
+
+    selectName("work2");
+    await waitFor(() => expect(field("Name").value).toBe("work2"));
+    expect(onClose).not.toHaveBeenCalled();
+
+    act(() => {
+      credentialsStore.setState({ instances: [] });
+    });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 });

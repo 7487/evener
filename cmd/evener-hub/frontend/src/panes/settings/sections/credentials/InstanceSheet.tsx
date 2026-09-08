@@ -167,6 +167,10 @@ export function InstanceSheet({
   }
 
   async function handleSave(): Promise<void> {
+    // The action carries its own write gate rather than borrowing the Save
+    // button's disabled state: the form submits too, and a refused or
+    // in-flight write must not go out through that door either.
+    if (busy || writesRefused) return;
     if (instance === undefined || params === null) return;
     // An emptied Name is refused here rather than sent: the wire reads an
     // empty newName as "unchanged", so the request would succeed and rename
@@ -225,7 +229,10 @@ export function InstanceSheet({
     : undefined;
   const clearingBaseUrl =
     instance !== undefined && draft !== null && Boolean(instance.baseUrl) && draft.baseUrl.trim() === "";
-  const renaming = initial !== null && draft !== null && draft.name.trim() !== initial.name;
+  // Trimmed on both sides, exactly as instanceEditParams decides whether the
+  // request carries a newName: the note and the request must agree on what
+  // counts as a rename.
+  const renaming = initial !== null && draft !== null && draft.name.trim() !== initial.name.trim();
 
   return (
     <Sheet
