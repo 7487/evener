@@ -2560,9 +2560,16 @@ export const threadsStore = createStore<ThreadsStoreState>(() => ({
   },
 
   async refreshThread(ref): Promise<void> {
-    await requireReadyClient();
-    const client = requireClient();
-    if (client.state !== "ready") return threadsStore.getState().refreshThread(ref);
+    const deadline = Date.now() + REQUIRE_READY_TIMEOUT_MS;
+    let client: AppwireClientLike;
+    do {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new ClientNotReadyError("threads store: timed out waiting for a ready client");
+      }
+      await requireReadyClient(remaining);
+      client = requireClient();
+    } while (client.state !== "ready");
     await refreshTrackedThread(client, readyEpoch, ref, true, true);
     const runtime = getMutationRuntime();
     if (runtime) scheduleMutationDispatch(runtime, [ref]);
