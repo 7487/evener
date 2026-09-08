@@ -643,10 +643,10 @@ is a footer `Button`; the destructive action keeps its `ConfirmDialog` even thou
 second modal over the sheet — `OverlayPanel` instances stack in DOM order, each traps and
 restores focus down the stack, and its `preventDefault` on Escape is what keeps the settings
 pane's own document-level Escape handler from closing the pane out from under an open overlay.
-Editable facts render as prefilled form fields in the sheet itself, committed by a dirty-gated
-footer Save rather than a second dialog, and renaming is editing the name field;
-`panes/settings/sections/marketplacesPlugins/MarketplaceSheet.tsx` — Name plus the add form's
-own three-option source picker — is the reference implementation.
+Editable text facts render as prefilled form fields in the sheet itself, committed by a
+dirty-gated footer Save rather than a second dialog, and renaming is editing the name field;
+`panes/settings/sections/marketplacesPlugins/MarketplaceSheet.tsx` — Name plus the same
+three-option source picker the add form offers — is the reference implementation.
 
 **The meta table idiom.** Inside a detail sheet, facts render as label/value rows: a fixed-width
 (96px) caption-color label column, values in the UI font, and `var(--font-mono)` for anything
