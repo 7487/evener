@@ -388,14 +388,14 @@ test("falls back to the raw ref as the title when the thread has no name yet", a
   await waitFor(() => expect(screen.getByText("ref_a")).toBeTruthy());
 });
 
-function setNavigationTitle(ref: string, title: string): void {
+function setNavigationTitle(ref: string, title: string, topLevel = true): void {
   const key = { kind: "location", ref } as const;
   const data = {
     generation_id: "generation_test",
     revision: 1,
     ref,
-    top_level_ref: ref,
-    top_level: true,
+    top_level_ref: topLevel ? ref : "local:continuation",
+    top_level: topLevel,
     session: {
       ref,
       host_id: "local",
@@ -403,7 +403,7 @@ function setNavigationTitle(ref: string, title: string): void {
       title,
       project: "test-project",
       state: "idle",
-      kind: "session",
+      kind: topLevel ? "session" : "fork",
       live: true,
       children: [],
     },
@@ -2732,6 +2732,66 @@ test.each(["model", "compact"])(
       );
     } finally {
       rejectAction(new Error("fixture cleanup"));
+    }
+  },
+);
+
+test.each(["idle", "active"])(
+  "independent nested fork keeps confirmed recovery during stalled %s reads",
+  async (status) => {
+    const fake = connectFakeClient();
+    const ref = "local:original-fork";
+    setNavigationTitle(ref, "Original fork", false);
+    let stopped = false;
+    let held = false;
+    let finishRead: (() => void) | undefined;
+    fake.on("thread/read", () => {
+      const snapshot = readResponse(ref, { status: { type: stopped ? "notLoaded" : status } });
+      snapshot.thread.evener.parentRef = "local:continuation";
+      snapshot.thread.evener.mutationStateAuthoritative = !stopped;
+      snapshot.thread.evener.resumeRequired = stopped;
+      if (held)
+        return new Promise((resolve) => {
+          finishRead = () => resolve(snapshot);
+        });
+      return snapshot;
+    });
+    fake.on("evener/thread/forceStop", () => {
+      stopped = true;
+      held = false;
+      return {};
+    });
+    render(
+      <ClientProvider client={fake}>
+        <Session params={{ ref }} paneId="p1" focused={true} />
+      </ClientProvider>,
+    );
+    await waitFor(() => expect(threadsStore.getState().mutationAuthorityRefs.has(ref)).toBe(true));
+    held = true;
+    let refreshing: Promise<void> | undefined;
+    act(() => {
+      refreshing = threadsStore.getState().refreshThread(ref);
+    });
+    try {
+      await waitFor(() => expect(finishRead).toBeTypeOf("function"));
+      expect(threadsStore.getState().threads.get(ref)?.status.type).toBe(status);
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Force stop…" }));
+      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+      await user.click(screen.getByRole("button", { name: "Force stop…" }));
+      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+      expect(await screen.findByRole("button", { name: "Resume session" })).toBeTruthy();
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toEqual([
+        { method: "evener/thread/forceStop", params: { ref } },
+      ]);
+      expect(fake.calls.filter((call) => call.method === "thread/resume")).toHaveLength(0);
+    } finally {
+      held = false;
+      finishRead?.();
+      await act(async () => {
+        await refreshing;
+      });
     }
   },
 );
