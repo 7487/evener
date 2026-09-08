@@ -33,3 +33,37 @@ func TestExplicitResumePreservesNewerAliasRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestResolvedSessionMappingRequiresCompletedCurrentEpoch(t *testing.T) {
+	locks := NewResumeLocks()
+	finish := locks.BeginForceStop([]string{"stable", "current"})
+	if err := locks.PersistForceStop([]string{"stable", "current"}, "current"); err != nil {
+		t.Fatal(err)
+	}
+	epoch := locks.RecoveryState("stable").Epoch
+	locks.RecordResolvedSession("stable", "wrong", epoch)
+	if locks.ResolvedSessionID("stable") != "" {
+		t.Fatal("stopping action recorded a target")
+	}
+	finish(true)
+	locks.RecordResolvedSession("stable", "wrong", epoch)
+	if locks.ResolvedSessionID("stable") != "" {
+		t.Fatal("pending recovery recorded a completed target")
+	}
+	if err := locks.ExplicitResumeCompleted("stable", epoch); err != nil {
+		t.Fatal(err)
+	}
+	locks.RecordResolvedSession("stable", "current", epoch)
+	if locks.ResolvedSessionID("current") != "current" {
+		t.Fatal("completed target was not shared across aliases")
+	}
+	newer := locks.BeginForceStop([]string{"stable", "next"})
+	newer(true)
+	locks.RecordResolvedSession("stable", "current", epoch)
+	if locks.ResolvedSessionID("stable") != "" {
+		t.Fatal("stale completion replaced newer ownership")
+	}
+	if !locks.RecoveryState("stable").ResumeRequired {
+		t.Fatal("target record cleared newer recovery")
+	}
+}

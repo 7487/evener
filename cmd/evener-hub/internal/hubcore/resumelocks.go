@@ -124,7 +124,8 @@ type SessionRecoveryState struct {
 }
 
 type sessionRecoveryGroup struct {
-	aliases []string
+	aliases           []string
+	resolvedSessionID string
 }
 
 func (r *ResumeLocks) RecoveryState(sessionID string) SessionRecoveryState {
@@ -142,6 +143,26 @@ func (r *ResumeLocks) RecoveryAliases(sessionID string) []string {
 		return slices.Clone(group.aliases)
 	}
 	return []string{sessionID}
+}
+
+// RecordResolvedSession retains alias routing after successful Resume without
+// recreating a recovery obligation. Fresh rendezvous evidence takes priority.
+func (r *ResumeLocks) RecordResolvedSession(sessionID, target string, epoch uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.recovery[sessionID]
+	if target != "" && state.Epoch == epoch && state.Stopping == 0 && !state.ResumeRequired && state.group != nil {
+		state.group.resolvedSessionID = target
+	}
+}
+
+func (r *ResumeLocks) ResolvedSessionID(sessionID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if group := r.recovery[sessionID].group; group != nil {
+		return group.resolvedSessionID
+	}
+	return ""
 }
 
 // RecoverySequence is captured once when a transport is established. A

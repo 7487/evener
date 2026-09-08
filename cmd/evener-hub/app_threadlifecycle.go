@@ -322,11 +322,13 @@ func hubThreadAutoResume(ctx context.Context, cfg hubcore.WebConfig, sources *ap
 }
 
 func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource.Registry, params appwire.ThreadResumeParams, automatic bool) (response appwire.ThreadResumeResponse, resumeErr error) {
+	requestedRefID := ""
 	if params.Ref != "" {
 		ref, err := appwire.ParseRef(params.Ref)
 		if err != nil {
 			return appwire.ThreadResumeResponse{}, err
 		}
+		requestedRefID = ref.ThreadID
 		if ref.SourceID != "local" {
 			source, err := sourceForThread(sources, params.Ref, "")
 			if err != nil {
@@ -350,7 +352,7 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 		if err := sessionConnectionRecoveryError(ctx, cfg, "", requestedID); err != nil {
 			return appwire.ThreadResumeResponse{}, err
 		}
-		target, aliases, err := resumeOwnership(cfg, requestedID)
+		target, aliases, err := resumeOwnership(cfg, requestedID, requestedRefID)
 		if err != nil {
 			return appwire.ThreadResumeResponse{}, appwire.Unavailable(err.Error())
 		}
@@ -377,7 +379,7 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 				return appwire.ThreadResumeResponse{}, appwire.Unavailable("session recovery requires a fresh explicit thread/resume request")
 			}
 		}
-		currentTarget, currentAliases, err := resumeOwnership(cfg, requestedID)
+		currentTarget, currentAliases, err := resumeOwnership(cfg, requestedID, requestedRefID)
 		if err != nil {
 			return appwire.ThreadResumeResponse{}, appwire.Unavailable(err.Error())
 		}
@@ -385,21 +387,31 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 			return appwire.ThreadResumeResponse{}, appwire.Unavailable("session ownership changed; refresh before resuming")
 		}
 		sessionID = target
-		if !automatic {
-			defer func() {
-				if resumeErr == nil {
-					if err := cfg.ResumeLocks.ExplicitResumeCompleted(requestedID, epoch); err != nil {
-						response = appwire.ThreadResumeResponse{}
-						resumeErr = appwire.Unavailable("persist completed session recovery: " + err.Error())
-					}
+		defer func() {
+			if resumeErr != nil {
+				return
+			}
+			if !automatic {
+				if err := cfg.ResumeLocks.ExplicitResumeCompleted(requestedID, epoch); err != nil {
+					response = appwire.ThreadResumeResponse{}
+					resumeErr = appwire.Unavailable("persist completed session recovery: " + err.Error())
+					return
 				}
-			}()
+			}
+			cfg.ResumeLocks.RecordResolvedSession(requestedID, sessionID, epoch)
+		}()
+
+	}
+
+	if err := deletionFenceError(cfg, params.Ref, requestedID, ""); err != nil {
+		return appwire.ThreadResumeResponse{}, err
+	}
+	for _, id := range []string{requestedID, sessionID} {
+		if err := deletionFenceError(cfg, "", id, ""); err != nil {
+			return appwire.ThreadResumeResponse{}, err
 		}
 	}
 
-	if err := deletionFenceError(cfg, params.Ref, sessionID, ""); err != nil {
-		return appwire.ThreadResumeResponse{}, err
-	}
 	var discoveryErr error
 	if cfg.Roster != nil {
 		discoveryErr = hubRosterRefresh(ctx, cfg.Roster)
@@ -481,11 +493,16 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 
 // resumeOwnership keeps the verified stopped transcript authoritative even when
 // roster cleanup removes its marker, and reserves every retained ownership alias.
-func resumeOwnership(cfg hubcore.WebConfig, requestedID string) (string, []string, error) {
+func resumeOwnership(cfg hubcore.WebConfig, requestedID, requestedRefID string) (string, []string, error) {
 	aliases := cfg.ResumeLocks.RecoveryAliases(requestedID)
 	durableTarget := cfg.ResumeLocks.RecoveryState(requestedID).ResumeSessionID
 	target := durableTarget
 	found := target != ""
+	resolvedTarget := cfg.ResumeLocks.ResolvedSessionID(requestedID)
+	referenceTarget := durableTarget
+	if referenceTarget == "" {
+		referenceTarget = resolvedTarget
+	}
 	var entries []rendezvous.Entry
 	if cfg.RunDir != "" {
 		var err error
@@ -502,7 +519,7 @@ func resumeOwnership(cfg hubcore.WebConfig, requestedID string) (string, []strin
 	}
 	var claims []rendezvous.Entry
 	for _, entry := range entries {
-		if !slices.Contains(forceStopAliases(entry), requestedID) && (target == "" || !slices.Contains(forceStopAliases(entry), target)) {
+		if !slices.Contains(forceStopAliases(entry), requestedID) && (referenceTarget == "" || !slices.Contains(forceStopAliases(entry), referenceTarget)) {
 			continue
 		}
 		if entry.SourceID != "" && entry.SourceID != "local" {
@@ -518,6 +535,9 @@ func resumeOwnership(cfg hubcore.WebConfig, requestedID string) (string, []strin
 		}
 		target, found = current, true
 	}
+	if !found && resolvedTarget != "" {
+		target, found = resolvedTarget, true
+	}
 	if !found {
 		if len(aliases) > 1 {
 			return "", nil, errors.New("current session identity is missing for this recovery group; restore its daemon rendezvous marker before resuming")
@@ -530,6 +550,9 @@ func resumeOwnership(cfg hubcore.WebConfig, requestedID string) (string, []strin
 		return "", nil, errors.New("resume target belongs to a newer recovery; resume the current owning session")
 	}
 	aliases = append(aliases, requestedID, target)
+	if requestedRefID != "" {
+		aliases = append(aliases, requestedRefID)
+	}
 	slices.Sort(aliases)
 	return target, slices.Compact(aliases), nil
 }

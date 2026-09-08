@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/cmd/evener-hub/internal/daemonprocess"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
+	"primeradiant.com/evener/cmd/evener-hub/internal/hubtest"
 	"primeradiant.com/evener/internal/appserver"
 	"primeradiant.com/evener/rendezvous"
 )
@@ -225,6 +227,20 @@ func TestConcurrentAliasResumeSpawnsOneCurrentDaemon(t *testing.T) {
 			t.Fatalf("successful resume retained recovery for %s", alias)
 		}
 	}
+	// Normal daemon shutdown removes its marker after recovery completed. Both
+	// identities must remain resumable without recreating the hub's lock registry.
+	for _, alias := range []string{stable, current} {
+		if err := rendezvous.Remove(cfg.RunDir, 106); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := first.ThreadResume(t.Context(), appwire.ThreadResumeParams{Ref: "local:" + alias}); err != nil {
+			t.Fatalf("resume after marker removal through %s: %v", alias, err)
+		}
+	}
+	if *calls != 3 {
+		t.Fatalf("repeated markerless launches=%d", *calls)
+	}
+
 }
 
 func TestResumeRejectsConflictingRetainedTranscriptIdentities(t *testing.T) {
@@ -345,5 +361,130 @@ func TestResumeUsesDurableTargetWhenAllRetainedClaimsExited(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("persisted current target did not reach launcher")
+	}
+}
+
+func TestAliasResumeHonorsRequestedAndResolvedDeletionFences(t *testing.T) {
+	for _, deletedTarget := range []bool{false, true} {
+		t.Run(map[bool]string{false: "requested alias", true: "resolved target"}[deletedTarget], func(t *testing.T) {
+			stable, current := hubtest.SessionID(t), hubtest.SessionID(t)
+			store, err := hubcore.NewDeletionStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleted := stable
+			if deletedTarget {
+				deleted = current
+			}
+			if _, err := store.Begin(filepath.Base(hubtest.ProjectDir(t, t.TempDir(), "deleted")), []hubcore.DeletionTarget{{Ref: "local:" + deleted, ThreadID: deleted}}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: hubcore.NewResumeLocks(), DeletionStore: store}
+			writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: current, ThreadID: current, WorkspaceRef: "local:" + stable})
+			launches := 0
+			cfg.Spawner = &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				launches++
+				return rendezvous.Entry{}, errors.New("deleted session reached launcher")
+			}}
+			_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:" + stable})
+			var wire appwire.WireError
+			if !errors.As(err, &wire) {
+				t.Fatalf("deletion fence error=%v", err)
+			}
+			data, ok := wire.Data.(appwire.ErrorData)
+			if !ok || data.MutationOutcome != appwire.MutationOutcomeTargetDeleted {
+				t.Errorf("deletion outcome=%#v", wire.Data)
+			}
+			if launches != 0 {
+				t.Fatalf("deleted target launch count=%d", launches)
+			}
+		})
+	}
+}
+
+func TestCompletedResumeMappingDefersToCurrentIdentity(t *testing.T) {
+	for _, newerRecovery := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fresh marker", true: "newer recovery"}[newerRecovery], func(t *testing.T) {
+			locks := hubcore.NewResumeLocks()
+			finish := locks.BeginForceStop([]string{"stable", "B"})
+			if err := locks.PersistForceStop([]string{"stable", "B"}, "B"); err != nil {
+				t.Fatal(err)
+			}
+			finish(true)
+			epoch := locks.RecoveryState("stable").Epoch
+			if err := locks.ExplicitResumeCompleted("stable", epoch); err != nil {
+				t.Fatal(err)
+			}
+			locks.RecordResolvedSession("stable", "B", epoch)
+			cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks}
+			if newerRecovery {
+				finish := locks.BeginForceStop([]string{"B", "C"})
+				if err := locks.PersistForceStop([]string{"B", "C"}, "C"); err != nil {
+					t.Fatal(err)
+				}
+				finish(true)
+			} else {
+				writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, ThreadID: "B", SessionID: "C"})
+			}
+			launches := 0
+			cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				launches++
+				if req.SessionID != "C" {
+					t.Errorf("remembered B overrode current target: %s", req.SessionID)
+				}
+				return rendezvous.Entry{}, errors.New("launcher observed")
+			}}
+			if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:stable"}); err == nil {
+				t.Fatal("expected launcher error or newer recovery refusal")
+			}
+			want := 1
+			if newerRecovery {
+				want = 0
+			}
+			if launches != want {
+				t.Fatalf("launches=%d want=%d", launches, want)
+			}
+		})
+	}
+}
+
+func TestResumeConflictingRefSessionChecksDeletionIdentities(t *testing.T) {
+	for _, distinctTarget := range []bool{false, true} {
+		for _, deletedIdentity := range []string{"ref", "session", "target"} {
+			t.Run(map[bool]string{false: "direct ", true: "redirected "}[distinctTarget]+deletedIdentity, func(t *testing.T) {
+				refID, sessionID := hubtest.SessionID(t), hubtest.SessionID(t)
+				targetID := sessionID
+				if distinctTarget {
+					targetID = hubtest.SessionID(t)
+				}
+				deleted := map[string]string{"ref": refID, "session": sessionID, "target": targetID}[deletedIdentity]
+				store, err := hubcore.NewDeletionStore(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Begin(filepath.Base(hubtest.ProjectDir(t, t.TempDir(), "deleted")), []hubcore.DeletionTarget{{Ref: "local:" + deleted, ThreadID: deleted}}); err != nil {
+					t.Fatal(err)
+				}
+				cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: hubcore.NewResumeLocks(), DeletionStore: store}
+				writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, ThreadID: sessionID, SessionID: targetID, WorkspaceRef: "local:" + refID})
+				launches := 0
+				cfg.Spawner = &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+					launches++
+					return rendezvous.Entry{}, errors.New("deleted session reached launcher")
+				}}
+				_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:" + refID, Session: sessionID})
+				var wire appwire.WireError
+				if !errors.As(err, &wire) {
+					t.Fatalf("deletion error=%v", err)
+				}
+				data, ok := wire.Data.(appwire.ErrorData)
+				if !ok || data.MutationOutcome != appwire.MutationOutcomeTargetDeleted {
+					t.Errorf("deletion outcome=%#v", wire.Data)
+				}
+				if launches != 0 {
+					t.Fatalf("deleted identity reached launcher %d times", launches)
+				}
+			})
+		}
 	}
 }
