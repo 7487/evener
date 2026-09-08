@@ -76,7 +76,9 @@
 /* §C: a row that cannot expand is not a control — same layout as a row, no
    button affordance (no hover wash, no pointer cursor, no tap height, no
    left-aligned button reset). Rendering a <div> instead of a <button> keeps
-   it out of the tab order entirely (RoboRev PR #954 combined review). */
+   it out of the tab order entirely (combined RoboRev review: no focusable
+   no-op controls). Note: no PR-number references in this file — the
+   token-contract gate reads "#NNN" as a hex color literal. */
 .rowStatic {
   display: flex;
   align-items: center;
