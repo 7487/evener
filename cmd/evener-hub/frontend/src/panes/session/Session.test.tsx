@@ -4,12 +4,15 @@ import { fileURLToPath } from "node:url";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
-import { StrictMode } from "react";
+import { StrictMode, useSyncExternalStore } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
+import { AppwireClient } from "../../protocol/client";
 import { WireError } from "../../protocol/errors";
 import { FakeClient } from "../../protocol/testing/fakeClient";
+import { FakeSocket } from "../../protocol/testing/fakeSocket";
 import type { AnyNotification, Thread, ThreadCapabilities, ThreadReadResponse } from "../../protocol/types.gen";
 import { ClientProvider } from "../../shell/clientContext";
+import { urlToPane } from "../../shell/routing";
 import { resetWorkspaceStoreForTests, workspaceStore } from "../../shell/workspace";
 import { connectionStore } from "../../stores/connection";
 import { MutationOutboxIndexedDB } from "../../stores/mutationOutboxIndexedDB";
@@ -2097,6 +2100,116 @@ test.each([false, true])("restart-required empty transcript suppresses first-sen
   expect(screen.queryByText(/send the first message/i)).toBeNull();
   expect(screen.queryByTestId("cold-start-skeleton")).toBeNull();
   expect(screen.getByText("Session unavailable until restart")).toBeTruthy();
+});
+
+test("explicit Resume follows the returned identity through transcript and new sends", async ({ onTestFinished }) => {
+  onTestFinished(stubSessionSlots);
+  vi.mocked(ComposerModule.Composer).mockRestore();
+  const stableRef = "local:stable-a";
+  const currentRef = "local:current-b";
+  let stopped = false;
+  let resumed = false;
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const currentThread = () =>
+    readResponse(currentRef, {
+      status: { type: "idle" },
+      turns: [turnFixture("current-turn", "Current transcript after clear")],
+    });
+  const client = new AppwireClient({
+    url: "ws://hub/rpc",
+    socketFactory: () => {
+      const socket = new FakeSocket({ autoInitialize: true });
+      const send = socket.send.bind(socket);
+      socket.send = (raw) => {
+        send(raw);
+        const request = JSON.parse(raw);
+        if (!request.id || request.method === "initialize" || request.method === "ping") return;
+        requests.push(request);
+        let result: unknown = {};
+        switch (request.method) {
+          case "thread/read":
+            result =
+              request.params.ref === currentRef
+                ? currentThread()
+                : readResponse(stableRef, {
+                    status: { type: stopped ? "notLoaded" : "restartRequired" },
+                    turns: [turnFixture("old-turn", "Saved transcript before clear")],
+                    evener: {
+                      ref: stableRef,
+                      capabilities: CAPABILITIES,
+                      resumeRequired: true,
+                      mutationStateAuthoritative: false,
+                      queue: { revision: 0 },
+                    },
+                  });
+            break;
+          case "evener/thread/forceStop":
+            stopped = true;
+            break;
+          case "thread/resume":
+            resumed = true;
+            result = currentThread();
+            break;
+          case "thread/turns/list":
+            result = { data: [], nextCursor: null };
+            break;
+          case "turn/start":
+            result = { turn: { id: "new-turn", status: "inProgress", itemsView: "full" } };
+            break;
+        }
+        socket.receive({ id: request.id, result });
+      };
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+  });
+  onTestFinished(() => client.close());
+  connectionStore.getState().connect(client);
+  await client.connect();
+  window.history.replaceState({}, "", "/s/local%3Astable-a");
+  const subscribe = (notify: () => void) => {
+    window.addEventListener("popstate", notify);
+    return () => window.removeEventListener("popstate", notify);
+  };
+  function RoutedSession() {
+    const pathname = useSyncExternalStore(subscribe, () => window.location.pathname);
+    const route = urlToPane(pathname);
+    if (route?.type !== "session") throw new Error("expected session route");
+    return <Session params={route.params as { ref: string }} paneId="p1" focused={true} />;
+  }
+  render(
+    <ClientProvider client={client}>
+      <RoutedSession />
+    </ClientProvider>,
+  );
+  await screen.findByText("Saved transcript before clear");
+  let uncertain = "";
+  await act(async () => {
+    uncertain = await seedPendingSend(stableRef);
+    await mutationStorage.markUnknown(uncertain, "blockedUnknown");
+    await refreshPendingTurnsProjection(stableRef);
+  });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Force stop…" }));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(resumed).toBe(false);
+  await user.click(screen.getByRole("button", { name: "Resume session" }));
+  await screen.findByText("Current transcript after clear");
+  expect(window.location.pathname).toBe("/s/local%3Acurrent-b");
+  expect(screen.queryByText("Saved transcript before clear")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Resume session" })).toBeNull();
+  expect(requests.filter(({ method }) => method === "turn/start")).toHaveLength(0);
+  expect(await mutationStorage.listOutbox(stableRef)).toEqual([
+    expect.objectContaining({ clientMutationId: uncertain, state: "blockedUnknown" }),
+  ]);
+  expect(await mutationStorage.listOutbox(currentRef)).toHaveLength(0);
+  await user.type(screen.getByRole("textbox", { name: /^message$/i }), "Follow up on current transcript");
+  await user.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(requests.filter(({ method }) => method === "turn/start")).toHaveLength(1));
+  expect(requests.find(({ method }) => method === "turn/start")?.params).toEqual(
+    expect.objectContaining({ ref: currentRef }),
+  );
 });
 
 test("offers explicit resume after restart even without pending messages", async () => {

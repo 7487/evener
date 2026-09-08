@@ -120,12 +120,18 @@ function RestartRequiredNotice({
     setRefreshing(true);
     setError(null);
     try {
+      let refreshedRef = sessionRef;
       if (resumeRequired) {
         const { client, state } = connectionStore.getState();
         if (!client || state !== "ready") throw new Error("Connect to the hub before resuming this session.");
-        await client.resumeThread(sessionRef);
+        const { thread } = await client.resumeThread(sessionRef);
+        refreshedRef = thread.evener.ref;
+        if (refreshedRef !== sessionRef) {
+          const url = paneToURL("session", { ref: refreshedRef });
+          if (url !== null) navigate(url, { replace: true });
+        }
       }
-      await threadsStore.getState().refreshThread(sessionRef);
+      await threadsStore.getState().refreshThread(refreshedRef);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

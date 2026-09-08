@@ -214,7 +214,7 @@ export class AppwireClient {
 
   // Explicit Resume discards the old transport backlog before acknowledging
   // recovery. Pending requests fail normally; they are never replayed here.
-  async resumeThread(ref: string): Promise<void> {
+  async resumeThread(ref: string): Promise<MethodTypes["thread/resume"]["result"]> {
     if (this.resumePending) throw new Error("A session resume is already pending");
     const socket = this.socket;
     if (this.connectionState !== "ready" || !socket) throw new Error("Connect to the hub before resuming this session");
@@ -241,7 +241,7 @@ export class AppwireClient {
       }
       this.retryNow();
       await connected;
-      await this.request("thread/resume", { ref });
+      return await this.request("thread/resume", { ref });
     } finally {
       clearTimeout(timeout);
       stopReady();
