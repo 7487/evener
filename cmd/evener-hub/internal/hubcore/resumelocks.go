@@ -127,6 +127,17 @@ func (r *ResumeLocks) RecoveryState(sessionID string) SessionRecoveryState {
 	return r.recovery[sessionID]
 }
 
+// RecoveryAliases returns the verified ownership group, including after explicit
+// recovery completes. The aliases reserve one daemon without choosing its target.
+func (r *ResumeLocks) RecoveryAliases(sessionID string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if group := r.recovery[sessionID].group; group != nil {
+		return slices.Clone(group.aliases)
+	}
+	return []string{sessionID}
+}
+
 // RecoverySequence is captured once when a transport is established. A
 // request read later cannot turn unread pre-recovery input into fresh intent.
 func (r *ResumeLocks) RecoverySequence() uint64 {

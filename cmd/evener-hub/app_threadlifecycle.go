@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -342,22 +343,51 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 	if sessionID == "" {
 		return appwire.ThreadResumeResponse{}, appwire.InvalidParams("sessionId or ref is required")
 	}
+	requestedID := sessionID
 	if cfg.ResumeLocks != nil {
-		epoch := sessionRequestRecoveryEpoch(ctx, cfg, "", sessionID)
-		lock := cfg.ResumeLocks.For(sessionID)
-		lock.Lock()
-		defer lock.Unlock()
-		if err := sessionConnectionRecoveryError(ctx, cfg, "", sessionID); err != nil {
+		epoch := sessionRequestRecoveryEpoch(ctx, cfg, "", requestedID)
+		if err := sessionConnectionRecoveryError(ctx, cfg, "", requestedID); err != nil {
 			return appwire.ThreadResumeResponse{}, err
 		}
-		state := cfg.ResumeLocks.RecoveryState(sessionID)
-		if state.Epoch != epoch || state.Stopping > 0 || (automatic && state.ResumeRequired) {
-			return appwire.ThreadResumeResponse{}, appwire.Unavailable("session recovery requires a fresh explicit thread/resume request")
+		target, aliases, err := resumeOwnership(cfg, requestedID)
+		if err != nil {
+			return appwire.ThreadResumeResponse{}, appwire.Unavailable(err.Error())
 		}
+		epochs := make(map[string]uint64, len(aliases))
+		for _, id := range aliases {
+			epochs[id] = sessionRequestRecoveryEpoch(ctx, cfg, "", id)
+		}
+		epochs[requestedID] = epoch
+		// Use force stop's sorted ownership order, retaining the original mutexes.
+		for _, id := range aliases {
+			cfg.ResumeLocks.For(id).Lock()
+		}
+		defer func() {
+			for _, id := range slices.Backward(aliases) {
+				cfg.ResumeLocks.For(id).Unlock()
+			}
+		}()
+		for _, id := range aliases {
+			if err := sessionConnectionRecoveryError(ctx, cfg, "", id); err != nil {
+				return appwire.ThreadResumeResponse{}, err
+			}
+			state := cfg.ResumeLocks.RecoveryState(id)
+			if state.Epoch != epochs[id] || state.Stopping > 0 || (automatic && state.ResumeRequired) {
+				return appwire.ThreadResumeResponse{}, appwire.Unavailable("session recovery requires a fresh explicit thread/resume request")
+			}
+		}
+		currentTarget, currentAliases, err := resumeOwnership(cfg, requestedID)
+		if err != nil {
+			return appwire.ThreadResumeResponse{}, appwire.Unavailable(err.Error())
+		}
+		if currentTarget != target || !slices.Equal(currentAliases, aliases) {
+			return appwire.ThreadResumeResponse{}, appwire.Unavailable("session ownership changed; refresh before resuming")
+		}
+		sessionID = target
 		if !automatic {
 			defer func() {
 				if resumeErr == nil {
-					if err := cfg.ResumeLocks.ExplicitResumeCompleted(sessionID, epoch); err != nil {
+					if err := cfg.ResumeLocks.ExplicitResumeCompleted(requestedID, epoch); err != nil {
 						response = appwire.ThreadResumeResponse{}
 						resumeErr = appwire.Unavailable("persist completed session recovery: " + err.Error())
 					}
@@ -365,6 +395,7 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 			}()
 		}
 	}
+
 	if err := deletionFenceError(cfg, params.Ref, sessionID, ""); err != nil {
 		return appwire.ThreadResumeResponse{}, err
 	}
@@ -445,6 +476,56 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 		}
 	}
 	return hubResumedThreadResponse(ctx, sources, entry.SessionID, entry.ThreadID)
+}
+
+// resumeOwnership uses retained rendezvous identity to distinguish the current
+// transcript from its stable workspace alias. Recovery groups alone cannot do so.
+func resumeOwnership(cfg hubcore.WebConfig, requestedID string) (string, []string, error) {
+	aliases := cfg.ResumeLocks.RecoveryAliases(requestedID)
+	target := requestedID
+	found := false
+	if cfg.RunDir != "" {
+		entries, err := rendezvous.ListStrict(cfg.RunDir)
+		if err != nil {
+			// The normal discovery path records partial failure and directly verifies
+			// a known owner. Preserve that path; never authorize a spawn from this read.
+			if cfg.Roster == nil {
+				return "", nil, err
+			}
+			if owner, ok := liveDaemonForThread(cfg.Roster, requestedID); ok {
+				entries = []rendezvous.Entry{owner.Entry}
+			}
+		}
+		for _, entry := range entries {
+			if !slices.Contains(forceStopAliases(entry), requestedID) {
+				continue
+			}
+			if entry.SourceID != "" && entry.SourceID != "local" {
+				return "", nil, errors.New("daemon claims a foreign session source")
+			}
+			current := entry.SessionID
+			if current == "" {
+				current = entry.ThreadID
+			}
+			if current == "" {
+				return "", nil, errors.New("retained daemon has no current session identity; restore its rendezvous identity before resuming")
+			}
+			if found && target != current {
+				return "", nil, errors.New("retained daemons claim different current sessions; restore unambiguous rendezvous ownership before resuming")
+			}
+			target = current
+			aliases = append(aliases, forceStopAliases(entry)...)
+			found = true
+		}
+	}
+
+	aliases = append(aliases, requestedID)
+	slices.Sort(aliases)
+	aliases = slices.Compact(aliases)
+	if !found && len(aliases) > 1 {
+		return "", nil, errors.New("current session identity is missing for this recovery group; restore its daemon rendezvous marker before resuming")
+	}
+	return target, aliases, nil
 }
 
 // resumeFailureError explains a failed replacement spawn when the daemon this
