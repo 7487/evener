@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 
 	"primeradiant.com/evener/agent"
 	"primeradiant.com/evener/agent/schema"
@@ -118,8 +119,8 @@ func lookupDaemonOwner(ctx context.Context, cfg hubcore.WebConfig, ref, threadID
 	return hubcore.LiveEntry{}, false, nil
 }
 
-// Ownership uses the same configured state directory as local fork operations,
-// including configurations without a past-session index.
+// Indexed entries carry their project directory. Without one, inspect only the
+// requested metadata across configured projects; a failed read is not absence.
 func ownershipEntry(ctx context.Context, cfg hubcore.WebConfig, threadID string) (hubcore.PastEntry, bool, error) {
 	if entry, ok := pastEntryForRead(cfg, appwire.ThreadReadParams{ThreadID: threadID}); ok {
 		return entry, true, nil
@@ -130,14 +131,37 @@ func ownershipEntry(ctx context.Context, cfg hubcore.WebConfig, threadID string)
 	if err := ctx.Err(); err != nil {
 		return hubcore.PastEntry{}, false, err
 	}
-	meta, err := schema.LoadSessionMeta(cfg.StateDir, threadID)
-	if errors.Is(err, os.ErrNotExist) {
-		return hubcore.PastEntry{}, false, nil
-	}
-	if err != nil {
+	dirs := []string{cfg.StateDir}
+	projects, err := os.ReadDir(filepath.Join(cfg.StateDir, "projects"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return hubcore.PastEntry{}, false, err
 	}
-	return hubcore.PastEntry{ID: threadID, Meta: meta, StateDir: cfg.StateDir}, true, nil
+	for _, project := range projects {
+		if project.IsDir() {
+			dirs = append(dirs, filepath.Join(cfg.StateDir, "projects", project.Name()))
+		}
+	}
+	var found hubcore.PastEntry
+	for _, dir := range dirs {
+		if err := ctx.Err(); err != nil {
+			return hubcore.PastEntry{}, false, err
+		}
+		meta, err := schema.LoadSessionMeta(dir, threadID)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return hubcore.PastEntry{}, false, err
+		}
+		if found.ID != "" {
+			return hubcore.PastEntry{}, false, fmt.Errorf("session %s has ambiguous project ownership", threadID)
+		}
+		found = hubcore.PastEntry{ID: threadID, Meta: meta, StateDir: dir}
+	}
+	if found.ID == "" && cfg.Roster != nil && !cfg.Roster.DaemonOwnershipAbsent() {
+		return hubcore.PastEntry{}, false, fmt.Errorf("cannot locate ownership metadata for session %s", threadID)
+	}
+	return found, found.ID != "", nil
 }
 
 func liveDaemonForThread(roster *hubcore.Roster, threadID string) (hubcore.LiveEntry, bool) {

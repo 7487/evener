@@ -1358,3 +1358,121 @@ func TestHubResumeWithoutRosterReturnsUnavailable(t *testing.T) {
 		t.Fatalf("resume without roster = %v", err)
 	}
 }
+
+func TestHubOwnershipUsesProjectStateLayout(t *testing.T) {
+	for _, indexed := range []bool{false, true} {
+		for _, retained := range []bool{false, true} {
+			t.Run(fmt.Sprintf("indexed=%v/retained=%v", indexed, retained), func(t *testing.T) {
+				root := t.TempDir()
+				project := filepath.Join(root, "projects", "project-owner-0000000000")
+				rootID := buildRPCParentSession(t, project)
+				childID := buildUpgradeDelegate(t, project, rootID)
+				if !retained {
+					var err error
+					childID, err = agent.ForkSession(project, rootID, 1, "independent fork", "")
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				runDir := t.TempDir()
+				writeRendezvous(t, runDir, rendezvous.Entry{PID: 1001, Protocol: "evener-appwire-v3", ThreadID: rootID, SessionID: rootID, Endpoint: protocolMismatchPeer(t)})
+				spawned := 0
+				cfg := hubcore.WebConfig{StateDir: root, Roster: hubcore.NewRoster(runDir, &hubcore.StatusProber{}), ResumeLocks: hubcore.NewResumeLocks(), Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+					spawned++
+					return rendezvous.Entry{}, errors.New("spawn sentinel")
+				}}}
+				if indexed {
+					cfg.Past = hubcore.NewPastIndex(filepath.Join(root, "missing", "*"))
+				}
+				_, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(childID)})
+				if retained && (err == nil || spawned != 0) {
+					t.Fatalf("retained child resume err=%v launches=%d", err, spawned)
+				}
+				if !retained && spawned != 1 {
+					t.Fatalf("independent fork refused: %v", err)
+				}
+				err = daemonRestartRequiredError(t.Context(), cfg, localAppRef(childID), "", "pending-input")
+				if retained {
+					wire, ok := errors.AsType[appwire.WireError](err)
+					if !ok {
+						t.Fatalf("mutation not blocked: %v", err)
+					}
+					data := wire.Data.(appwire.ErrorData)
+					if data.MutationOutcome != appwire.MutationOutcomeUnknown || data.RetryDisposition != appwire.RetryDispositionBlocked {
+						t.Fatalf("unsafe mutation receipt: %+v", data)
+					}
+				} else if err != nil {
+					t.Fatalf("independent mutation refused: %v", err)
+				}
+				live, ownershipErr := projectSessionOwnership(t.Context(), cfg, childID)
+				if ownershipErr != nil || live != retained {
+					t.Fatalf("deletion ownership live=%v err=%v, retained=%v", live, ownershipErr, retained)
+				}
+				if err := rendezvous.Remove(runDir, 1001); err != nil {
+					t.Fatal(err)
+				}
+				before := spawned
+				_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: localAppRef(childID)})
+				if spawned != before+1 {
+					t.Fatalf("released child refused: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestHubOwnershipProjectDiscoveryPreservesUncertainty(t *testing.T) {
+	for _, fault := range []string{"missing", "malformed", "duplicate", "unreadable-projects"} {
+		t.Run(fault, func(t *testing.T) {
+			root := t.TempDir()
+			project := filepath.Join(root, "projects", "project-owner-0000000000")
+			rootID := buildRPCParentSession(t, project)
+			childID := buildUpgradeDelegate(t, project, rootID)
+			path := filepath.Join(project, "sessions", childID+".meta.json")
+			switch fault {
+			case "missing":
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed":
+				if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "duplicate":
+				meta, err := schema.LoadSessionMeta(project, childID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := schema.SaveSessionMeta(filepath.Join(root, "projects", "project-other-0000000000"), meta); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable-projects":
+				if err := os.Rename(filepath.Join(root, "projects"), filepath.Join(root, "held-projects")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "projects"), []byte("obstruction"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runDir := t.TempDir()
+			writeRendezvous(t, runDir, rendezvous.Entry{PID: 1001, Protocol: "evener-appwire-v3", ThreadID: rootID, SessionID: rootID, Endpoint: protocolMismatchPeer(t)})
+			roster := hubcore.NewRoster(runDir, &hubcore.StatusProber{})
+			roster.Refresh()
+			cfg := hubcore.WebConfig{StateDir: root, Roster: roster}
+			_, _, err := restartRequiredDaemon(t.Context(), cfg, localAppRef(childID), "")
+			if err == nil {
+				t.Fatal("uncertain project ownership reported as absent")
+			}
+			if fault == "missing" {
+				if err := rendezvous.Remove(runDir, 1001); err != nil {
+					t.Fatal(err)
+				}
+				roster.Refresh()
+				_, owned, err := restartRequiredDaemon(t.Context(), cfg, localAppRef(childID), "")
+				if err != nil || owned {
+					t.Fatalf("confirmed owner absence lost: owned=%v err=%v", owned, err)
+				}
+			}
+		})
+	}
+}
