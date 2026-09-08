@@ -345,8 +345,13 @@ func (s *LocalDaemonSource) StartTurn(ctx context.Context, params appwire.TurnSt
 	if err != nil {
 		return appwire.TurnStartResponse{}, err
 	}
+	return s.StartTurnAtEntry(ctx, entry, params)
+}
+
+// StartTurnAtEntry sends input to an exact daemon within shared recovery cancellation.
+func (s *LocalDaemonSource) StartTurnAtEntry(ctx context.Context, entry rendezvous.Entry, params appwire.TurnStartParams) (appwire.TurnStartResponse, error) {
 	var out appwire.TurnStartResponse
-	err = s.withMutationClient(ctx, entry, params.ClientMutationID, func(client *appwire.Client) error {
+	err := s.withMutationClient(ctx, entry, params.ClientMutationID, func(client *appwire.Client) error {
 		var callErr error
 		out, callErr = client.TurnStart(ctx, params)
 		return callErr

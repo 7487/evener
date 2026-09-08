@@ -634,6 +634,104 @@ func TestHubForceStopInterruptsStalledSpawnedResumeRead(t *testing.T) {
 	}
 }
 
+func TestHubForceStopCancelsStartupWithoutReplayingInput(t *testing.T) {
+	for _, stalled := range []string{"read", "initial turn"} {
+		t.Run(stalled, func(t *testing.T) {
+			var turns atomic.Int32
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			defer close(release)
+			cfg, sessionID, spawns := parityResumeFixture(t, func(daemon *appserver.Server) {
+				appserver.HandleTyped(daemon.Router(), appwire.MethodTurnStart, func(ctx context.Context, _ appwire.TurnStartParams) (appwire.TurnStartResponse, error) {
+					turns.Add(1)
+					if stalled == "initial turn" {
+						close(entered)
+						select {
+						case <-ctx.Done():
+						case <-release:
+						}
+						return appwire.TurnStartResponse{}, ctx.Err()
+					}
+					return appwire.TurnStartResponse{Turn: appwire.Turn{ID: "unexpected"}}, nil
+				})
+				appserver.HandleTyped(daemon.Router(), appwire.MethodThreadRead, func(ctx context.Context, params appwire.ThreadReadParams) (appwire.ThreadReadResponse, error) {
+					if stalled == "initial turn" {
+						ref, err := appwire.ParseRef(params.Ref)
+						if err != nil {
+							return appwire.ThreadReadResponse{}, err
+						}
+						return appwire.ThreadReadResponse{Thread: appwire.Thread{ID: ref.ThreadID, SessionID: ref.ThreadID, Evener: appwire.EvenerThread{Ref: params.Ref, InstanceID: ref.ThreadID}}}, nil
+					}
+					close(entered)
+					select {
+					case <-ctx.Done():
+					case <-release:
+					}
+					return appwire.ThreadReadResponse{}, ctx.Err()
+				})
+			})
+			spawner := cfg.Spawner.(*fakeRPCSpawner)
+			spawn := spawner.resume
+			past, _ := cfg.Past.Find(sessionID)
+			spawner.spawn = func(ctx context.Context, _ hubcore.SpawnRequest) (rendezvous.Entry, error) {
+				req := hubcore.ResumeRequest{SessionID: sessionID, StateDir: past.StateDir, WorkingDir: past.Meta.EnvInfo.WorkingDir}
+				entry, err := spawn(ctx, req)
+				entry.StartedAt = time.Now()
+				entry.StateDir = req.StateDir
+				writeRendezvous(t, cfg.RunDir, entry)
+				return entry, err
+			}
+			cfg.Roster = hubcore.NewRoster(cfg.RunDir, forceStopProberFunc(func(rendezvous.Entry) hubcore.ProbeResult { return hubcore.ProbeResult{} }))
+			cfg.ResumeLocks = hubcore.NewResumeLocks()
+			var events []string
+			cfg.DaemonProcesses = forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) {
+				return &forceStopProcess{events: &events}, nil
+			})
+			hub := newHubRPCTestServer(t, cfg)
+			defer hub.Close()
+			client := dialHubRPC(t, hub)
+			defer client.Close()
+			if _, err := client.Initialize(t.Context(), appwire.InitializeParams{}); err != nil {
+				t.Fatal(err)
+			}
+			ref := "local:" + sessionID
+			startResult := make(chan error, 1)
+			go func() {
+				_, err := client.ThreadStart(t.Context(), appwire.ThreadStartParams{Model: "openai/gpt-5", CWD: past.Meta.EnvInfo.WorkingDir, Input: []appwire.InputItem{{Type: "text", Text: "must not reach stopped daemon"}}})
+				startResult <- err
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("startup RPC never reached daemon")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			if err := client.Request(ctx, appwire.MethodEvenerThreadForceStop, appwire.ThreadForceStopParams{Ref: ref}, nil); err != nil {
+				t.Fatalf("force stop behind startup RPC: %v", err)
+			}
+			select {
+			case err := <-startResult:
+				wantTurns := int32(0)
+				if stalled == "initial turn" {
+					wantTurns = 1
+				}
+				if err == nil || turns.Load() != wantTurns {
+					t.Fatalf("canceled start dispatched initial input: err=%v turns=%d", err, turns.Load())
+				}
+			case <-ctx.Done():
+				t.Fatal("start retained ownership")
+			}
+			if *spawns != 1 {
+				t.Fatalf("spawns=%d", *spawns)
+			}
+			if !reflect.DeepEqual(events, []string{"kill", "wait", "close"}) {
+				t.Fatalf("process events=%v", events)
+			}
+		})
+	}
+}
+
 func TestHubForceStopRejectsWaitingMutationUntilExplicitResume(t *testing.T) {
 	for _, method := range []string{appwire.MethodThreadModelSet, appwire.MethodThreadCompactStart} {
 		t.Run(method, func(t *testing.T) {

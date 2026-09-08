@@ -189,12 +189,8 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 	ref := localSpawnWorkspaceRef(entry)
 	var source appsource.Source
 	if canUseSpawnEntry {
-		// SpawnDaemon already returned this exact, freshly published rendezvous
-		// entry. Route the initial read and turn through it directly instead of
-		// depending on a concurrent roster status probe to admit the new daemon.
-		source = appsource.NewLocalDaemonSource("local", func() []rendezvous.Entry {
-			return []rendezvous.Entry{entry}
-		}, nil)
+		// Exact-entry RPCs share the persistent source's recovery cancellation.
+		source, err = spawnedLocalDaemonSource(sources)
 	} else {
 		source, err = sourceForThread(sources, ref, "")
 	}
@@ -215,6 +211,7 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 		annotateThreadProjects([]appwire.Thread{thread})
 		return appwire.ThreadStartResponse{Thread: thread}, nil
 	}
+	startEpoch := sessionRecoveryState(cfg, ref, "").Epoch
 	read := func(ctx context.Context) (appwire.ThreadReadResponse, error) {
 		if canUseSpawnEntry {
 			return readSpawnedLocalThread(ctx, sources, entry)
@@ -234,6 +231,9 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 	} else {
 		threadResp, err = read(ctx)
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isSessionRecoveryAdmissionError(err) {
+		return appwire.ThreadStartResponse{}, err
+	}
 	if err != nil {
 		threadResp.Thread = appwire.Thread{
 			ID: entry.ThreadID, SessionID: entry.SessionID, CWD: workingDir,
@@ -248,11 +248,24 @@ func hubThreadStart(ctx context.Context, cfg hubcore.WebConfig, sources *appsour
 		if err != nil {
 			return appwire.ThreadStartResponse{}, appwire.InternalError("create initial turn mutation id: " + err.Error())
 		}
-		turnResp, err := source.StartTurn(ctx, appwire.TurnStartParams{
+		turnParams := appwire.TurnStartParams{
 			Ref:                ref,
 			ClientMutationID:   clientMutationID,
 			ExpectedInstanceID: expectedInstanceID,
 			Input:              params.Input,
+		}
+		turnResp, err := withDeletionTargetOwnership(ctx, cfg, ref, "", clientMutationID, func() (appwire.TurnStartResponse, error) {
+			if err := sessionActionRecoveryError(ctx, cfg, ref, "", startEpoch); err != nil {
+				return appwire.TurnStartResponse{}, err
+			}
+			if canUseSpawnEntry {
+				local, err := spawnedLocalDaemonSource(sources)
+				if err != nil {
+					return appwire.TurnStartResponse{}, err
+				}
+				return local.StartTurnAtEntry(ctx, entry, turnParams)
+			}
+			return source.StartTurn(ctx, turnParams)
 		})
 		if err != nil {
 			return appwire.ThreadStartResponse{}, err
@@ -646,13 +659,19 @@ func parseSourceTurnID(raw string) (int, error) {
 // readSpawnedLocalThread keeps pre-admission reads in the same recovery scope
 // as ordinary calls so a stalled read cannot retain resume ownership forever.
 func readSpawnedLocalThread(ctx context.Context, sources *appsource.Registry, entry rendezvous.Entry) (appwire.ThreadReadResponse, error) {
-	source, ok := sources.Source("local")
-	if !ok {
-		return appwire.ThreadReadResponse{}, appwire.Unavailable("local daemon source is not configured")
-	}
-	local, ok := source.(*appsource.LocalDaemonSource)
-	if !ok {
-		return appwire.ThreadReadResponse{}, appwire.Unavailable("local daemon source is not configured")
+	local, err := spawnedLocalDaemonSource(sources)
+	if err != nil {
+		return appwire.ThreadReadResponse{}, err
 	}
 	return local.ReadThreadAtEntry(ctx, entry, appwire.ThreadReadParams{Ref: localSpawnWorkspaceRef(entry)})
+}
+
+func spawnedLocalDaemonSource(sources *appsource.Registry) (*appsource.LocalDaemonSource, error) {
+	source, ok := sources.Source("local")
+	if ok {
+		if local, ok := source.(*appsource.LocalDaemonSource); ok {
+			return local, nil
+		}
+	}
+	return nil, appwire.Unavailable("local daemon source is not configured")
 }
