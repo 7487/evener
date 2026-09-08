@@ -583,7 +583,9 @@ func TestInstances_RemoveDeletesEntryStoreKeyAndOAuthRecord(t *testing.T) {
 	if err := f.store.Set("work", "sk-stored"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if err := authopenai.SaveAuth(f.stateDir, "work", authopenai.AuthRecord{Version: 1, Provider: "openai", Source: authopenai.AuthSourceOAuth}); err != nil {
+	// LoadAuth refuses a record that fails Validate, so only a complete one
+	// lets the assertion below tell a deleted record from a rejected one.
+	if err := authopenai.SaveAuth(f.stateDir, "work", makeOAuthRecord("work", "")); err != nil {
 		t.Fatalf("SaveAuth: %v", err)
 	}
 	if err := f.ctl.SetDefault(appwire.InstanceSetDefaultParams{Name: "work"}); err != nil {
@@ -1113,8 +1115,19 @@ func TestInstances_EditRenamesEntryDefaultStoredKeyAndOAuthRecord(t *testing.T) 
 	if v, _ := f.store.Get("work"); v != "" {
 		t.Fatalf("the old stored key was left behind: %q", v)
 	}
-	if _, err := authopenai.LoadAuth(f.stateDir, "personal"); err != nil {
+	moved, err := authopenai.LoadAuth(f.stateDir, "personal")
+	if err != nil {
 		t.Fatalf("OAuth record did not move: %v", err)
+	}
+	// The tokens carry the old name's marker, so they are what tells a moved
+	// record apart from a freshly written one. Provider is the field that has
+	// to change: it names the instance the record belongs to (both OAuth
+	// completion paths set it), so it follows the instance to its new name.
+	if moved.AccessToken != "access-work" {
+		t.Fatalf("a different record sits under the new name: access token = %q", moved.AccessToken)
+	}
+	if moved.Provider != "personal" {
+		t.Fatalf("the moved record still names the old instance: provider = %q", moved.Provider)
 	}
 	if _, err := authopenai.LoadAuth(f.stateDir, "work"); !errors.Is(err, authopenai.ErrAuthNotFound) {
 		t.Fatalf("the old OAuth record was left behind (err = %v)", err)
@@ -1128,6 +1141,41 @@ func TestInstances_EditRenamesEntryDefaultStoredKeyAndOAuthRecord(t *testing.T) 
 		if e.Name == "work" {
 			t.Fatal("List still shows the old name")
 		}
+	}
+}
+
+func TestInstances_EditRenameLeavesNoPhantomImplicitInstance(t *testing.T) {
+	f := newInstancesFixture(t, nil)
+	// A stored key is all the curated openai provider needs to resolve a
+	// credential and exist as an implicit instance, and the registry only
+	// looks that key up when it reloads.
+	if err := f.store.Set("openai", "sk-x"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := f.ctl.reg.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	// Editing the implicit instance authors the shadow entry that the rename
+	// then re-keys, leaving the curated provider unshadowed again. The shadow
+	// has to carry enough to resolve on its own, because a name that is not a
+	// registry id inherits nothing.
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "openai", BaseURL: "https://gw.example.test/v1", Protocol: "openai-chat"}); err != nil {
+		t.Fatalf("Edit(shadow): %v", err)
+	}
+
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "openai", NewName: "work"}); err != nil {
+		t.Fatalf("Edit(rename): %v", err)
+	}
+
+	for _, e := range f.ctl.List().Instances {
+		if e.Name == "openai" {
+			t.Errorf("the rename left a phantom openai instance: %+v", e)
+		}
+	}
+	// A phantom also makes the name look taken, and the refusal returns
+	// before any reload, so nothing would ever clear it.
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "openai"}); err != nil {
+		t.Fatalf("renaming back was refused: %v", err)
 	}
 }
 

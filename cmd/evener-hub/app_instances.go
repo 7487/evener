@@ -451,7 +451,18 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 		return appwire.InvalidParams(fmt.Sprintf("this edit would leave %q unable to load: %v", name, err))
 	}
 	if renaming {
-		return c.moveCredentials(name, newName)
+		moveErr := c.moveCredentials(name, newName)
+		// The reload above ran while the stored key and OAuth record still
+		// sat under the old name, so a curated provider this instance had
+		// shadowed could resolve a credential and reappear as a phantom
+		// implicit instance — one that also makes renaming back a sticky
+		// Conflict. Remove clears credentials before its reload; a rename
+		// cannot, because a failed reload restores the file and the
+		// credentials would already have moved.
+		if err := c.reg.Reload(); err != nil && moveErr == nil {
+			return err
+		}
+		return moveErr
 	}
 	return nil
 }
@@ -459,13 +470,12 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 // moveCredentials carries an instance's stored key and OAuth record to its
 // new name after a rename. It runs once providers.toml is written and
 // reloaded: the config is already renamed, so a failure here is reported as
-// what was left behind rather than undone - the list stays consistent with
+// what was left behind rather than undone — the list stays consistent with
 // the file, and a leftover stays reachable under the old name through
 // evener/auth/apiKey/clear or the state directory. One consequence: the
 // RPC handler broadcasts evener/auth/updated only when Edit returns nil, so
 // on this partial failure other clients keep the old name until their next
-// refresh. The success path — the one the spec's broadcast sentence is
-// about — is unaffected.
+// refresh. The success path is unaffected.
 func (c *hubInstancesController) moveCredentials(oldName, newName string) error {
 	var problems []string
 	if value, ok := c.auth.creds.Get(oldName); ok {
@@ -481,6 +491,9 @@ func (c *hubInstancesController) moveCredentials(oldName, newName string) error 
 	case err != nil:
 		problems = append(problems, fmt.Sprintf("OAuth record not read: %v", err))
 	default:
+		// The record's provider field names the instance it belongs to (the
+		// OAuth completion paths set it), so it follows the rename.
+		record.Provider = newName
 		if err := c.auth.saveAuth(c.auth.stateDir, newName, record); err != nil {
 			problems = append(problems, fmt.Sprintf("OAuth record not copied: %v", err))
 		} else if _, err := c.auth.deleteAuth(c.auth.stateDir, oldName); err != nil {
