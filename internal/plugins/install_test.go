@@ -14,14 +14,7 @@ import (
 // is a bare-string "./plugins/widget" living in the same repo.
 func makeInstallableMarketplace(t *testing.T) (mktRepo, name string) {
 	t.Helper()
-	name = "acme"
-	dir := filepath.Join(t.TempDir(), "mkt")
-	os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755)
-	os.WriteFile(filepath.Join(dir, ".claude-plugin", "marketplace.json"),
-		[]byte(`{"name":"acme","owner":{"name":"o"},"plugins":[{"name":"widget","source":"./plugins/widget"}]}`), 0o644)
-	writePlugin(t, filepath.Join(dir, "plugins", "widget"), "widget", nil)
-	makeGitRepo(t, dir, "README.md", "x")
-	return dir, name
+	return makeMarketplaceRepoWithPlugin(t, "acme", "widget"), "acme"
 }
 
 func TestInstall_MaterializesAndRegisters(t *testing.T) {

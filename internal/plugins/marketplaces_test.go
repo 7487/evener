@@ -230,3 +230,345 @@ func TestRefreshMarketplace_FailedRecloneLeavesCloneUntouched(t *testing.T) {
 		t.Fatalf("LastUpdated advanced on failed refresh: %v", mk["acme"].LastUpdated)
 	}
 }
+
+// makeMarketplaceRepoWithPlugin builds a git repo whose marketplace.json is
+// named name and lists one installable plugin at ./plugins/<plugin>.
+func makeMarketplaceRepoWithPlugin(t *testing.T, name, plugin string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "mkt-"+name+"-"+plugin)
+	mj := `{"name":"` + name + `","owner":{"name":"o"},"plugins":[{"name":"` + plugin + `","source":"./plugins/` + plugin + `"}]}`
+	if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "marketplace.json"), []byte(mj), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writePlugin(t, filepath.Join(dir, "plugins", plugin), plugin, nil)
+	makeGitRepo(t, dir, "README.md", "mkt")
+	return dir
+}
+
+// makeDirectoryMarketplace builds a directory-source marketplace (no git)
+// named name with one installable plugin.
+func makeDirectoryMarketplace(t *testing.T, name, plugin string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "dir-"+name)
+	mj := `{"name":"` + name + `","owner":{"name":"o"},"plugins":[{"name":"` + plugin + `","source":"./plugins/` + plugin + `"}]}`
+	if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "marketplace.json"), []byte(mj), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writePlugin(t, filepath.Join(dir, "plugins", plugin), plugin, nil)
+	return dir
+}
+
+func TestEditMarketplace_RenameMovesCloneCacheAndRegistry(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	mktRepo, name := makeInstallableMarketplace(t)
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: mktRepo}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", name); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	ref, err := m.EditMarketplace(ctx, name, "acme2", nil)
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if ref.InstallLocation != m.marketplaceDir("acme2") {
+		t.Fatalf("InstallLocation = %q, want %q", ref.InstallLocation, m.marketplaceDir("acme2"))
+	}
+	if _, err := os.Stat(m.marketplaceDir("acme2")); err != nil {
+		t.Fatalf("renamed clone missing: %v", err)
+	}
+	if _, err := os.Stat(m.marketplaceDir(name)); !os.IsNotExist(err) {
+		t.Fatal("old clone directory survived the rename")
+	}
+	list, err := m.ListMarketplaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := list["acme2"]; !ok {
+		t.Fatalf("acme2 not registered: %v", list)
+	}
+	if _, ok := list[name]; ok {
+		t.Fatal("the old name is still registered")
+	}
+	reg, err := m.loadRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, ok := reg.Plugins[registryKey("widget", "acme2")]
+	if !ok || len(entries) != 1 {
+		t.Fatalf("registry not re-keyed: %v", reg.Plugins)
+	}
+	if _, still := reg.Plugins[registryKey("widget", name)]; still {
+		t.Fatal("the old registry key survived")
+	}
+	wantPrefix := filepath.Join(m.cacheDir(), "acme2") + string(filepath.Separator)
+	if !strings.HasPrefix(entries[0].InstallPath, wantPrefix) {
+		t.Fatalf("InstallPath = %q, want it under %q", entries[0].InstallPath, wantPrefix)
+	}
+	if _, err := os.Stat(entries[0].InstallPath); err != nil {
+		t.Fatalf("the re-keyed install path does not exist: %v", err)
+	}
+	items, err := m.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Plugin != "widget" || items[0].Marketplace != "acme2" {
+		t.Fatalf("List = %+v", items)
+	}
+	cat, err := m.Browse(ctx, "acme2")
+	if err != nil || len(cat.Plugins) != 1 {
+		t.Fatalf("Browse acme2 = %+v, %v", cat, err)
+	}
+}
+
+func TestEditMarketplace_DirectorySourceRenameKeepsThePath(t *testing.T) {
+	dir := makeDirectoryMarketplace(t, "acme", "widget")
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceDirectory, Path: dir}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", "acme"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	ref, err := m.EditMarketplace(ctx, "acme", "beta", nil)
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if ref.InstallLocation != dir {
+		t.Fatalf("a directory source is referenced in place; InstallLocation = %q", ref.InstallLocation)
+	}
+	reg, _ := m.loadRegistry()
+	entries, ok := reg.Plugins[registryKey("widget", "beta")]
+	if !ok || len(entries) != 1 {
+		t.Fatalf("registry not re-keyed: %v", reg.Plugins)
+	}
+	if _, err := os.Stat(entries[0].InstallPath); err != nil {
+		t.Fatalf("install path after rename: %v", err)
+	}
+}
+
+func TestEditMarketplace_ResourceSwapsTheClone(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	repoA := makeMarketplaceRepoWithPlugin(t, "acme", "widget")
+	repoB := makeMarketplaceRepoWithPlugin(t, "acme", "gadget")
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: repoA}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	ref, err := m.EditMarketplace(ctx, "acme", "", &Source{Kind: SourceURL, URL: repoB})
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if ref.Source.URL != repoB {
+		t.Fatalf("Source = %+v, want repoB", ref.Source)
+	}
+	cat, err := m.Browse(ctx, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Plugins) != 1 || cat.Plugins[0].Name != "gadget" {
+		t.Fatalf("catalog after re-source = %+v, want gadget", cat.Plugins)
+	}
+	if _, err := os.Stat(m.marketplaceDir(".staging")); !os.IsNotExist(err) {
+		t.Fatal("staging directory survived")
+	}
+}
+
+func TestEditMarketplace_RenameAndResourceTogether(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	repoA := makeMarketplaceRepoWithPlugin(t, "acme", "widget")
+	repoB := makeMarketplaceRepoWithPlugin(t, "acme", "gadget")
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: repoA}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", "acme"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	ref, err := m.EditMarketplace(ctx, "acme", "beta", &Source{Kind: SourceURL, URL: repoB})
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if ref.InstallLocation != m.marketplaceDir("beta") || ref.Source.URL != repoB {
+		t.Fatalf("ref = %+v", ref)
+	}
+	list, _ := m.ListMarketplaces()
+	if _, ok := list["beta"]; !ok || len(list) != 1 {
+		t.Fatalf("list = %v", list)
+	}
+	cat, err := m.Browse(ctx, "beta")
+	if err != nil || len(cat.Plugins) != 1 || cat.Plugins[0].Name != "gadget" {
+		t.Fatalf("Browse beta = %+v, %v", cat, err)
+	}
+	reg, _ := m.loadRegistry()
+	entries, ok := reg.Plugins[registryKey("widget", "beta")]
+	if !ok || len(entries) != 1 {
+		t.Fatalf("registry = %v", reg.Plugins)
+	}
+	if _, err := os.Stat(entries[0].InstallPath); err != nil {
+		t.Fatalf("the installed plugin is unaffected by a re-source, but its path is gone: %v", err)
+	}
+}
+
+func TestEditMarketplace_FetchFailureChangesNothing(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	mktRepo, name := makeInstallableMarketplace(t)
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: mktRepo}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", name); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	bad := &Source{Kind: SourceURL, URL: filepath.Join(t.TempDir(), "does-not-exist")}
+	if _, err := m.EditMarketplace(ctx, name, "beta", bad); err == nil {
+		t.Fatal("expected the fetch to fail")
+	}
+	list, _ := m.ListMarketplaces()
+	if _, ok := list[name]; !ok || len(list) != 1 {
+		t.Fatalf("list changed after a failed fetch: %v", list)
+	}
+	if _, err := os.Stat(m.marketplaceDir(name)); err != nil {
+		t.Fatalf("the clone moved after a failed fetch: %v", err)
+	}
+	if _, err := os.Stat(m.marketplaceDir("beta")); !os.IsNotExist(err) {
+		t.Fatal("a beta directory appeared")
+	}
+	reg, _ := m.loadRegistry()
+	if _, ok := reg.Plugins[registryKey("widget", name)]; !ok {
+		t.Fatalf("registry changed after a failed fetch: %v", reg.Plugins)
+	}
+	if _, err := os.Stat(m.marketplaceDir(".staging")); !os.IsNotExist(err) {
+		t.Fatal("staging directory survived")
+	}
+}
+
+func TestEditMarketplace_RestoresDirectoriesWhenARenameStepFails(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	mktRepo, name := makeInstallableMarketplace(t)
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: mktRepo}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", name); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// The clone directory renames; the cache directory refuses. The undo
+	// then runs through the same seam, so only the second call fails.
+	orig := marketplaceRename
+	calls := 0
+	marketplaceRename = func(from, to string) error {
+		calls++
+		if calls == 2 {
+			return errors.New("boom")
+		}
+		return orig(from, to)
+	}
+	t.Cleanup(func() { marketplaceRename = orig })
+
+	if _, err := m.EditMarketplace(ctx, name, "beta", nil); err == nil {
+		t.Fatal("expected the rename to fail")
+	}
+	if _, err := os.Stat(m.marketplaceDir(name)); err != nil {
+		t.Fatalf("the clone was not restored: %v", err)
+	}
+	if _, err := os.Stat(m.marketplaceDir("beta")); !os.IsNotExist(err) {
+		t.Fatal("a beta clone remained")
+	}
+	list, _ := m.ListMarketplaces()
+	if _, ok := list[name]; !ok || len(list) != 1 {
+		t.Fatalf("list changed after a failed rename: %v", list)
+	}
+	reg, _ := m.loadRegistry()
+	if _, ok := reg.Plugins[registryKey("widget", name)]; !ok {
+		t.Fatalf("registry changed after a failed rename: %v", reg.Plugins)
+	}
+}
+
+func TestEditMarketplace_Refusals(t *testing.T) {
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	for _, name := range []string{"acme", "beta"} {
+		dir := makeDirectoryMarketplace(t, name, "widget")
+		if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceDirectory, Path: dir}); err != nil {
+			t.Fatalf("AddMarketplace %s: %v", name, err)
+		}
+	}
+	if _, err := m.EditMarketplace(ctx, "acme", "beta", nil); !errors.Is(err, ErrMarketplaceExists) {
+		t.Fatalf("rename onto a taken name = %v, want ErrMarketplaceExists", err)
+	}
+	if _, err := m.EditMarketplace(ctx, "nope", "x", nil); !errors.Is(err, ErrMarketplaceNotFound) {
+		t.Fatalf("unknown marketplace = %v, want ErrMarketplaceNotFound", err)
+	}
+	if _, err := m.EditMarketplace(ctx, "acme", "../escape", nil); err == nil {
+		t.Fatal("a traversing name must be refused")
+	}
+}
+
+func TestEditMarketplace_NoOpReturnsTheCurrentRef(t *testing.T) {
+	dir := makeDirectoryMarketplace(t, "acme", "widget")
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	before, err := m.AddMarketplace(ctx, "", Source{Kind: SourceDirectory, Path: dir})
+	if err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	same := Source{Kind: SourceDirectory, Path: dir}
+	after, err := m.EditMarketplace(ctx, "acme", "acme", &same)
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if after != before {
+		t.Fatalf("a no-op edit changed the ref: %+v → %+v", before, after)
+	}
+}
+
+func TestRekeyRegistry(t *testing.T) {
+	oldCache, newCache := filepath.Join("cache", "acme"), filepath.Join("cache", "beta")
+	reg := Registry{Version: 2, Plugins: map[string][]InstallEntry{
+		registryKey("widget", "acme"):    {{InstallPath: filepath.Join(oldCache, "widget", "abc")}},
+		registryKey("other", "zeta"):     {{InstallPath: filepath.Join("cache", "zeta", "other", "def")}},
+		registryKey("elsewhere", "acme"): {{InstallPath: filepath.Join("somewhere", "else")}},
+	}}
+	got := rekeyRegistry(reg, "acme", "beta", oldCache, newCache)
+	if _, still := got.Plugins[registryKey("widget", "acme")]; still {
+		t.Fatal("old key survived")
+	}
+	if p := got.Plugins[registryKey("widget", "beta")][0].InstallPath; p != filepath.Join(newCache, "widget", "abc") {
+		t.Fatalf("InstallPath = %q", p)
+	}
+	if p := got.Plugins[registryKey("other", "zeta")][0].InstallPath; p != filepath.Join("cache", "zeta", "other", "def") {
+		t.Fatalf("an unrelated entry changed: %q", p)
+	}
+	if p := got.Plugins[registryKey("elsewhere", "beta")][0].InstallPath; p != filepath.Join("somewhere", "else") {
+		t.Fatalf("a path outside the cache changed: %q", p)
+	}
+	if got.Version != 2 {
+		t.Fatalf("Version = %d", got.Version)
+	}
+}

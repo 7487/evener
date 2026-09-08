@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -231,6 +233,178 @@ func (m *Manager) RemoveMarketplace(ctx context.Context, name string) error {
 	}
 	delete(mk, name)
 	return m.saveMarketplaces(mk)
+}
+
+// EditMarketplace renames a registered marketplace and/or replaces its
+// source (spec 2026-09-07 §3). The order is chosen so the one step that can
+// take a long time or fail for reasons outside the store - fetching the new
+// source - happens before anything on disk moves, and every directory rename
+// is undone if a later step fails before the files are saved. The undo
+// restores each directory's NAME, not its former contents: a rename plus a
+// re-source that fails at the save leaves the new source's files sitting under
+// the old name, which the next Refresh corrects.
+//
+//  1. fetch a changed source into staging and parse its catalog (Add's own
+//     staging discipline: a bad source never half-registers);
+//  2. rename the clone directory and the plugin cache directory, and re-key
+//     every <plugin>@old registry entry (its install path lives under the
+//     renamed cache);
+//  3. swap the staged clone into the (possibly renamed) install location, or
+//     point a directory source at its path;
+//  4. save the installed registry, then the marketplaces file.
+//
+// A same-name, same-source call is a no-op that returns the current ref.
+// A git-backed marketplace's plugins are materialized under the cache; a
+// directory-source marketplace's relative plugins are referenced in place
+// inside it. A re-source moves neither, beyond the re-key a rename implies.
+func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src *Source) (MarketplaceRef, error) {
+	release, err := m.acquireStoreLock(ctx, marketplaceAcquireLock, m.lockPath(), 30*time.Second)
+	if err != nil {
+		return MarketplaceRef{}, err
+	}
+	defer release()
+
+	mk, err := m.loadMarketplaces()
+	if err != nil {
+		return MarketplaceRef{}, err
+	}
+	ref, ok := mk[name]
+	if !ok {
+		return MarketplaceRef{}, fmt.Errorf("marketplace %q: %w", name, ErrMarketplaceNotFound)
+	}
+	renaming := newName != "" && newName != name
+	resourcing := src != nil && *src != ref.Source
+	if !renaming && !resourcing {
+		return ref, nil
+	}
+	if renaming {
+		if err := validNameComponent("marketplace", newName); err != nil {
+			return MarketplaceRef{}, err
+		}
+		if _, taken := mk[newName]; taken {
+			return MarketplaceRef{}, fmt.Errorf("marketplace %q: %w", newName, ErrMarketplaceExists)
+		}
+	}
+	reg, err := m.loadRegistry()
+	if err != nil {
+		return MarketplaceRef{}, err
+	}
+
+	// 1. The network step, before anything on disk moves.
+	staging := m.marketplaceDir(".staging")
+	if resourcing {
+		_ = marketplaceRemoveAll(staging)
+		root, err := m.fetchMarketplaceContainer(ctx, *src, staging)
+		if err != nil {
+			_ = marketplaceRemoveAll(staging)
+			return MarketplaceRef{}, err
+		}
+		if _, err := ParseCatalog(root); err != nil {
+			_ = marketplaceRemoveAll(staging)
+			return MarketplaceRef{}, fmt.Errorf("reading marketplace.json: %w", err)
+		}
+	}
+	// From here until the files are saved, a failure runs undo in reverse
+	// and sweeps staging.
+	var undo []func()
+	fail := func(err error) (MarketplaceRef, error) {
+		for _, fn := range slices.Backward(undo) {
+			fn()
+		}
+		_ = marketplaceRemoveAll(staging)
+		return MarketplaceRef{}, err
+	}
+
+	// 2. Rename on disk and in the registry.
+	target := name
+	if renaming {
+		target = newName
+		if ref.Source.Kind != SourceDirectory && ref.InstallLocation != "" {
+			oldDir, newDir := m.marketplaceDir(name), m.marketplaceDir(newName)
+			if _, err := marketplaceStat(oldDir); err == nil {
+				if err := marketplaceRename(oldDir, newDir); err != nil {
+					return fail(fmt.Errorf("renaming marketplace clone: %w", err))
+				}
+				undo = append(undo, func() { _ = marketplaceRename(newDir, oldDir) })
+			}
+			ref.InstallLocation = newDir
+		}
+		oldCache, newCache := filepath.Join(m.cacheDir(), name), filepath.Join(m.cacheDir(), newName)
+		if _, err := marketplaceStat(oldCache); err == nil {
+			if err := marketplaceRename(oldCache, newCache); err != nil {
+				return fail(fmt.Errorf("renaming plugin cache: %w", err))
+			}
+			undo = append(undo, func() { _ = marketplaceRename(newCache, oldCache) })
+		}
+		reg = rekeyRegistry(reg, name, newName, oldCache, newCache)
+	}
+
+	// 3. Apply the new source into the install location. An old clone that a
+	// directory source makes redundant goes only after the files say so.
+	var afterSave []func()
+	if resourcing {
+		if src.Kind == SourceDirectory {
+			if ref.Source.Kind != SourceDirectory {
+				clone := m.marketplaceDir(target)
+				afterSave = append(afterSave, func() { _ = marketplaceRemoveAll(clone) })
+			}
+			_ = marketplaceRemoveAll(staging)
+			ref.InstallLocation = src.Path
+		} else {
+			dest := m.marketplaceDir(target)
+			if err := m.swapInClone(staging, dest); err != nil {
+				return fail(err)
+			}
+			ref.InstallLocation = dest
+		}
+		ref.Source = *src
+	}
+	ref.LastUpdated = m.now().UTC()
+
+	// 4. The registry first: a marketplaces file naming a marketplace whose
+	// plugins are still keyed under the old name is the worse of the two
+	// half-states, and evener-doctor reports the other one.
+	if renaming {
+		if err := m.saveRegistry(reg); err != nil {
+			return fail(err)
+		}
+		delete(mk, name)
+	}
+	mk[target] = ref
+	if err := m.saveMarketplaces(mk); err != nil {
+		if renaming {
+			return MarketplaceRef{}, fmt.Errorf("marketplace %q renamed in %s but not in %s: %w", name, registryFileName, marketplacesFileName, err)
+		}
+		return MarketplaceRef{}, err
+	}
+	for _, fn := range afterSave {
+		fn()
+	}
+	return ref, nil
+}
+
+// rekeyRegistry moves every <plugin>@oldName entry to <plugin>@newName and
+// rewrites the install paths that lived under the renamed cache directory;
+// entries for other marketplaces, and paths outside the cache, are untouched.
+func rekeyRegistry(reg Registry, oldName, newName, oldCache, newCache string) Registry {
+	out := Registry{Version: reg.Version, Plugins: make(map[string][]InstallEntry, len(reg.Plugins))}
+	for key, entries := range reg.Plugins {
+		plugin, marketplace := splitKey(key)
+		if marketplace != oldName {
+			out.Plugins[key] = entries
+			continue
+		}
+		moved := make([]InstallEntry, 0, len(entries))
+		for _, e := range entries {
+			rel, err := filepath.Rel(oldCache, e.InstallPath)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				e.InstallPath = filepath.Join(newCache, rel)
+			}
+			moved = append(moved, e)
+		}
+		out.Plugins[registryKey(plugin, newName)] = moved
+	}
+	return out
 }
 
 // recloneMarketplace replaces a marketplace clone whose git pull failed. The
