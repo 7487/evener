@@ -2498,7 +2498,7 @@ test.each(["pending", "failed"])(
       );
       const user = userEvent.setup();
       const resume = await screen.findByRole("button", { name: "Resume session" });
-      expect(screen.queryByRole("button", { name: "Force stop…" })).toBeNull();
+      expect(screen.getAllByRole("button", { name: "Force stop…" })).toHaveLength(1);
       await user.click(resume);
       expect(daemonStarted).toBe(true);
       if (outcome === "failed") {
@@ -2627,7 +2627,7 @@ test.each(["pending", "failed"])(
         await threadsStore.getState().refreshThread(ref);
       });
       expect(threadsStore.getState().restartBlockingObligations.has(ref)).toBe(false);
-      expect(screen.queryByRole("button", { name: "Force stop…" })).toBeNull();
+      expect(screen.getAllByRole("button", { name: "Force stop…" })).toHaveLength(1);
       await act(async () => {
         await threadsStore.getState().send(ref, "continue the saved conversation");
       });
@@ -2651,6 +2651,73 @@ test.each(["pending", "failed"])(
       expect((await mutationStorage.getOutbox(mutationId))?.composerText).toBe("continue the saved conversation");
     } finally {
       await act(async () => rejectRead(blocked()));
+    }
+  },
+);
+
+test.each(["model", "compact"])(
+  "saved %s action retains recovery while automatic resume stalls without navigation",
+  async (action) => {
+    const fake = connectFakeClient();
+    const ref = "local:saved-action";
+    let daemonStarted = false;
+    let stopped = false;
+    let rejectAction: (error: Error) => void = () => {};
+    const pendingAction = new Promise<never>((_, reject) => {
+      rejectAction = reject;
+    });
+    void pendingAction.catch(() => {});
+    fake.on("thread/read", () => {
+      const saved = readResponse(ref, { status: { type: "notLoaded" } });
+      saved.thread.evener.resumeRequired = stopped;
+      return saved;
+    });
+    const method = action === "model" ? "thread/model/set" : "thread/compact/start";
+    fake.on(method, () => {
+      daemonStarted = true;
+      return pendingAction;
+    });
+    fake.on("evener/thread/forceStop", () => {
+      expect(daemonStarted).toBe(true);
+      stopped = true;
+      rejectAction(new Error("resumed daemon read canceled"));
+      return {};
+    });
+    render(
+      <ClientProvider client={fake}>
+        <Session params={{ ref }} paneId="p1" focused={true} />
+      </ClientProvider>,
+    );
+    await waitFor(() => expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("notLoaded"));
+    const user = userEvent.setup();
+    try {
+      // A saved snapshot cannot establish whether an automatic resume has launched a daemon.
+      await user.click(screen.getByRole("button", { name: "Force stop…" }));
+      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+      const request =
+        action === "model"
+          ? threadsStore.getState().setModel(ref, "openai", "next-model")
+          : threadsStore.getState().compact(ref);
+      const settled = request.catch((error: unknown) => error);
+      await waitFor(() => expect(daemonStarted).toBe(true));
+      expect(threadsStore.getState().threads.get(ref)?.status.type).toBe("notLoaded");
+      expect(screen.getAllByRole("button", { name: "Force stop…" })).toHaveLength(1);
+      await user.click(screen.getByRole("button", { name: "Force stop…" }));
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toHaveLength(0);
+      await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Force stop" }));
+      await settled;
+      expect(await screen.findByRole("button", { name: "Resume session" })).toBeTruthy();
+      expect(screen.getAllByRole("button", { name: "Force stop…" })).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.method === method)).toHaveLength(1);
+      expect(fake.calls.filter((call) => call.method === "evener/thread/forceStop")).toEqual([
+        { method: "evener/thread/forceStop", params: { ref } },
+      ]);
+      expect(fake.calls.filter((call) => call.method === "thread/resume" || call.method === "turn/start")).toHaveLength(
+        0,
+      );
+    } finally {
+      rejectAction(new Error("fixture cleanup"));
     }
   },
 );
