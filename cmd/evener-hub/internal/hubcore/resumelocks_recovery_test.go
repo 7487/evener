@@ -15,7 +15,9 @@ func TestExplicitResumePreservesNewerAliasRecovery(t *testing.T) {
 			}
 			beforeB := locks.RecoveryState("B")
 			beforeC := locks.RecoveryState("C")
-			locks.ExplicitResumeCompleted("A", epochA)
+			if err := locks.ExplicitResumeCompleted("A", epochA); err != nil {
+				t.Fatal(err)
+			}
 			if locks.RecoveryState("A").ResumeRequired {
 				t.Fatal("explicitly resumed alias remains fenced")
 			}

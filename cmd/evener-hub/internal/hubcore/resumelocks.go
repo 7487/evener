@@ -1,6 +1,14 @@
 package hubcore
 
-import "sync"
+import (
+	"crypto/rand"
+	"errors"
+	"maps"
+	"slices"
+	"sync"
+
+	"github.com/spf13/afero"
+)
 
 // ResumeLocks hands out one mutex per session id so concurrent resume attempts
 // for the same session serialize. Both the REST send path and the RPC
@@ -8,15 +16,80 @@ import "sync"
 // resume triggered on one transport blocks a racing resume on the other,
 // preventing two daemons from being spawned for one exited session (kata sm1a).
 type ResumeLocks struct {
-	mu       sync.Mutex
-	locks    map[string]*sync.Mutex
-	recovery map[string]SessionRecoveryState
-	sequence uint64
+	persistenceMu sync.Mutex
+	store         *recoveryStore
+	mu            sync.Mutex
+	locks         map[string]*sync.Mutex
+	recovery      map[string]SessionRecoveryState
+	sequence      uint64
 }
 
 // NewResumeLocks returns an empty registry ready for use.
 func NewResumeLocks() *ResumeLocks {
 	return &ResumeLocks{locks: map[string]*sync.Mutex{}}
+}
+
+// NewPersistentResumeLocks restores explicit-resume authority before serving.
+// Call NewResumeLocks explicitly for an in-memory registry; an empty root is an error.
+func NewPersistentResumeLocks(stateRoot string) (*ResumeLocks, error) {
+	store, err := openRecoveryStore(afero.NewOsFs(), stateRoot)
+	if err != nil {
+		return nil, err
+	}
+	r := NewResumeLocks()
+	r.store = store
+	r.recovery = make(map[string]SessionRecoveryState)
+	groups := make(map[string]*sessionRecoveryGroup)
+	for alias, id := range store.state {
+		group := groups[id]
+		if group == nil {
+			group = &sessionRecoveryGroup{}
+			groups[id] = group
+		}
+		group.aliases = append(group.aliases, alias)
+		r.recovery[alias] = SessionRecoveryState{ResumeRequired: true, group: group, durableGroup: id}
+	}
+	return r, nil
+}
+
+// PersistForceStop records verified aliases under their ownership locks before
+// signaling. A committed intent remains required even if signaling later fails.
+func (r *ResumeLocks) PersistForceStop(aliases []string) error {
+	if len(aliases) == 0 {
+		return errors.New("recovery alias set is empty")
+	}
+	aliases = slices.Compact(slices.Sorted(slices.Values(aliases)))
+	for _, alias := range aliases {
+		if !validRecoveryAlias(alias) {
+			return errors.New("invalid recovery alias")
+		}
+	}
+	r.persistenceMu.Lock()
+	defer r.persistenceMu.Unlock()
+	id := rand.Text()
+	committed := true
+	var err error
+	if r.store != nil {
+		next := maps.Clone(r.store.state)
+		for _, alias := range aliases {
+			next[alias] = id
+		}
+		committed, err = r.store.commit(next)
+	}
+	if committed {
+		r.mu.Lock()
+		if r.recovery == nil {
+			r.recovery = make(map[string]SessionRecoveryState)
+		}
+		for _, alias := range aliases {
+			state := r.recovery[alias]
+			state.ResumeRequired = true
+			state.durableGroup = id
+			r.recovery[alias] = state
+		}
+		r.mu.Unlock()
+	}
+	return err
 }
 
 // For returns the mutex for sessionID, creating it on first use. Repeated calls
@@ -41,6 +114,7 @@ type SessionRecoveryState struct {
 	Stopping             int
 	ResumeRequired       bool
 	group                *sessionRecoveryGroup
+	durableGroup         string
 }
 
 type sessionRecoveryGroup struct {
@@ -94,19 +168,46 @@ func (r *ResumeLocks) BeginForceStop(aliases []string) func(bool) {
 }
 
 // ExplicitResumeCompleted clears every alias only if no newer recovery began.
-func (r *ResumeLocks) ExplicitResumeCompleted(sessionID string, epoch uint64) {
+func (r *ResumeLocks) ExplicitResumeCompleted(sessionID string, epoch uint64) error {
+	r.persistenceMu.Lock()
+	defer r.persistenceMu.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	state := r.recovery[sessionID]
 	if state.Epoch != epoch || state.Stopping != 0 || state.group == nil {
-		return
+		r.mu.Unlock()
+		return nil
 	}
+	eligible := make(map[string]SessionRecoveryState)
 	for _, id := range state.group.aliases {
 		alias := r.recovery[id]
-		if alias.group != state.group || alias.Stopping != 0 {
+		if alias.group == state.group && alias.Stopping == 0 {
+			eligible[id] = alias
+		}
+	}
+	r.mu.Unlock()
+	if r.store != nil {
+		next := maps.Clone(r.store.state)
+		for id, alias := range eligible {
+			if next[id] == alias.durableGroup {
+				delete(next, id)
+			}
+		}
+		// Retry the write even when a previous removal was renamed before a sync
+		// error: only a fully synced replacement establishes clear completion.
+		if _, err := r.store.commit(next); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, previous := range eligible {
+		alias := r.recovery[id]
+		if alias.group != previous.group || alias.Epoch != previous.Epoch || alias.Stopping != 0 {
 			continue
 		}
 		alias.ResumeRequired = false
+		alias.durableGroup = ""
 		r.recovery[id] = alias
 	}
+	return nil
 }

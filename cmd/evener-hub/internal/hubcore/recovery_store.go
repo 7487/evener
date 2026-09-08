@@ -1,0 +1,183 @@
+package hubcore
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/spf13/afero"
+)
+
+type recoveryRecord struct {
+	Alias string `json:"alias"`
+	Group string `json:"group"`
+}
+
+type recoverySnapshot struct {
+	Version int              `json:"version"`
+	Records []recoveryRecord `json:"records"`
+}
+
+type recoveryStoreFaults struct {
+	BeforeRename func() error
+	AfterRename  func() error
+}
+
+// recoveryStore is serialized by ResumeLocks.persistenceMu, independently of
+// the admission mutex. Its state follows the visible file even on sync failure.
+type recoveryStore struct {
+	fs     afero.Fs
+	root   string
+	state  map[string]string
+	faults recoveryStoreFaults
+}
+
+func openRecoveryStore(fs afero.Fs, root string) (*recoveryStore, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, errors.New("recovery state root is required")
+	}
+	store := &recoveryStore{fs: fs, root: root, state: map[string]string{}}
+	data, err := afero.ReadFile(fs, filepath.Join(root, "recovery", "state.json"))
+	if os.IsNotExist(err) {
+		return store, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read recovery state: %w", err)
+	}
+	var snapshot recoverySnapshot
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&snapshot); err != nil {
+		return nil, fmt.Errorf("decode recovery state: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("decode recovery state: trailing data")
+	}
+	if snapshot.Version != 1 {
+		return nil, fmt.Errorf("unsupported recovery state version %d", snapshot.Version)
+	}
+	for _, record := range snapshot.Records {
+		if !validRecoveryAlias(record.Alias) || strings.TrimSpace(record.Group) == "" {
+			return nil, errors.New("invalid recovery alias or group")
+		}
+		if _, exists := store.state[record.Alias]; exists {
+			return nil, fmt.Errorf("duplicate recovery alias %q", record.Alias)
+		}
+		store.state[record.Alias] = record.Group
+	}
+	return store, nil
+}
+
+func validRecoveryAlias(alias string) bool {
+	return alias != "" && alias != "." && alias != ".." && strings.TrimSpace(alias) == alias && !strings.ContainsAny(alias, "/\\:\x00")
+}
+
+func (s *recoveryStore) commit(next map[string]string) (bool, error) {
+	snapshot := recoverySnapshot{Version: 1, Records: []recoveryRecord{}}
+	for _, alias := range slices.Sorted(maps.Keys(next)) {
+		snapshot.Records = append(snapshot.Records, recoveryRecord{Alias: alias, Group: next[alias]})
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return false, err
+	}
+	renamed, err := s.write(data)
+	if renamed {
+		s.state = next
+	}
+	if err != nil {
+		return renamed, fmt.Errorf("persist recovery state: %w", err)
+	}
+	return renamed, nil
+}
+
+func (s *recoveryStore) write(data []byte) (renamed bool, err error) {
+	dir := filepath.Join(s.root, "recovery")
+	if err := createRecoveryDirectory(s.fs, dir); err != nil {
+		return false, err
+	}
+	temp, err := afero.TempFile(s.fs, dir, "state.json.tmp-*")
+	if err != nil {
+		return false, err
+	}
+	tempPath := temp.Name()
+	defer func() {
+		if temp != nil {
+			_ = temp.Close()
+		}
+		if !renamed {
+			_ = s.fs.Remove(tempPath)
+		}
+	}()
+	if _, err := temp.Write(data); err != nil {
+		return false, err
+	}
+	if err := temp.Sync(); err != nil {
+		return false, err
+	}
+	if err := temp.Close(); err != nil {
+		return false, err
+	}
+	temp = nil
+	if s.faults.BeforeRename != nil {
+		if err := s.faults.BeforeRename(); err != nil {
+			return false, err
+		}
+	}
+	if err := s.fs.Rename(tempPath, filepath.Join(dir, "state.json")); err != nil {
+		return false, err
+	}
+	renamed = true
+	if s.faults.AfterRename != nil {
+		if err := s.faults.AfterRename(); err != nil {
+			return true, err
+		}
+	}
+	return true, syncRecoveryDirectory(s.fs, dir)
+}
+
+// Every missing directory is linked durably in its parent before intent can
+// authorize a signal. Unsupported sync is an error, never claimed as durable.
+func createRecoveryDirectory(fs afero.Fs, dir string) error {
+	parent := filepath.Dir(dir)
+	if parent != dir {
+		if err := createRecoveryDirectory(fs, parent); err != nil {
+			return err
+		}
+	}
+	info, err := fs.Stat(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err := fs.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+			return err
+		}
+	} else if !info.IsDir() {
+		return fmt.Errorf("recovery state parent %q is not a directory", dir)
+	}
+	// Repeat parent syncs even for existing directories: an earlier attempt may
+	// have created one and failed before its parent's sync completed.
+	if parent != dir {
+		return syncRecoveryDirectory(fs, parent)
+	}
+	return nil
+}
+
+func syncRecoveryDirectory(fs afero.Fs, dir string) error {
+	directory, err := fs.Open(dir)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	return errors.Join(syncErr, closeErr)
+}
