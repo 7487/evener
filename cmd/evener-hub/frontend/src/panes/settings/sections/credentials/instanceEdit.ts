@@ -8,6 +8,12 @@
 // carries no authored/inherited distinction for them - so the selects show
 // what is in effect and "inherit from base" is the way back to the base's
 // value (a clear the hub treats as a no-op when nothing was authored).
+//
+// vars do not resolve that way: InstanceEntry.vars carries only what this
+// instance authored, never the base provider's curated defaults, which the
+// registry applies when it resolves a URL. So a template variable gets its
+// row from the template and not from the entry, blank until authored, and
+// emptying one goes out as an empty value - the wire's delete - not a clear.
 import type { InstanceEditParams, InstanceEntry, ProviderDescriptor } from "../../../../protocol/types.gen";
 import type { SelectOption } from "../../../../widgets";
 
@@ -66,25 +72,29 @@ export function varRows(
   const rows = Object.entries(templateVars)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, env]) => ({ key, label: env }));
-  for (const key of Object.keys(draft.vars).sort()) {
+  for (const key of Object.keys(draft.vars).sort((a, b) => a.localeCompare(b))) {
     if (!(key in templateVars)) rows.push({ key, label: key });
   }
   return rows;
 }
 
 /** The request that carries exactly the fields whose trimmed value differs
- * from `initial`, or null when none does. */
+ * from `initial`'s trimmed value, or null when none does. Both sides are
+ * trimmed so the diff holds for any draft, not only one `draftFor` built. */
 export function instanceEditParams(initial: InstanceDraft, draft: InstanceDraft): InstanceEditParams | null {
   const params: InstanceEditParams = { name: initial.name };
   let changed = false;
 
+  // An empty newName means UNCHANGED on the wire, so an emptied Name is not a
+  // rename this request can carry: sending it would earn a success from an
+  // edit that renamed nothing, and the sheet would report a save it did not get.
   const name = draft.name.trim();
-  if (name !== initial.name) {
+  if (name !== "" && name !== initial.name.trim()) {
     params.newName = name;
     changed = true;
   }
   const baseUrl = draft.baseUrl.trim();
-  if (baseUrl !== initial.baseUrl) {
+  if (baseUrl !== initial.baseUrl.trim()) {
     if (baseUrl === "") params.clearBaseUrl = true;
     else params.baseUrl = baseUrl;
     changed = true;
@@ -102,20 +112,20 @@ export function instanceEditParams(initial: InstanceDraft, draft: InstanceDraft)
   const vars: Record<string, string> = {};
   for (const [key, value] of Object.entries(draft.vars)) {
     const trimmed = value.trim();
-    if (trimmed !== (initial.vars[key] ?? "")) vars[key] = trimmed;
+    if (trimmed !== (initial.vars[key] ?? "").trim()) vars[key] = trimmed;
   }
   if (Object.keys(vars).length > 0) {
     params.vars = vars;
     changed = true;
   }
   const apiKeyEnv = draft.apiKeyEnv.trim();
-  if (apiKeyEnv !== initial.apiKeyEnv) {
+  if (apiKeyEnv !== initial.apiKeyEnv.trim()) {
     if (apiKeyEnv === "") params.clearApiKeyEnv = true;
     else params.apiKeyEnv = apiKeyEnv;
     changed = true;
   }
   const credentialHeader = draft.credentialHeader.trim();
-  if (credentialHeader !== initial.credentialHeader) {
+  if (credentialHeader !== initial.credentialHeader.trim()) {
     if (credentialHeader === "") params.clearCredentialHeader = true;
     else params.credentialHeader = credentialHeader;
     changed = true;

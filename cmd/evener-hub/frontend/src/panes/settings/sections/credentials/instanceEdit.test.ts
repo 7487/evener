@@ -16,12 +16,22 @@ function instance(overrides: Partial<InstanceEntry> & Pick<InstanceEntry, "name"
   };
 }
 
+// A descriptor's vars map a template PLACEHOLDER to the environment variable
+// name the docs give it, and the two differ for real providers (the registry's
+// openai descriptor maps BASE_URL to OPENAI_BASE_URL). BASE_URL is here so the
+// tests can tell a key from its label: the hub keys an instance's vars by the
+// placeholder, so seeding or sending the label instead would write a variable
+// nothing substitutes.
 const VERTEX: ProviderDescriptor = {
   id: "google-vertex-anthropic",
   protocol: "anthropic",
   auth: "gcp-adc",
   implicit: true,
-  vars: { GOOGLE_VERTEX_PROJECT: "GOOGLE_VERTEX_PROJECT", GOOGLE_VERTEX_LOCATION: "GOOGLE_VERTEX_LOCATION" },
+  vars: {
+    GOOGLE_VERTEX_PROJECT: "GOOGLE_VERTEX_PROJECT",
+    GOOGLE_VERTEX_LOCATION: "GOOGLE_VERTEX_LOCATION",
+    BASE_URL: "GOOGLE_VERTEX_BASE_URL",
+  },
 };
 
 describe("draftFor", () => {
@@ -46,7 +56,7 @@ describe("draftFor", () => {
       instance({ name: "v", providerId: "google-vertex-anthropic", vars: { GOOGLE_VERTEX_PROJECT: "p1", EXTRA: "e" } }),
       VERTEX,
     );
-    expect(draft.vars).toEqual({ GOOGLE_VERTEX_PROJECT: "p1", GOOGLE_VERTEX_LOCATION: "", EXTRA: "e" });
+    expect(draft.vars).toEqual({ GOOGLE_VERTEX_PROJECT: "p1", GOOGLE_VERTEX_LOCATION: "", BASE_URL: "", EXTRA: "e" });
   });
 
   test("carries the authored apiKeyEnv and credentialHeader", () => {
@@ -67,13 +77,17 @@ describe("draftFor", () => {
 describe("varRows", () => {
   test("template vars first, labelled by env var name and sorted, then authored extras labelled by key", () => {
     const draft = draftFor(
-      instance({ name: "v", providerId: "google-vertex-anthropic", vars: { EXTRA: "e" } }),
+      instance({ name: "v", providerId: "google-vertex-anthropic", vars: { EXTRAS: "s", EXTRA_ONE: "1" } }),
       VERTEX,
     );
     expect(varRows(draft, VERTEX)).toEqual([
+      { key: "BASE_URL", label: "GOOGLE_VERTEX_BASE_URL" },
       { key: "GOOGLE_VERTEX_LOCATION", label: "GOOGLE_VERTEX_LOCATION" },
       { key: "GOOGLE_VERTEX_PROJECT", label: "GOOGLE_VERTEX_PROJECT" },
-      { key: "EXTRA", label: "EXTRA" },
+      // Extras sort by the same rule as the template rows, which puts
+      // EXTRA_ONE ahead of EXTRAS where a code-unit sort would not.
+      { key: "EXTRA_ONE", label: "EXTRA_ONE" },
+      { key: "EXTRAS", label: "EXTRAS" },
     ]);
   });
 });
@@ -97,8 +111,27 @@ describe("instanceEditParams", () => {
     expect(instanceEditParams(base, { ...base, name: " a ", baseUrl: "https://x " })).toBeNull();
   });
 
+  test("both sides are trimmed, so padding in initial is not a standing diff", () => {
+    const padded = {
+      ...base,
+      name: " a ",
+      baseUrl: " https://x ",
+      apiKeyEnv: " K ",
+      credentialHeader: " H=$K ",
+      vars: { R: " 1 " },
+    };
+    expect(instanceEditParams(padded, base)).toBeNull();
+  });
+
   test("a changed name is a rename", () => {
     expect(instanceEditParams(base, { ...base, name: "b" })).toEqual({ name: "a", newName: "b" });
+  });
+
+  test("an emptied name is not a rename, because an empty newName means unchanged on the wire", () => {
+    expect(instanceEditParams(base, { ...base, name: "" })).toBeNull();
+    const params = instanceEditParams(base, { ...base, name: "", baseUrl: "https://y" });
+    expect(params).toEqual({ name: "a", baseUrl: "https://y" });
+    expect(params).not.toHaveProperty("newName");
   });
 
   test("a changed base URL is sent; an emptied one is a clear", () => {
