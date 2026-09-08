@@ -107,7 +107,8 @@ already-exited stop successful. Restore them before request admission; corrupt
 or unsupported authority prevents production startup. An embedded server with
 an explicit empty state root remains process-local.
 
-Persist only recovery obligations and overlap-safe group identity. Keep request
+Persist recovery obligations, overlap-safe group identity, and the verified
+current session ID needed to resume after rendezvous cleanup. Keep request
 epochs, connection sequences, active stop counts and ownership locks in memory.
 Serialize atomic snapshot writes separately from admission reads. A completed
 explicit Resume clears only the applicable generation, and persistence failure
@@ -119,3 +120,24 @@ Validate real hub recreation, automatic-action rejection, explicit Resume and a
 second recreation after clearing; signal/write ordering; already-exited and
 failed-confirmation paths; malformed authority; before/after-rename failures;
 overlapping alias groups and admission responsiveness during held writes.
+
+
+## Recovery identity through marker cleanup
+
+The durable snapshot must identify the current transcript as well as its alias
+group. Dead rendezvous markers can expire during ordinary roster refresh, so
+marker restoration cannot be a prerequisite for normal explicit Resume. Use a
+new strict snapshot version with the verified current session ID committed
+before signaling. Unsupported older snapshots fail startup; no compatibility
+path is introduced.
+
+Resolve alias ownership under the same sorted reservations used by force stop.
+Distinguish verified dead markers from live or unresolved claims, and use the
+durable target when stopped markers no longer exist. Never derive a current
+session by sorting aliases. Fresh explicit Resume must also attach the pane to
+the returned current thread identity. Preserve uncertain messages under their
+original identity without replaying them to a replacement session.
+
+Acceptance includes expired-marker force stop, recreated hub recovery, retained
+dead A alongside live cleared B, concurrent stable/current Resume, and the real
+client/store/pane transition to the resumed transcript and follow-up send target.
