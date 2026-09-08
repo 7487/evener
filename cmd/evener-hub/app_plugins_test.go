@@ -11,6 +11,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -343,5 +344,47 @@ func TestPlugins_Remove_Unknown_Errors(t *testing.T) {
 	_, err := ctl.Remove(context.Background(), appwire.PluginRefParams{Plugin: "nope", Marketplace: "nowhere"})
 	if err == nil {
 		t.Fatal("expected error removing unknown plugin, got nil")
+	}
+}
+
+func TestPlugins_Marketplace_EditRenamesAndReturnsTheList(t *testing.T) {
+	ctl := newTestPluginsController(t)
+	dir := t.TempDir()
+	writeTestMarketplace(t, dir)
+	addTestMarketplace(t, ctl, dir)
+
+	resp, err := ctl.EditMarketplace(context.Background(), appwire.MarketplaceEditParams{Name: "acme", NewName: "acme2"})
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if len(resp.Marketplaces) != 1 || resp.Marketplaces[0].Name != "acme2" {
+		t.Fatalf("EditMarketplace response = %+v, want one entry named acme2", resp.Marketplaces)
+	}
+	if resp.Marketplaces[0].Source.Kind != "directory" || resp.Marketplaces[0].Source.Path != dir {
+		t.Fatalf("Source = %+v", resp.Marketplaces[0].Source)
+	}
+}
+
+func TestPlugins_Marketplace_EditRefusalsAreWireErrors(t *testing.T) {
+	ctl := newTestPluginsController(t)
+	dir := t.TempDir()
+	writeTestMarketplace(t, dir)
+	addTestMarketplace(t, ctl, dir)
+	other := t.TempDir()
+	writeTestMarketplaceManifest(t, other, "beta", "[]")
+	if _, err := ctl.AddMarketplace(context.Background(), appwire.MarketplaceAddParams{
+		Source: appwire.MarketplaceSourceInput{Kind: "directory", Path: other},
+	}); err != nil {
+		t.Fatalf("AddMarketplace beta: %v", err)
+	}
+
+	_, err := ctl.EditMarketplace(context.Background(), appwire.MarketplaceEditParams{Name: "acme", NewName: "beta"})
+	var wire appwire.WireError
+	if !errors.As(err, &wire) || wire.Code != appwire.CodeConflict {
+		t.Fatalf("rename onto a taken name = %v, want a Conflict wire error", err)
+	}
+	_, err = ctl.EditMarketplace(context.Background(), appwire.MarketplaceEditParams{Name: "nope", NewName: "x"})
+	if !errors.As(err, &wire) || wire.Code != appwire.CodeInvalidParams {
+		t.Fatalf("unknown marketplace = %v, want an InvalidParams wire error", err)
 	}
 }

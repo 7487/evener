@@ -255,6 +255,29 @@ func (c *hubPluginsController) RefreshMarketplace(ctx context.Context, params ap
 	return c.listMarketplaces()
 }
 
+// EditMarketplace renames a marketplace and/or replaces its source and
+// returns the updated list. The manager's sentinels become the wire's own
+// refusal classes - a taken name is the caller's Conflict, an unknown name
+// their InvalidParams - while a fetch failure or a rename the filesystem
+// refused stays the hub's plain error.
+func (c *hubPluginsController) EditMarketplace(ctx context.Context, params appwire.MarketplaceEditParams) (appwire.MarketplaceListResponse, error) {
+	var src *plugins.Source
+	if params.Source != nil {
+		converted := marketplaceSourceFromWire(*params.Source)
+		src = &converted
+	}
+	if _, err := c.mgr.EditMarketplace(ctx, params.Name, params.NewName, src); err != nil {
+		switch {
+		case errors.Is(err, plugins.ErrMarketplaceExists):
+			return appwire.MarketplaceListResponse{}, appwire.Conflict(err.Error())
+		case errors.Is(err, plugins.ErrMarketplaceNotFound):
+			return appwire.MarketplaceListResponse{}, appwire.InvalidParams(err.Error())
+		}
+		return appwire.MarketplaceListResponse{}, err
+	}
+	return c.listMarketplaces()
+}
+
 // Browse returns a marketplace's plugin catalog. Like ListMarketplaces, this
 // is a read (the manager may lazily fetch an unfetched marketplace pointer,
 // but that is serialized by the manager's own flock).
