@@ -950,6 +950,21 @@ func TestInstances_ListReportsAuthoredCredentialFields(t *testing.T) {
 	}
 }
 
+// The wire carries a single api_key_env while the file may name several, so
+// the entry reports the first (appwire.InstanceEntry) — the one a form that
+// saves the field back would replace.
+func TestInstances_ListReportsTheFirstAuthoredAPIKeyEnv(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk"})
+	inst, ok := f.ctl.reg.Get().Instance("groq")
+	if !ok {
+		t.Fatal("the fixture registry has no groq instance")
+	}
+	got := f.ctl.entryFor(inst, &registry.Provider{APIKeyEnv: []string{"FIRST", "SECOND"}})
+	if got.APIKeyEnv != "FIRST" {
+		t.Fatalf("APIKeyEnv = %q, want FIRST", got.APIKeyEnv)
+	}
+}
+
 func TestCredentialHeaderField_RendersTheFirstHeaderInSortedOrder(t *testing.T) {
 	if got := credentialHeaderField(nil); got != "" {
 		t.Fatalf("nil = %q", got)
@@ -963,5 +978,94 @@ func TestCredentialHeaderField_RendersTheFirstHeaderInSortedOrder(t *testing.T) 
 	// never be broadcast to a client.
 	if got := credentialHeaderField(map[string]string{"Authorization": "Bearer sk-literal"}); got != "" {
 		t.Fatalf("a hand-authored literal reached the wire: %q", got)
+	}
+}
+
+func TestInstances_EditSetsAndClearsAPIKeyEnvAndCredentialHeader(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk", "PORTKEY_KEY": "pk"})
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := f.ctl.Edit(appwire.InstanceEditParams{
+		Name: "work", APIKeyEnv: "PORTKEY_KEY", CredentialHeader: "Authorization=Bearer $PORTKEY_KEY",
+	}); err != nil {
+		t.Fatalf("Edit(set): %v", err)
+	}
+	p := authoredEntry(t, f.tomlPath, "work")
+	if !slices.Equal(p.APIKeyEnv, []string{"PORTKEY_KEY"}) {
+		t.Fatalf("authored api_key_env = %v", p.APIKeyEnv)
+	}
+	if p.CredentialHeaders["Authorization"] != "Bearer $PORTKEY_KEY" {
+		t.Fatalf("authored credential_headers = %v", p.CredentialHeaders)
+	}
+	if e := entry(t, f.ctl.List(), "work"); e.APIKeyEnv != "PORTKEY_KEY" || e.CredentialHeader != "Authorization=Bearer $PORTKEY_KEY" {
+		t.Fatalf("List = apiKeyEnv %q credentialHeader %q", e.APIKeyEnv, e.CredentialHeader)
+	}
+
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", ClearAPIKeyEnv: true, ClearCredentialHeader: true}); err != nil {
+		t.Fatalf("Edit(clear): %v", err)
+	}
+	p = authoredEntry(t, f.tomlPath, "work")
+	if len(p.APIKeyEnv) != 0 || len(p.CredentialHeaders) != 0 {
+		t.Fatalf("after clearing: api_key_env %v credential_headers %v", p.APIKeyEnv, p.CredentialHeaders)
+	}
+	if e := entry(t, f.ctl.List(), "work"); e.APIKeyEnv != "" || e.CredentialHeader != "" {
+		t.Fatalf("List after clearing = apiKeyEnv %q credentialHeader %q", e.APIKeyEnv, e.CredentialHeader)
+	}
+}
+
+func TestInstances_EditRefusesALiteralCredentialHeader(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk"})
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", CredentialHeader: "Authorization=Bearer sk-literal"})
+	var wire appwire.WireError
+	if !errors.As(err, &wire) || wire.Code != appwire.CodeInvalidParams {
+		t.Fatalf("Edit = %v, want an InvalidParams wire error", err)
+	}
+	if p := authoredEntry(t, f.tomlPath, "work"); len(p.CredentialHeaders) != 0 {
+		t.Fatalf("a refused header was written: %v", p.CredentialHeaders)
+	}
+}
+
+func TestInstances_EditClearsProtocolAndSurface(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk"})
+	if err := f.ctl.Create(appwire.InstanceCreateParams{
+		Name: "work", Base: "openai", Protocol: "openai-responses", Surface: "generic",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if p := authoredEntry(t, f.tomlPath, "work"); p.Protocol != "openai-responses" || p.Surface != "generic" {
+		t.Fatalf("authored = protocol %q surface %q", p.Protocol, p.Surface)
+	}
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", ClearProtocol: true, ClearSurface: true}); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	if p := authoredEntry(t, f.tomlPath, "work"); p.Protocol != "" || p.Surface != "" {
+		t.Fatalf("after clearing: protocol %q surface %q", p.Protocol, p.Surface)
+	}
+	if e := entry(t, f.ctl.List(), "work"); e.Protocol == "" {
+		t.Fatal("the resolved protocol must fall back to the base's, not vanish")
+	}
+}
+
+func TestInstances_EditDeletesAVarGivenAnEmptyValue(t *testing.T) {
+	f := newInstancesFixture(t, map[string]string{"GROQ_API_KEY": "gk"})
+	if err := f.ctl.Create(appwire.InstanceCreateParams{
+		Name: "work", Base: "openai", Vars: map[string]string{"REGION": "us-east-1", "ZONE": "a"},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", Vars: map[string]string{"REGION": ""}}); err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	got := readConfigProviders(t, f.tomlPath)["work"].Transport.Vars
+	if _, still := got["REGION"]; still {
+		t.Fatalf("REGION survived an empty-value edit: %v", got)
+	}
+	if got["ZONE"] != "a" {
+		t.Fatalf("an untouched var changed: %v", got)
 	}
 }

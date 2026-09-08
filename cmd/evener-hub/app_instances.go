@@ -96,8 +96,10 @@ func (c *hubInstancesController) List() appwire.InstanceListResponse {
 	}
 }
 
-// entryFor is the wire view of one instance: the registry's own description
-// plus the credential status the auth controller derives for it.
+// entryFor is the wire view of one instance: the registry's own description,
+// plus the credential status the auth controller derives for it, and the
+// credential fields from its authored entry — nil for an implicit instance,
+// which has no entry in providers.toml and so prefills neither.
 func (c *hubInstancesController) entryFor(inst registry.Instance, authored *registry.Provider) appwire.InstanceEntry {
 	status := c.auth.instanceStatus(inst)
 	entry := appwire.InstanceEntry{
@@ -329,6 +331,10 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 	if err := validVarNames(params.Vars); err != nil {
 		return appwire.InvalidParams(err.Error())
 	}
+	credentialHeaders, err := credentialHeaderFrom(params.CredentialHeader)
+	if err != nil {
+		return err
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -360,17 +366,37 @@ func (c *hubInstancesController) Edit(params appwire.InstanceEditParams) error {
 	} else if v := strings.TrimSpace(params.BaseURL); v != "" {
 		p.Transport.BaseURL = v
 	}
-	if v := strings.TrimSpace(params.Protocol); v != "" {
+	if params.ClearProtocol {
+		p.Protocol = ""
+	} else if v := strings.TrimSpace(params.Protocol); v != "" {
 		p.Protocol = v
 	}
-	if v := strings.TrimSpace(params.Surface); v != "" {
+	if params.ClearSurface {
+		p.Surface = ""
+	} else if v := strings.TrimSpace(params.Surface); v != "" {
 		p.Surface = v
 	}
-	if len(params.Vars) > 0 {
+	if params.ClearAPIKeyEnv {
+		p.APIKeyEnv = nil
+	} else if v := strings.TrimSpace(params.APIKeyEnv); v != "" {
+		p.APIKeyEnv = []string{v}
+	}
+	if params.ClearCredentialHeader {
+		p.CredentialHeaders = nil
+	} else if credentialHeaders != nil {
+		p.CredentialHeaders = credentialHeaders
+	}
+	// An empty value deletes the variable (appwire.InstanceEditParams);
+	// anything else is set as sent, over whatever was authored before.
+	for key, value := range params.Vars {
+		if strings.TrimSpace(value) == "" {
+			delete(p.Transport.Vars, key)
+			continue
+		}
 		if p.Transport.Vars == nil {
 			p.Transport.Vars = map[string]string{}
 		}
-		maps.Copy(p.Transport.Vars, params.Vars)
+		p.Transport.Vars[key] = value
 	}
 	l.Providers[name] = p
 	if err := c.writeLoadable(l); err != nil {
