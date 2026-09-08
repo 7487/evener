@@ -1,7 +1,12 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
 import type { MarketplaceEntry } from "../../../../protocol/types.gen";
-import { MARKETPLACE_SOURCE_OPTIONS, marketplaceDraftFor, marketplaceEditParams } from "./marketplaceEdit";
+import {
+  MARKETPLACE_SOURCE_OPTIONS,
+  marketplaceDraftFor,
+  marketplaceDraftIncomplete,
+  marketplaceEditParams,
+} from "./marketplaceEdit";
 
 const GITHUB: MarketplaceEntry = { name: "acme", source: { kind: "github", repo: "acme/plugins" }, lastUpdated: 1 };
 const URL: MarketplaceEntry = { name: "acme", source: { kind: "url", url: "https://x/y.git" }, lastUpdated: 1 };
@@ -133,6 +138,22 @@ describe("marketplaceEditParams", () => {
       newName: "beta",
       source: { kind: "url", url: "https://x/z.git" },
     });
+  });
+});
+
+describe("marketplaceDraftIncomplete", () => {
+  test("true whenever the kind's own field has no value yet", () => {
+    expect(marketplaceDraftIncomplete(marketplaceDraftFor(GITHUB))).toBe(false);
+    expect(marketplaceDraftIncomplete({ ...marketplaceDraftFor(GITHUB), repo: "  " })).toBe(true);
+    // The case marketplaceEditParams cannot report: a kind picked but not
+    // filled in is no source change, so an edited name would otherwise let a
+    // rename-only save through while the picker says the source moved too.
+    expect(marketplaceDraftIncomplete({ ...marketplaceDraftFor(GITHUB), kind: "directory" })).toBe(true);
+    expect(marketplaceDraftIncomplete({ ...marketplaceDraftFor(GITHUB), kind: "directory", path: "/srv/x" })).toBe(
+      false,
+    );
+    // Only the kind's own field counts - another kind's leftovers don't.
+    expect(marketplaceDraftIncomplete({ ...marketplaceDraftFor(URL), url: "", repo: "acme/plugins" })).toBe(true);
   });
 });
 

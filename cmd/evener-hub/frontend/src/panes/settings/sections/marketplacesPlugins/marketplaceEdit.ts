@@ -71,6 +71,14 @@ function sourceUnchanged(entry: MarketplaceEntry, draft: MarketplaceDraft): bool
   return next.url === (source.url ?? "");
 }
 
+/** Whether the draft's own kind has no value yet. Save stays disabled on an
+ * incomplete draft: a picked-but-empty kind is no source change, so a draft
+ * whose name ALSO changed would otherwise save as a rename alone while the
+ * picker on screen says the source moved too. */
+export function marketplaceDraftIncomplete(draft: MarketplaceDraft): boolean {
+  return draftValue(draft) === "";
+}
+
 /** The request carrying exactly what changed, or null when nothing did. An
  * emptied field is nothing changed rather than a change to nothing: the
  * server ignores an empty newName and cannot fetch an empty source. */

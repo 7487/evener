@@ -155,6 +155,17 @@ test("switching segments while the detail sheet is open closes it", async () => 
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "linter" })).toBeNull());
 });
 
+test("switching segments while the marketplace sheet is open closes it", async () => {
+  connectSeededClient();
+  render(<MarketplacesPluginsSection />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("radio", { name: "Marketplaces (1)" }));
+  await user.click(await screen.findByRole("button", { name: /acme-plugins/ }));
+  expect(screen.getByRole("dialog", { name: "acme-plugins" })).toBeTruthy();
+  await user.click(screen.getByRole("radio", { name: "Browse" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "acme-plugins" })).toBeNull());
+});
+
 test("Browse tree expansion survives a segment round trip (Installed → Browse → Installed → Browse)", async () => {
   const user = userEvent.setup();
   const fake = connectSeededClient();
