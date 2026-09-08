@@ -737,7 +737,7 @@ func registerThreadHandlers(
 		})
 	})
 	appserver.HandleTyped(server.Router(), appwire.MethodEvenerSandboxEscalationResolve, func(ctx context.Context, params appwire.SandboxEscalationResolveParams) (appwire.EmptyResponse, error) {
-		return withDeletionTargetOwnership(ctx, cfg, params.Ref, params.ThreadID, "", func() (appwire.EmptyResponse, error) {
+		return withSessionActionOwnership(ctx, cfg, params.Ref, params.ThreadID, func() (appwire.EmptyResponse, error) {
 			if err := refreshDaemonRestartRequiredError(ctx, cfg, params.Ref, params.ThreadID, ""); err != nil {
 				return appwire.EmptyResponse{}, err
 			}

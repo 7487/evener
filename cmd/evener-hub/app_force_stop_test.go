@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -956,6 +957,10 @@ func TestRecoveryAdmissionUsesNativeTargetAndPreservesRetryEpoch(t *testing.T) {
 		{"resume sessionId precedence", appwire.MethodThreadResume, "B", map[string]any{"sessionId": "B", "ref": "local:A", "threadId": "ignored"}},
 		{"turn ref precedence", appwire.MethodTurnStart, "B", map[string]any{"ref": "local:B", "threadId": "A"}},
 		{"turn threadId", appwire.MethodTurnStart, "B", map[string]any{"threadId": "B", "sessionId": "ignored"}},
+		{"sandbox ref precedence", appwire.MethodEvenerSandboxEscalationResolve, "B", map[string]any{"ref": "local:B", "threadId": "A"}},
+		{"sandbox threadId", appwire.MethodEvenerSandboxEscalationResolve, "B", map[string]any{"threadId": "B"}},
+		{"sandbox ignores mutation ID", appwire.MethodEvenerSandboxEscalationResolve, "B", map[string]any{"ref": "local:B", "clientMutationId": []string{"ignored"}}},
+		{"sandbox invalid target", appwire.MethodEvenerSandboxEscalationResolve, "", map[string]any{"threadId": []string{"invalid"}}},
 		{"model ignores unknown field types", appwire.MethodThreadModelSet, "B", map[string]any{"ref": "local:B", "threadId": []string{"ignored"}}},
 		{"unknown method", "unknown", "", map[string]any{"ref": "local:B"}},
 		{"foreign ref", appwire.MethodThreadResume, "", map[string]any{"ref": "remote:B", "sessionId": "A"}},
@@ -1003,6 +1008,72 @@ func (s *recoveryReasoningSource) ID() string { return "local" }
 func (s *recoveryReasoningSource) SetThreadReasoningEffort(context.Context, appwire.ThreadReasoningEffortSetParams) error {
 	s.applied++
 	return nil
+}
+
+type recoverySandboxSource struct {
+	relayLifecycleSource
+	approvals []appwire.SandboxEscalationResolveParams
+}
+
+func (s *recoverySandboxSource) ID() string { return "local" }
+func (s *recoverySandboxSource) ResolveSandboxEscalation(_ context.Context, params appwire.SandboxEscalationResolveParams) error {
+	s.approvals = append(s.approvals, params)
+	return nil
+}
+
+func TestSandboxApprovalCannotCrossSessionRecovery(t *testing.T) {
+	for _, unread := range []bool{false, true} {
+		for _, target := range []appwire.SandboxEscalationResolveParams{
+			{Ref: "local:owner", ThreadID: "ignored", EscalationID: "approval", Approve: true},
+			{ThreadID: "owner", EscalationID: "approval", Approve: true},
+		} {
+			t.Run(fmt.Sprintf("unread=%v/ref=%s", unread, target.Ref), func(t *testing.T) {
+				cfg := hubcore.WebConfig{ResumeLocks: hubcore.NewResumeLocks()}
+				source := &recoverySandboxSource{}
+				sources := appsource.NewRegistry()
+				sources.Add(source)
+				server := newHubAppServer(cfg, sources)
+				// A queued request retains its admission epoch; unread socket input
+				// retains the connection generation even when admitted after resume.
+				ctx := t.Context()
+				message := appwire.RequestMessage(appwire.NewIntID(1), appwire.MethodEvenerSandboxEscalationResolve, target)
+				if unread {
+					ctx = admitSessionConnection(ctx, cfg)
+				} else {
+					ctx = admitSessionRecovery(ctx, cfg, message)
+				}
+				finish := cfg.ResumeLocks.BeginForceStop([]string{"owner"})
+				finish(true)
+				cfg.ResumeLocks.ExplicitResumeCompleted("owner", cfg.ResumeLocks.RecoveryState("owner").Epoch)
+				if unread {
+					ctx = admitSessionRecovery(ctx, cfg, message)
+				}
+				_, err := exactDispatch(ctx, t, server, appwire.MethodEvenerSandboxEscalationResolve, target)
+				if !isSessionRecoveryAdmissionError(err) || len(source.approvals) != 0 {
+					t.Fatalf("old approval reached replacement: err=%v approvals=%v", err, source.approvals)
+				}
+				wire := appserver.WireError(err)
+				raw, err := json.Marshal(wire.Data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var data appwire.ErrorData
+				if err := json.Unmarshal(raw, &data); err != nil {
+					t.Fatal(err)
+				}
+				if data.ClientMutationID != "" || data.MutationOutcome != "" {
+					t.Fatalf("non-durable approval acquired mutation metadata: %+v", data)
+				}
+				fresh := admitSessionRecovery(admitSessionConnection(t.Context(), cfg), cfg, message)
+				if _, err := exactDispatch(fresh, t, server, appwire.MethodEvenerSandboxEscalationResolve, target); err != nil {
+					t.Fatal(err)
+				}
+				if len(source.approvals) != 1 || source.approvals[0] != target {
+					t.Fatalf("fresh approval not delivered exactly once: %v", source.approvals)
+				}
+			})
+		}
+	}
 }
 
 func TestCapturedSessionActionsRejectAdmissionBeforeRecovery(t *testing.T) {
