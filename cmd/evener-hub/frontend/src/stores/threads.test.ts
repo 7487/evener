@@ -243,7 +243,6 @@ function sameEpochReconnectFixture() {
     params: {
       threadId: "thr_ref_a",
       ref: "ref_a",
-      turnId: "turn_1",
       turn: { id: "turn_1", status: "completed", itemsView: "" },
     },
   };
@@ -621,7 +620,6 @@ describe("useThreadsStore.ensureThread", () => {
       params: {
         threadId: "thr_ref_a",
         ref: "ref_a",
-        turnId: "turn_1",
         turn: { id: "turn_1", status: "completed", itemsView: "" },
       },
     });
@@ -2846,7 +2844,6 @@ describe("notification routing", () => {
       params: {
         threadId: "thr_ref_a",
         ref: "ref_a",
-        turnId: "turn_1",
         turn: { id: "turn_1", status: "completed", itemsView: "" },
       },
     });
@@ -2880,8 +2877,6 @@ describe("notification routing", () => {
     await threadsStore.getState().ensureThread("ref_a");
     expect(threadsStore.getState().threads.get("ref_a")?.activeTurnId).toBe("turn_1");
 
-    // The wire payload is a map literal with no top-level "turnId" key at all;
-    // TurnCompletedParams declares it required, hence the cast.
     fake.emitNotification({
       method: "turn/completed",
       params: {
@@ -2904,7 +2899,7 @@ describe("notification routing", () => {
           ],
         },
       },
-    } as AnyNotification);
+    });
 
     const model = threadsStore.getState().threads.get("ref_a");
     expect(model?.turns.map((turn) => turn.id)).toEqual(["turn_system", "turn_1"]);
@@ -3355,7 +3350,6 @@ describe("notification routing differential (randomized: index vs scan reference
         params: {
           threadId: pick(Object.values(threadIds)),
           ref: pick(refs),
-          turnId: pick(turnIds),
           turn: { id: pick(turnIds), status: "completed", itemsView: "" },
         },
       }),
@@ -3485,7 +3479,6 @@ describe("reconnect resubscribe", () => {
       params: {
         threadId: "thr_ref_a",
         ref: "ref_a",
-        turnId: "turn_1",
         turn: { id: "turn_1", status: "completed", itemsView: "" },
       },
     });
@@ -3539,7 +3532,6 @@ describe("reconnect resubscribe", () => {
       params: {
         threadId: "thr_ref_a",
         ref: "ref_a",
-        turnId: "turn_live",
         turn: { id: "turn_live", status: "completed", itemsView: "" },
       },
     });
@@ -3668,7 +3660,6 @@ describe("reconnect resubscribe", () => {
       params: {
         threadId: "thr_ref_a",
         ref: "ref_a",
-        turnId: "turn_1",
         turn: { id: "turn_1", status: "completed", itemsView: "" },
       },
     });
