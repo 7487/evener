@@ -1,9 +1,10 @@
 // marketplaceEdit.ts: the marketplace sheet's form model - the draft, how it
 // is seeded from a MarketplaceEntry, and how a dirty draft becomes the
 // smallest evener/marketplace/edit request. Pure, so the rules (the kind's
-// own field is the only one that counts; a source whose kind the picker does
-// not offer shows its URL under Git URL and keeps that kind, and the fields
-// it carries, until the user picks a different kind; a blanked field is an
+// own field is the only one that counts; a same-kind edit keeps the fields the
+// form has no input for, and a source whose kind the picker does not offer
+// shows its URL under Git URL and keeps that kind until the user picks a
+// different one; stored padding is not an edit; a blanked field is an
 // unfinished edit, not a change) are pinned without rendering anything.
 import type { MarketplaceEditParams, MarketplaceEntry, MarketplaceSourceInput } from "../../../../protocol/types.gen";
 
@@ -52,23 +53,30 @@ function draftValue(draft: MarketplaceDraft): string {
 
 function sourceFromDraft(entry: MarketplaceEntry, draft: MarketplaceDraft): MarketplaceSourceInput {
   const value = draftValue(draft);
-  if (draft.kind === "github") return { kind: "github", repo: value };
-  if (draft.kind === "directory") return { kind: "directory", path: value };
-  // A kind the picker cannot offer shows its URL here, so editing that URL
-  // re-points the source it already is - dropping to a plain url would
-  // silently change which catalog the marketplace reads.
-  if (!isOfferedKind(entry.source.kind)) return { ...entry.source, url: value };
-  return { kind: "url", url: value };
+  // A same-kind edit changes the one field the picker shows and keeps every
+  // other field the source carries: a hand-set ref or sha, or a git-subdir's
+  // path, has no input on this form, so a freshly built source would silently
+  // drop it. A kind the picker cannot offer shows its URL under Git URL, which
+  // makes `url` its own kind here - dropping to a plain url would change which
+  // catalog the marketplace reads. Only picking a different kind replaces the
+  // source wholesale.
+  const sameKind = draft.kind === entry.source.kind || (draft.kind === "url" && !isOfferedKind(entry.source.kind));
+  const kept: MarketplaceSourceInput = sameKind ? entry.source : { kind: draft.kind };
+  if (draft.kind === "github") return { ...kept, repo: value };
+  if (draft.kind === "directory") return { ...kept, path: value };
+  return { ...kept, url: value };
 }
 
-/** Whether the draft still describes the entry's own source. */
+/** Whether the draft still describes the entry's own source. The stored value
+ * is trimmed alongside the draft's: the form shows stored padding verbatim, and
+ * an untouched field is not an edit. */
 function sourceUnchanged(entry: MarketplaceEntry, draft: MarketplaceDraft): boolean {
   const { source } = entry;
   const next = sourceFromDraft(entry, draft);
   if (next.kind !== source.kind) return false;
-  if (next.kind === "github") return next.repo === (source.repo ?? "");
-  if (next.kind === "directory") return next.path === (source.path ?? "");
-  return next.url === (source.url ?? "");
+  if (next.kind === "github") return next.repo === (source.repo ?? "").trim();
+  if (next.kind === "directory") return next.path === (source.path ?? "").trim();
+  return next.url === (source.url ?? "").trim();
 }
 
 /** Whether the draft's own kind has no value yet. Save stays disabled on an
@@ -97,7 +105,10 @@ export function marketplaceEditParams(entry: MarketplaceEntry, draft: Marketplac
   const params: MarketplaceEditParams = { name: entry.name };
   let changed = false;
   const name = draft.name.trim();
-  if (name && name !== entry.name) {
+  // Trimmed on both sides: a stored name shown with its padding is not a
+  // rename to its own trimmed form. What goes over the wire is the trimmed
+  // draft either way.
+  if (name && name !== entry.name.trim()) {
     params.newName = name;
     changed = true;
   }

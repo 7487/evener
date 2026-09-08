@@ -26,6 +26,15 @@ const LOCAL: MarketplaceEntry = {
   lastUpdated: 0,
 };
 
+// A second marketplace, so a row tap can land on something else while a save
+// on the first one is still in flight.
+const OTHER: MarketplaceEntry = {
+  name: "other",
+  source: { kind: "github", repo: "other/plugins" },
+  installLocation: "/home/u/.config/evener/plugins/marketplaces/other",
+  lastUpdated: 1_700_000_000,
+};
+
 // A source kind this frontend cannot represent, carrying no url either, so the
 // only draft it can seed is an empty Git URL field.
 const FUTURE: MarketplaceEntry = {
@@ -178,6 +187,58 @@ test("a rename that resolves after the sheet has moved on does not re-select the
   // re-selecting a name the store no longer has still closes the sheet.
   select("acme");
   await waitFor(() => expect(onClose).toHaveBeenCalled());
+});
+
+test("a same-name save that lands after another marketplace opened leaves that sheet's form alone", async () => {
+  const fake = connectionStore.getState().client as FakeClient;
+  let release: (() => void) | undefined;
+  fake.on("evener/marketplace/edit", (params) => {
+    expect(params).toEqual({ name: "acme", source: { kind: "url", url: "https://x/y.git" } });
+    return new Promise((resolve) => {
+      release = () => resolve({ marketplaces: [{ ...ACME, source: { kind: "url", url: "https://x/y.git" } }, OTHER] });
+    });
+  });
+  const { select } = renderSheet(ACME);
+  act(() => extensionsStore.setState({ marketplaces: [ACME, OTHER] }));
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("radio", { name: "Git URL" }));
+  await user.type(screen.getByPlaceholderText("https://github.com/owner/repo.git"), "https://x/y.git");
+  await user.click(saveButton());
+  // A re-source clones a repo, so there is a real window in which the user
+  // dismisses this sheet and taps another row.
+  select("other");
+  act(() => release?.());
+  await waitFor(() => expect(getToasts().some((t) => t.kind === "success" && t.text === "Saved acme")).toBe(true));
+  // other's own name and source, not the saved marketplace's - and nothing
+  // armed, so Save cannot rename other to acme.
+  expect(field("Name").value).toBe("other");
+  expect((screen.getByPlaceholderText("owner/repo") as HTMLInputElement).value).toBe("other/plugins");
+  expect(saveButton().disabled).toBe(true);
+});
+
+test("a save that fails after another marketplace opened toasts without marking that form", async () => {
+  const fake = connectionStore.getState().client as FakeClient;
+  let reject: (() => void) | undefined;
+  fake.on(
+    "evener/marketplace/edit",
+    () =>
+      new Promise((_resolve, rejectRequest) => {
+        reject = () => rejectRequest(new Error("clone failed"));
+      }),
+  );
+  const { select } = renderSheet(ACME);
+  act(() => extensionsStore.setState({ marketplaces: [ACME, OTHER] }));
+  const user = userEvent.setup();
+  await user.type(field("Name"), "2");
+  await user.click(saveButton());
+  select("other");
+  act(() => reject?.());
+  await waitFor(() =>
+    expect(getToasts().some((t) => t.kind === "error" && t.text === "Save failed: clone failed")).toBe(true),
+  );
+  // The toast reports the failure; other's form did not cause it.
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(field("Name").value).toBe("other");
 });
 
 test("an entry whose source kind this frontend cannot represent can still be renamed", async () => {
@@ -379,6 +440,24 @@ test("the confirm dialog's buttons disable while removal is in flight, and it st
     expect(getToasts().some((t) => t.kind === "success" && t.text === "Removed marketplace acme")).toBe(true),
   );
   expect(screen.queryByRole("dialog", { name: "Remove marketplace" })).toBeNull();
+});
+
+test("a failed Remove toasts and keeps the sheet and its confirm open for a retry", async () => {
+  const fake = connectionStore.getState().client as FakeClient;
+  fake.on("evener/marketplace/remove", () => {
+    throw new Error("in use");
+  });
+  const { onClose } = renderSheet(ACME);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Remove" }));
+  const confirm = screen.getByRole("dialog", { name: "Remove marketplace" });
+  await user.click(within(confirm).getByRole("button", { name: "Remove" }));
+  await waitFor(() =>
+    expect(getToasts().some((t) => t.kind === "error" && t.text === "Remove marketplace failed: in use")).toBe(true),
+  );
+  expect(screen.getByRole("dialog", { name: "Remove marketplace" })).toBeTruthy();
+  expect((within(confirm).getByRole("button", { name: "Remove" }) as HTMLButtonElement).disabled).toBe(false);
+  expect(onClose).not.toHaveBeenCalled();
 });
 
 test("closes itself when the entry disappears from the store", async () => {

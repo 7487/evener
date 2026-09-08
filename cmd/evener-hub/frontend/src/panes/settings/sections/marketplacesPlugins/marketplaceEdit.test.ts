@@ -27,6 +27,26 @@ const FUTURE: MarketplaceEntry = {
 // The same unofferable kind carrying no url at all, so the only draft it can
 // seed is an empty one.
 const FUTURE_NO_URL: MarketplaceEntry = { name: "acme", source: { kind: "gitlab", ref: "main" }, lastUpdated: 1 };
+// An offered kind carrying a field the picker has no input for: only something
+// outside this form (a hand-edited known_marketplaces.json) can set it, and
+// only a kind switch may drop it.
+const GITHUB_REF: MarketplaceEntry = {
+  name: "acme",
+  source: { kind: "github", repo: "acme/plugins", ref: "v2" },
+  lastUpdated: 1,
+};
+// Stored values with surrounding whitespace. The form shows them verbatim, so
+// an untouched draft carries the padding and must still read as unchanged.
+const PADDED_REPO: MarketplaceEntry = {
+  name: "acme",
+  source: { kind: "github", repo: "acme/plugins " },
+  lastUpdated: 1,
+};
+const PADDED_NAME: MarketplaceEntry = {
+  name: " acme ",
+  source: { kind: "github", repo: "acme/plugins" },
+  lastUpdated: 1,
+};
 
 describe("marketplaceDraftFor", () => {
   test("seeds the kind and the matching field, blanking the others", () => {
@@ -132,6 +152,43 @@ describe("marketplaceEditParams", () => {
       source: { kind: "github", repo: "acme/plugins" },
     });
     expect(marketplaceEditParams(SUBDIR, { ...draft, kind: "url", repo: "acme/plugins" })).toBeNull();
+  });
+
+  test("a same-kind edit keeps the fields the picker has no input for", () => {
+    expect(marketplaceEditParams(GITHUB_REF, marketplaceDraftFor(GITHUB_REF))).toBeNull();
+    expect(marketplaceEditParams(GITHUB_REF, { ...marketplaceDraftFor(GITHUB_REF), repo: "acme/other" })).toStrictEqual(
+      {
+        name: "acme",
+        source: { kind: "github", repo: "acme/other", ref: "v2" },
+      },
+    );
+    // Picking a different kind is a wholesale replacement, so the ref goes.
+    expect(
+      marketplaceEditParams(GITHUB_REF, { ...marketplaceDraftFor(GITHUB_REF), kind: "url", url: "https://x/y.git" }),
+    ).toStrictEqual({
+      name: "acme",
+      source: { kind: "url", url: "https://x/y.git" },
+    });
+  });
+
+  test("a padded stored source value is not a change, and an edit still sends the trimmed one", () => {
+    expect(marketplaceEditParams(PADDED_REPO, marketplaceDraftFor(PADDED_REPO))).toBeNull();
+    expect(marketplaceSourceTouched(PADDED_REPO, marketplaceDraftFor(PADDED_REPO))).toBe(false);
+    expect(
+      marketplaceEditParams(PADDED_REPO, { ...marketplaceDraftFor(PADDED_REPO), repo: "acme/other" }),
+    ).toStrictEqual({
+      name: "acme",
+      source: { kind: "github", repo: "acme/other" },
+    });
+  });
+
+  test("a padded stored name is not a rename, and a rename still sends the trimmed name", () => {
+    expect(marketplaceEditParams(PADDED_NAME, marketplaceDraftFor(PADDED_NAME))).toBeNull();
+    // The request keys by the name the server stores, padding and all.
+    expect(marketplaceEditParams(PADDED_NAME, { ...marketplaceDraftFor(PADDED_NAME), name: " beta " })).toStrictEqual({
+      name: " acme ",
+      newName: "beta",
+    });
   });
 
   test("rename and re-source ride one request", () => {

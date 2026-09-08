@@ -107,17 +107,20 @@ export function MarketplaceSheet({ name, onClose, onRenamed, expandedMarketplace
     seed(entry);
   }, [entry?.name]);
 
-  useEffect(() => {
-    if (name !== null && marketplaces !== null && entry === undefined && pendingRename.current === null) onClose();
-  }, [name, marketplaces, entry, onClose]);
   // The rename is over once the page has re-selected under the new name, so
   // this effect exists precisely to fire on a changed `name` - which the
   // dependency rule reads as one dependency too many, because clearing a ref
-  // is all the body does.
+  // is all the body does. It must clear BEFORE the close-on-vanish effect
+  // reads the ref in the same commit: a rename the page has already
+  // re-selected, onto a name a concurrent remove took back out of the list,
+  // is a vanished entry that has to close.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `name` changing is the whole trigger, not an extra dependency
   useEffect(() => {
     pendingRename.current = null;
   }, [name]);
+  useEffect(() => {
+    if (name !== null && marketplaces !== null && entry === undefined && pendingRename.current === null) onClose();
+  }, [name, marketplaces, entry, onClose]);
 
   const open = name !== null && entry !== undefined;
   const params = entry !== undefined && draft !== null ? marketplaceEditParams(entry, draft) : null;
@@ -145,10 +148,18 @@ export function MarketplaceSheet({ name, onClose, onRenamed, expandedMarketplace
     if (params.newName !== undefined) pendingRename.current = params.newName;
     try {
       await extensionsStore.getState().editMarketplace(params);
+      // Reported wherever the user has navigated to: the write landed, and a
+      // sheet that moved on is no reason to leave a completed save unreported.
       toasts.push("success", `Saved ${params.newName ?? entry.name}`);
       if (params.newName === undefined) {
-        const refreshed = extensionsStore.getState().marketplaces?.find((m) => m.name === entry.name);
-        if (refreshed !== undefined) seed(refreshed);
+        // The rename branch's guard applies here too: seeding is cosmetic - it
+        // only normalizes whitespace - but on a sheet the page has moved to it
+        // would show this marketplace's name and source under another one's
+        // title, with Save armed to rename that one to this.
+        if (liveName.current === entry.name) {
+          const refreshed = extensionsStore.getState().marketplaces?.find((m) => m.name === entry.name);
+          if (refreshed !== undefined) seed(refreshed);
+        }
       } else if (liveName.current === entry.name) {
         onRenamed(params.newName);
       } else {
@@ -161,7 +172,9 @@ export function MarketplaceSheet({ name, onClose, onRenamed, expandedMarketplace
     } catch (err) {
       pendingRename.current = null;
       const message = errorText(err);
-      setFormError(message);
+      // Inline only while this sheet still shows the form that caused it; the
+      // toast carries the failure either way.
+      if (liveName.current === entry.name) setFormError(message);
       toasts.push("error", `Save failed: ${message}`);
     } finally {
       setSaving(false);
