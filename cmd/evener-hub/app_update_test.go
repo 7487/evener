@@ -3,7 +3,6 @@ package hub
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -432,7 +431,8 @@ func TestHubUpdateApplyRestartsAfterTheResponseIsWritten(t *testing.T) {
 	t.Cleanup(func() { execHubBinary = previousExec })
 
 	previousStderr := hubUpdateStderr
-	hubUpdateStderr = io.Discard
+	stderr := newSyncWriter("restart failed")
+	hubUpdateStderr = stderr
 	t.Cleanup(func() { hubUpdateStderr = previousStderr })
 
 	stubHubSelfUpgrade(t, func(context.Context, selfupdate.Options) (selfupdate.Result, error) {
@@ -468,5 +468,17 @@ func TestHubUpdateApplyRestartsAfterTheResponseIsWritten(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the restart never ran after the apply response reached the transport")
+	}
+
+	// Join the restart goroutine before cleanup restores execHubBinary and
+	// the next test's setBuild resets the shared globals: the exec stub
+	// always fails, so the "restart failed" log line (written after the
+	// Unlock) proves the goroutine is done touching shared state. Without
+	// this the test races the goroutine under -race (cleanup's write to
+	// execHubBinary vs the goroutine's read; next setBuild vs Unlock).
+	select {
+	case <-stderr.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restart goroutine never finished after exec failed")
 	}
 }
