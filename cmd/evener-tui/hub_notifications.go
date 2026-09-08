@@ -604,14 +604,7 @@ func streamDeltaForMethod(method string) streamDeltaKind {
 // text chunk the frame carries. All three delta params shapes decode into it
 // (unknown fields are ignored), so N chunks in one frame pay one unmarshal
 // each with no per-kind typed struct, and one reducer build + apply total.
-type streamDeltaChunk struct {
-	Ref      string `json:"ref"`
-	ThreadID string `json:"threadId"`
-	TurnID   string `json:"turnId"`
-	ItemID   string `json:"itemId"`
-	CallID   string `json:"callId"`
-	Delta    string `json:"delta"`
-}
+type streamDeltaChunk = appwire.ToolOutputDeltaParams
 
 // decodeStreamDeltaChunk extracts the shared delta envelope from raw params.
 // It reports false for malformed frames, mirroring the old per-kind behavior
