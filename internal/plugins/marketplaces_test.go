@@ -278,9 +278,20 @@ func TestEditMarketplace_RenameMovesCloneCacheAndRegistry(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 
+	// LastUpdated is a fetch-freshness stamp and a rename fetches nothing; the
+	// fixed clock makes any bump unmistakable.
+	before, err := m.ListMarketplaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Now = func() time.Time { return time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC) }
+
 	ref, err := m.EditMarketplace(ctx, name, "acme2", nil)
 	if err != nil {
 		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if !ref.LastUpdated.Equal(before[name].LastUpdated) {
+		t.Fatalf("a pure rename advanced LastUpdated: %v → %v", before[name].LastUpdated, ref.LastUpdated)
 	}
 	if ref.InstallLocation != m.marketplaceDir("acme2") {
 		t.Fatalf("InstallLocation = %q, want %q", ref.InstallLocation, m.marketplaceDir("acme2"))
@@ -370,12 +381,17 @@ func TestEditMarketplace_ResourceSwapsTheClone(t *testing.T) {
 	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: repoA}); err != nil {
 		t.Fatalf("AddMarketplace: %v", err)
 	}
+	stamp := time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC)
+	m.Now = func() time.Time { return stamp }
 	ref, err := m.EditMarketplace(ctx, "acme", "", &Source{Kind: SourceURL, URL: repoB})
 	if err != nil {
 		t.Fatalf("EditMarketplace: %v", err)
 	}
 	if ref.Source.URL != repoB {
 		t.Fatalf("Source = %+v, want repoB", ref.Source)
+	}
+	if !ref.LastUpdated.Equal(stamp) {
+		t.Fatalf("a re-source did not advance LastUpdated: %v, want %v", ref.LastUpdated, stamp)
 	}
 	cat, err := m.Browse(ctx, "acme")
 	if err != nil {
@@ -425,6 +441,55 @@ func TestEditMarketplace_RenameAndResourceTogether(t *testing.T) {
 	}
 	if _, err := os.Stat(entries[0].InstallPath); err != nil {
 		t.Fatalf("the installed plugin is unaffected by a re-source, but its path is gone: %v", err)
+	}
+}
+
+// A re-source from git to a directory is the one edit that deletes a directory
+// after the files are saved — the clone the directory source makes redundant.
+// Renaming in the same call moves that clone first, so the removal has to name
+// the new name; naming the old one would leave the clone behind, and naming the
+// directory source would destroy the marketplace itself.
+func TestEditMarketplace_ResourceToDirectoryDropsTheRenamedClone(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available")
+	}
+	mktRepo, name := makeInstallableMarketplace(t)
+	dir := makeDirectoryMarketplace(t, "beta", "gadget")
+	m := NewManager(t.TempDir())
+	ctx := context.Background()
+	if _, err := m.AddMarketplace(ctx, "", Source{Kind: SourceURL, URL: mktRepo}); err != nil {
+		t.Fatalf("AddMarketplace: %v", err)
+	}
+	if _, err := m.Install(ctx, "widget", name); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	ref, err := m.EditMarketplace(ctx, name, "beta", &Source{Kind: SourceDirectory, Path: dir})
+	if err != nil {
+		t.Fatalf("EditMarketplace: %v", err)
+	}
+	if ref.InstallLocation != dir {
+		t.Fatalf("InstallLocation = %q, want the directory source %q", ref.InstallLocation, dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude-plugin", "marketplace.json")); err != nil {
+		t.Fatalf("the directory source itself was removed: %v", err)
+	}
+	for _, gone := range []string{name, "beta"} {
+		if _, err := os.Stat(m.marketplaceDir(gone)); !os.IsNotExist(err) {
+			t.Fatalf("clone directory %s outlived the re-source: %v", m.marketplaceDir(gone), err)
+		}
+	}
+	reg, _ := m.loadRegistry()
+	entries, ok := reg.Plugins[registryKey("widget", "beta")]
+	if !ok || len(entries) != 1 {
+		t.Fatalf("registry not re-keyed: %v", reg.Plugins)
+	}
+	if _, err := os.Stat(entries[0].InstallPath); err != nil {
+		t.Fatalf("the installed plugin lives under the cache, not the clone, but its path is gone: %v", err)
+	}
+	cat, err := m.Browse(ctx, "beta")
+	if err != nil || len(cat.Plugins) != 1 || cat.Plugins[0].Name != "gadget" {
+		t.Fatalf("Browse beta = %+v, %v", cat, err)
 	}
 }
 

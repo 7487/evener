@@ -242,7 +242,9 @@ func (m *Manager) RemoveMarketplace(ctx context.Context, name string) error {
 // is undone if a later step fails before the files are saved. The undo
 // restores each directory's NAME, not its former contents: a rename plus a
 // re-source that fails at the save leaves the new source's files sitting under
-// the old name, which the next Refresh corrects.
+// the old name, and nothing later reconciles that. A refresh pulls the clone's
+// own origin, which is now the new remote, so the store keeps serving the new
+// source's catalog while recording the old one until the edit is retried.
 //
 //  1. fetch a changed source into staging and parse its catalog (Add's own
 //     staging discipline: a bad source never half-registers);
@@ -358,8 +360,10 @@ func (m *Manager) EditMarketplace(ctx context.Context, name, newName string, src
 			ref.InstallLocation = dest
 		}
 		ref.Source = *src
+		// LastUpdated tracks how fresh the catalog on disk is, so only the
+		// branch that fetched one moves it; a rename moves no content.
+		ref.LastUpdated = m.now().UTC()
 	}
-	ref.LastUpdated = m.now().UTC()
 
 	// 4. The registry first: a marketplaces file naming a marketplace whose
 	// plugins are still keyed under the old name is the worse of the two
