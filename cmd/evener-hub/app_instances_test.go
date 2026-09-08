@@ -609,8 +609,8 @@ func TestInstances_RemoveDeletesEntryStoreKeyAndOAuthRecord(t *testing.T) {
 	if v, _ := f.store.Get("work"); v != "" {
 		t.Fatalf("the stored key survived Remove: %q", v)
 	}
-	if _, err := authopenai.LoadAuth(f.stateDir, "work"); err == nil {
-		t.Fatal("the OAuth record survived Remove")
+	if _, err := authopenai.LoadAuth(f.stateDir, "work"); !errors.Is(err, authopenai.ErrAuthNotFound) {
+		t.Fatalf("the OAuth record survived Remove (err = %v)", err)
 	}
 	for _, e := range f.ctl.List().Instances {
 		if e.Name == "work" {
@@ -1141,6 +1141,85 @@ func TestInstances_EditRenamesEntryDefaultStoredKeyAndOAuthRecord(t *testing.T) 
 		if e.Name == "work" {
 			t.Fatal("List still shows the old name")
 		}
+	}
+}
+
+// A store that refuses the write is the one failure that can lose a
+// credential: the copy has to land before the old entry is cleared, so the key
+// stays readable under the old name and the rename says what it left behind.
+// The refusal is injected at the seam the controller already keeps the store
+// write behind; everything asserted below is what the real moveCredentials,
+// the real providers.toml write and the real credential store did with it.
+func TestInstances_EditRenameReportsAStoredKeyItCouldNotCopy(t *testing.T) {
+	f := newInstancesFixture(t, nil)
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai-codex"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := f.store.Set("work", "sk-stored"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := authopenai.SaveAuth(f.stateDir, "work", makeOAuthRecord("work", "")); err != nil {
+		t.Fatalf("SaveAuth: %v", err)
+	}
+	f.ctl.auth.setCredential = func(string, string) error {
+		return errors.New("credentials.toml: write: read-only file system")
+	}
+
+	err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "personal"})
+	if err == nil || !strings.Contains(err.Error(), "stored key not copied") {
+		t.Fatalf("Edit(rename) = %v, want the refused copy reported", err)
+	}
+
+	// The entry is renamed either way: moveCredentials runs once
+	// providers.toml is written, so the file — the thing List answers from —
+	// is already the new name.
+	authoredEntry(t, f.tomlPath, "personal")
+	l, _, err := registry.ReadConfigFile(f.tomlPath)
+	if err != nil {
+		t.Fatalf("ReadConfigFile: %v", err)
+	}
+	if _, still := l.Providers["work"]; still {
+		t.Fatal("[providers.work] survived the rename")
+	}
+	if v, _ := f.store.Get("work"); v != "sk-stored" {
+		t.Fatalf("the stored key was lost rather than left behind: work = %q", v)
+	}
+	if v, _ := f.store.Get("personal"); v != "" {
+		t.Fatalf("a key landed under the new name despite the refused write: %q", v)
+	}
+	// Each half moves on its own, so a refused key copy does not strand the
+	// OAuth record under the old name.
+	if _, err := authopenai.LoadAuth(f.stateDir, "personal"); err != nil {
+		t.Fatalf("OAuth record did not move: %v", err)
+	}
+	if _, err := authopenai.LoadAuth(f.stateDir, "work"); !errors.Is(err, authopenai.ErrAuthNotFound) {
+		t.Fatalf("the old OAuth record was left behind (err = %v)", err)
+	}
+}
+
+// What was left behind beats a failed reload: the rename is already on disk,
+// and the next refresh reloads anyway, so the caller has to hear the thing
+// only this call knows. The store seam doubles as the one point a test can
+// reach between moveCredentials and that reload, which is why the unreadable
+// config is written from inside it.
+func TestInstances_EditRenameReportsTheMoveFailureOverAFailedReload(t *testing.T) {
+	f := newInstancesFixture(t, nil)
+	if err := f.ctl.Create(appwire.InstanceCreateParams{Name: "work", Base: "openai-codex"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := f.store.Set("work", "sk-stored"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	f.ctl.auth.setCredential = func(string, string) error {
+		if err := os.WriteFile(f.tomlPath, []byte("this is not toml\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return errors.New("credentials.toml: write: read-only file system")
+	}
+
+	err := f.ctl.Edit(appwire.InstanceEditParams{Name: "work", NewName: "personal"})
+	if err == nil || !strings.Contains(err.Error(), "stored key not copied") {
+		t.Fatalf("Edit(rename) = %v, want the refused copy, not the reload error", err)
 	}
 }
 
