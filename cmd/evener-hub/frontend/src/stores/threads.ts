@@ -1533,9 +1533,11 @@ async function publishAndReconcileThreadHydration(
         }
         if (!current()) return;
         await refreshMutationPins(runtime, [ref]);
-        // Descendant reads cannot prove an uncertain mutation absent. With no
-        // outbox records left, there is no uncertain delivery to block new sends.
-        const mutationsReconciled = mutationStateAuthoritative || (await runtime.storage.listOutbox(ref)).length === 0;
+        // Descendant reads cannot prove an uncertain mutation absent. Explicitly
+        // never-attempted intents need no receipt authority before first delivery.
+        const mutationsReconciled =
+          mutationStateAuthoritative ||
+          (await runtime.storage.listOutbox(ref)).every((record) => record.attempted === false);
         // A newer incompatible snapshot owns a different obligation. An older
         // successful reconciliation cannot clear that newer restriction.
         if (
