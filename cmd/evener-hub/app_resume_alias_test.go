@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"primeradiant.com/evener/appwire"
+	"primeradiant.com/evener/cmd/evener-hub/internal/daemonprocess"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
 	"primeradiant.com/evener/internal/appserver"
 	"primeradiant.com/evener/rendezvous"
@@ -24,7 +25,7 @@ func TestResumeUsesRetainedCurrentSessionAndReservesAliases(t *testing.T) {
 			}
 			aliases := []string{"a-stable", "z-current"}
 			finish := locks.BeginForceStop(aliases)
-			if err := locks.PersistForceStop(aliases); err != nil {
+			if err := locks.PersistForceStop(aliases, "z-current"); err != nil {
 				t.Fatal(err)
 			}
 			finish(true)
@@ -70,7 +71,7 @@ func TestResumeUsesRetainedCurrentSessionAndReservesAliases(t *testing.T) {
 	}
 }
 
-func TestResumeMissingMarkerDoesNotGuessRecoveryTarget(t *testing.T) {
+func TestResumeMissingMarkerUsesDurableRecoveryTarget(t *testing.T) {
 	for _, recreated := range []bool{false, true} {
 		for _, multiple := range []bool{false, true} {
 			t.Run(map[bool]string{false: "same", true: "recreated"}[recreated]+map[bool]string{false: " single", true: " aliases"}[multiple], func(t *testing.T) {
@@ -83,8 +84,12 @@ func TestResumeMissingMarkerDoesNotGuessRecoveryTarget(t *testing.T) {
 				if multiple {
 					aliases = append(aliases, "z-current")
 				}
+				target := "a-stable"
+				if multiple {
+					target = "z-current"
+				}
 				finish := locks.BeginForceStop(aliases)
-				if err := locks.PersistForceStop(aliases); err != nil {
+				if err := locks.PersistForceStop(aliases, target); err != nil {
 					t.Fatal(err)
 				}
 				finish(true)
@@ -95,17 +100,28 @@ func TestResumeMissingMarkerDoesNotGuessRecoveryTarget(t *testing.T) {
 					}
 				}
 				called := false
-				cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, Spawner: &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
 					called = true
+					want := "a-stable"
+					if multiple {
+						want = "z-current"
+					}
+					if req.SessionID != want {
+						t.Errorf("resume target=%s want=%s", req.SessionID, want)
+					}
 					return rendezvous.Entry{}, errors.New("launcher observed")
 				}}}
-				_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:a-stable"})
-				if err == nil {
-					t.Fatal("expected refusal or launcher error")
+				for _, alias := range aliases {
+					called = false
+					_, err = hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:" + alias})
+					if err == nil {
+						t.Fatal("expected launcher error")
+					}
+					if !called {
+						t.Fatalf("alias %s did not launch: %v", alias, err)
+					}
 				}
-				if called == multiple {
-					t.Fatalf("launch=%v multiple aliases=%v", called, multiple)
-				}
+
 				if !locks.RecoveryState("a-stable").ResumeRequired {
 					t.Fatal("failed resume cleared recovery")
 				}
@@ -132,17 +148,22 @@ func TestConcurrentAliasResumeSpawnsOneCurrentDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	finish := locks.BeginForceStop([]string{stable, current})
-	if err := locks.PersistForceStop([]string{stable, current}); err != nil {
+	cfg.ResumeLocks = locks
+	cfg.DaemonProcesses = forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) { return nil, daemonprocess.ErrExited })
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 106, StartedAt: time.Now().Add(-365 * 24 * time.Hour), SessionID: current, ThreadID: current, WorkspaceRef: "local:" + stable})
+	if err := forceStopThread(t.Context(), cfg, appwire.ThreadForceStopParams{Ref: "local:" + stable}, nil); err != nil {
 		t.Fatal(err)
 	}
-	finish(true)
-	// Restart recovery authority while preserving the daemon's stable/current identity.
+	entries, err := rendezvous.ListStrict(cfg.RunDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("expired crash marker retained: %v %v", entries, err)
+	}
+	// Recreate authority after force stop's refresh removed the expired marker.
 	cfg.ResumeLocks, err = hubcore.NewPersistentResumeLocks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 106, StartedAt: time.Now(), SessionID: current, ThreadID: current, WorkspaceRef: "local:" + stable})
+
 	original := cfg.Spawner
 	entered := make(chan struct{})
 	var enterOnce sync.Once
@@ -216,5 +237,113 @@ func TestResumeRejectsConflictingRetainedTranscriptIdentities(t *testing.T) {
 	}}
 	if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:stable"}); err == nil {
 		t.Fatal("ambiguous retained transcripts accepted")
+	}
+}
+
+func TestResumeIgnoresOnlyVerifiedExitedTranscriptClaims(t *testing.T) {
+	for _, uncertain := range []bool{false, true} {
+		t.Run(map[bool]string{false: "dead old and live current", true: "unresolved old and live current"}[uncertain], func(t *testing.T) {
+			cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: hubcore.NewResumeLocks()}
+			// A previous force-stop and Resume obligation is already cleared. A later
+			// daemon clear keeps the workspace alias but advances its current transcript.
+			finish := cfg.ResumeLocks.BeginForceStop([]string{"stable", "old"})
+			finish(true)
+			if err := cfg.ResumeLocks.ExplicitResumeCompleted("stable", cfg.ResumeLocks.RecoveryState("stable").Epoch); err != nil {
+				t.Fatal(err)
+			}
+			writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: "old", ThreadID: "old", WorkspaceRef: "local:stable"})
+			writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 102, SessionID: "current", ThreadID: "current", WorkspaceRef: "local:stable"})
+			cfg.DaemonProcesses = forceStopControllerFunc(func(target daemonprocess.Target) (daemonprocess.Process, error) {
+				if target.PID == 101 {
+					if uncertain {
+						return nil, errors.New("unverified identity")
+					}
+					return nil, daemonprocess.ErrExited
+				}
+				return &forceStopProcess{events: new([]string)}, nil
+			})
+			called := false
+			cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+				called = true
+				if req.SessionID != "current" {
+					t.Errorf("launched %q", req.SessionID)
+				}
+				return rendezvous.Entry{}, errors.New("launcher observed")
+			}}
+			if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:stable"}); err == nil {
+				t.Fatal("expected launcher error or refusal")
+			}
+			if called == uncertain {
+				t.Fatalf("launch=%v uncertain=%v", called, uncertain)
+			}
+		})
+	}
+}
+
+func TestResumeRejectsTargetRedirectedByNewerRecovery(t *testing.T) {
+	root := t.TempDir()
+	locks, err := hubcore.NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := locks.BeginForceStop([]string{"A", "B"})
+	if err := locks.PersistForceStop([]string{"A", "B"}, "A"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	finish = locks.BeginForceStop([]string{"A", "C"})
+	if err := locks.PersistForceStop([]string{"A", "C"}, "C"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	locks, err = hubcore.NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, Spawner: &fakeRPCSpawner{resume: func(context.Context, hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		t.Error("superseded recovery target reached launcher")
+		return rendezvous.Entry{}, errors.New("launcher observed")
+	}}}
+	if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:B"}); err == nil {
+		t.Fatal("redirected old target accepted")
+	}
+	for _, alias := range []string{"A", "B", "C"} {
+		if !locks.RecoveryState(alias).ResumeRequired {
+			t.Fatalf("failed resume cleared %s", alias)
+		}
+	}
+}
+
+func TestResumeUsesDurableTargetWhenAllRetainedClaimsExited(t *testing.T) {
+	root := t.TempDir()
+	locks, err := hubcore.NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := locks.BeginForceStop([]string{"stable", "current"})
+	if err := locks.PersistForceStop([]string{"stable", "current"}, "current"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	locks, err = hubcore.NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := hubcore.WebConfig{RunDir: t.TempDir(), ResumeLocks: locks, DaemonProcesses: forceStopControllerFunc(func(daemonprocess.Target) (daemonprocess.Process, error) { return nil, daemonprocess.ErrExited })}
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 101, SessionID: "old", ThreadID: "old", WorkspaceRef: "local:stable"})
+	writeRendezvous(t, cfg.RunDir, rendezvous.Entry{PID: 102, SessionID: "current", ThreadID: "current", WorkspaceRef: "local:stable"})
+	called := false
+	cfg.Spawner = &fakeRPCSpawner{resume: func(_ context.Context, req hubcore.ResumeRequest) (rendezvous.Entry, error) {
+		called = true
+		if req.SessionID != "current" {
+			t.Errorf("launched %q", req.SessionID)
+		}
+		return rendezvous.Entry{}, errors.New("launcher observed")
+	}}
+	if _, err := hubThreadResume(t.Context(), cfg, nil, appwire.ThreadResumeParams{Ref: "local:stable"}); err == nil {
+		t.Fatal("expected launcher error")
+	}
+	if !called {
+		t.Fatal("persisted current target did not reach launcher")
 	}
 }

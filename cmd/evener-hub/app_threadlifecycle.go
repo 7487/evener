@@ -13,6 +13,7 @@ import (
 	"primeradiant.com/evener/agent"
 	"primeradiant.com/evener/appwire"
 	"primeradiant.com/evener/cmd/evener-hub/internal/appsource"
+	"primeradiant.com/evener/cmd/evener-hub/internal/daemonprocess"
 	"primeradiant.com/evener/cmd/evener-hub/internal/fspaths"
 	"primeradiant.com/evener/cmd/evener-hub/internal/hubcore"
 	"primeradiant.com/evener/cmd/evener-hub/internal/launchconfig"
@@ -478,17 +479,19 @@ func resumeThread(ctx context.Context, cfg hubcore.WebConfig, sources *appsource
 	return hubResumedThreadResponse(ctx, sources, entry.SessionID, entry.ThreadID)
 }
 
-// resumeOwnership uses retained rendezvous identity to distinguish the current
-// transcript from its stable workspace alias. Recovery groups alone cannot do so.
+// resumeOwnership keeps the verified stopped transcript authoritative even when
+// roster cleanup removes its marker, and reserves every retained ownership alias.
 func resumeOwnership(cfg hubcore.WebConfig, requestedID string) (string, []string, error) {
 	aliases := cfg.ResumeLocks.RecoveryAliases(requestedID)
-	target := requestedID
-	found := false
+	durableTarget := cfg.ResumeLocks.RecoveryState(requestedID).ResumeSessionID
+	target := durableTarget
+	found := target != ""
+	var entries []rendezvous.Entry
 	if cfg.RunDir != "" {
-		entries, err := rendezvous.ListStrict(cfg.RunDir)
+		var err error
+		entries, err = rendezvous.ListStrict(cfg.RunDir)
 		if err != nil {
-			// The normal discovery path records partial failure and directly verifies
-			// a known owner. Preserve that path; never authorize a spawn from this read.
+			// Preserve normal discovery's partial-failure recording and direct probe.
 			if cfg.Roster == nil {
 				return "", nil, err
 			}
@@ -496,36 +499,99 @@ func resumeOwnership(cfg hubcore.WebConfig, requestedID string) (string, []strin
 				entries = []rendezvous.Entry{owner.Entry}
 			}
 		}
-		for _, entry := range entries {
-			if !slices.Contains(forceStopAliases(entry), requestedID) {
-				continue
-			}
-			if entry.SourceID != "" && entry.SourceID != "local" {
-				return "", nil, errors.New("daemon claims a foreign session source")
-			}
-			current := entry.SessionID
-			if current == "" {
-				current = entry.ThreadID
-			}
-			if current == "" {
-				return "", nil, errors.New("retained daemon has no current session identity; restore its rendezvous identity before resuming")
-			}
-			if found && target != current {
-				return "", nil, errors.New("retained daemons claim different current sessions; restore unambiguous rendezvous ownership before resuming")
-			}
+	}
+	var claims []rendezvous.Entry
+	for _, entry := range entries {
+		if !slices.Contains(forceStopAliases(entry), requestedID) && (target == "" || !slices.Contains(forceStopAliases(entry), target)) {
+			continue
+		}
+		if entry.SourceID != "" && entry.SourceID != "local" {
+			return "", nil, errors.New("daemon claims a foreign session source")
+		}
+		claims = append(claims, entry)
+		aliases = append(aliases, forceStopAliases(entry)...)
+	}
+	if len(claims) > 0 {
+		current, err := resumeClaimTarget(cfg, claims, durableTarget)
+		if err != nil {
+			return "", nil, err
+		}
+		target, found = current, true
+	}
+	if !found {
+		if len(aliases) > 1 {
+			return "", nil, errors.New("current session identity is missing for this recovery group; restore its daemon rendezvous marker before resuming")
+		}
+		target = requestedID
+	}
+	// An older partially overlapping group cannot revive a transcript redirected
+	// by a newer stop. Its obligation remains until its own recovery is resolved.
+	if state := cfg.ResumeLocks.RecoveryState(target); state.ResumeRequired && state.ResumeSessionID != "" && state.ResumeSessionID != target {
+		return "", nil, errors.New("resume target belongs to a newer recovery; resume the current owning session")
+	}
+	aliases = append(aliases, requestedID, target)
+	slices.Sort(aliases)
+	return target, slices.Compact(aliases), nil
+}
+
+// Distinct retained transcripts need process evidence: old crash markers are
+// not live owners, and an unverified process is never proof that a target is free.
+func resumeClaimTarget(cfg hubcore.WebConfig, claims []rendezvous.Entry, durableTarget string) (string, error) {
+	target := durableTarget
+	conflict := false
+	for _, entry := range claims {
+		current := entry.SessionID
+		if current == "" {
+			current = entry.ThreadID
+		}
+		if current == "" {
+			return "", errors.New("retained daemon has no current session identity")
+		}
+		if target != "" && target != current {
+			conflict = true
+		}
+		if target == "" {
 			target = current
-			aliases = append(aliases, forceStopAliases(entry)...)
-			found = true
 		}
 	}
-
-	aliases = append(aliases, requestedID)
-	slices.Sort(aliases)
-	aliases = slices.Compact(aliases)
-	if !found && len(aliases) > 1 {
-		return "", nil, errors.New("current session identity is missing for this recovery group; restore its daemon rendezvous marker before resuming")
+	if !conflict {
+		return target, nil
 	}
-	return target, aliases, nil
+	controller := cfg.DaemonProcesses
+	if controller == nil {
+		controller = daemonprocess.NewController()
+	}
+	liveTarget := ""
+	for _, entry := range claims {
+		current := entry.SessionID
+		if current == "" {
+			current = entry.ThreadID
+		}
+		process, err := controller.Open(daemonprocess.Target{PID: entry.PID, SessionID: current, StateDir: entry.StateDir, StartedAt: entry.StartedAt})
+		if errors.Is(err, daemonprocess.ErrExited) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("cannot verify retained daemon ownership: %w", err)
+		}
+		if err := process.Close(); err != nil {
+			return "", fmt.Errorf("close retained daemon ownership: %w", err)
+		}
+		if liveTarget != "" && liveTarget != current {
+			return "", errors.New("multiple live daemons claim different current sessions")
+		}
+		liveTarget = current
+	}
+	if liveTarget != "" {
+		if durableTarget != "" && durableTarget != liveTarget {
+			return "", errors.New("live daemon conflicts with the persisted recovery target")
+		}
+		return liveTarget, nil
+	}
+	if durableTarget != "" {
+		return durableTarget, nil
+	}
+	return "", errors.New("retained exited daemons have ambiguous current sessions and no persisted recovery target")
 }
 
 // resumeFailureError explains a failed replacement spawn when the daemon this

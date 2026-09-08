@@ -19,7 +19,7 @@ func TestPersistentRecoverySurvivesRecreationAndClearsOnlyItsGroup(t *testing.T)
 		t.Fatal(err)
 	}
 	finish := locks.BeginForceStop([]string{"A", "B"})
-	if err := locks.PersistForceStop([]string{"A", "B"}); err != nil {
+	if err := locks.PersistForceStop([]string{"A", "B"}, "B"); err != nil {
 		t.Fatal(err)
 	}
 	finish(false) // Committed intent survives a failed signal.
@@ -28,12 +28,12 @@ func TestPersistentRecoverySurvivesRecreationAndClearsOnlyItsGroup(t *testing.T)
 		t.Fatal(err)
 	}
 	for _, id := range []string{"A", "B"} {
-		if state := locks.RecoveryState(id); !state.ResumeRequired || state.Stopping != 0 {
+		if state := locks.RecoveryState(id); !state.ResumeRequired || state.Stopping != 0 || state.ResumeSessionID != "B" {
 			t.Fatalf("lost intent %s: %+v", id, state)
 		}
 	}
 	finish = locks.BeginForceStop([]string{"B", "C"})
-	if err := locks.PersistForceStop([]string{"B", "C"}); err != nil {
+	if err := locks.PersistForceStop([]string{"B", "C"}, "C"); err != nil {
 		t.Fatal(err)
 	}
 	finish(true)
@@ -64,7 +64,7 @@ func TestPersistentRecoverySurvivesRecreationAndClearsOnlyItsGroup(t *testing.T)
 }
 
 func TestPersistentRecoveryRejectsCorruptAuthority(t *testing.T) {
-	for _, raw := range []string{`{`, `{"version":2,"records":[]}`, `{"version":1,"records":[],"unknown":true}`, `{"version":1,"records":[]} {}`, `{"version":1,"records":[{"alias":"A","group":""}]}`, `{"version":1,"records":[{"alias":"A","group":"one"},{"alias":"A","group":"two"}]}`} {
+	for _, raw := range []string{`{`, `{"version":1,"records":[]}`, `{"version":2,"records":[],"unknown":true}`, `{"version":2,"records":[{"alias":"A","group":"one"}]}`, `{"version":2,"records":[{"alias":"A","group":"one","session_id":"A"},{"alias":"B","group":"one","session_id":"B"}]}`, `{"version":2,"records":[]} {}`, `{"version":2,"records":[{"alias":"A","group":"","session_id":"A"}]}`, `{"version":2,"records":[{"alias":"A","group":"one","session_id":"A"},{"alias":"A","group":"two","session_id":"A"}]}`} {
 		t.Run(raw, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(root, "recovery"), 0700); err != nil {
@@ -94,7 +94,7 @@ func TestPersistentRecoveryWriteFailurePolicy(t *testing.T) {
 				}
 				finish := locks.BeginForceStop([]string{"A", "B"})
 				if clear {
-					if err := locks.PersistForceStop([]string{"A", "B"}); err != nil {
+					if err := locks.PersistForceStop([]string{"A", "B"}, "B"); err != nil {
 						t.Fatal(err)
 					}
 					finish(true)
@@ -109,11 +109,14 @@ func TestPersistentRecoveryWriteFailurePolicy(t *testing.T) {
 				if clear {
 					err = locks.ExplicitResumeCompleted("A", locks.RecoveryState("A").Epoch)
 				} else {
-					err = locks.PersistForceStop([]string{"A", "B"})
+					err = locks.PersistForceStop([]string{"A", "B"}, "B")
 					finish(false)
 				}
 				if !errors.Is(err, boom) {
 					t.Fatalf("lost write error: %v", err)
+				}
+				if state := locks.RecoveryState("A"); state.ResumeRequired && state.ResumeSessionID != "B" {
+					t.Fatalf("memory lost target after uncertain write: %+v", state)
 				}
 				if got := locks.RecoveryState("A").ResumeRequired; got != (clear || renamed) {
 					t.Fatalf("memory obligation=%v", got)
@@ -121,6 +124,9 @@ func TestPersistentRecoveryWriteFailurePolicy(t *testing.T) {
 				reopened, err := NewPersistentResumeLocks(root)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if state := reopened.RecoveryState("A"); state.ResumeRequired && state.ResumeSessionID != "B" {
+					t.Fatalf("disk lost target after uncertain write: %+v", state)
 				}
 				wantDisk := renamed != clear
 				if got := reopened.RecoveryState("A").ResumeRequired; got != wantDisk {
@@ -147,7 +153,7 @@ func TestRecoveryAdmissionRemainsResponsiveDuringDurableClear(t *testing.T) {
 		t.Fatal(err)
 	}
 	finish := locks.BeginForceStop([]string{"A", "B"})
-	if err := locks.PersistForceStop([]string{"A", "B"}); err != nil {
+	if err := locks.PersistForceStop([]string{"A", "B"}, "B"); err != nil {
 		t.Fatal(err)
 	}
 	finish(true)
@@ -178,7 +184,7 @@ func TestRecoveryAdmissionRemainsResponsiveDuringDurableClear(t *testing.T) {
 		t.Fatal("old clear removed newer memory fence")
 	}
 	locks.store.faults = recoveryStoreFaults{}
-	if err := locks.PersistForceStop([]string{"B", "C"}); err != nil {
+	if err := locks.PersistForceStop([]string{"B", "C"}, "C"); err != nil {
 		t.Fatal(err)
 	}
 	finishNew(true)
@@ -245,14 +251,14 @@ func TestRecoveryIntentRequiresFileAndDirectoryDurability(t *testing.T) {
 			locks := NewResumeLocks()
 			locks.store = store
 			finish := locks.BeginForceStop([]string{"A"})
-			if err := locks.PersistForceStop([]string{"A"}); !errors.Is(err, boom) {
+			if err := locks.PersistForceStop([]string{"A"}, "A"); !errors.Is(err, boom) {
 				t.Fatalf("sync failure did not prohibit signal: %v", err)
 			}
 			if got := locks.RecoveryState("A").ResumeRequired; got != (stage == "renamed directory") {
 				t.Fatalf("uncertain intent memory=%v", got)
 			}
 			fail = false
-			if err := locks.PersistForceStop([]string{"A"}); err != nil {
+			if err := locks.PersistForceStop([]string{"A"}, "A"); err != nil {
 				t.Fatal(err)
 			}
 			finish(false)
@@ -260,7 +266,7 @@ func TestRecoveryIntentRequiresFileAndDirectoryDurability(t *testing.T) {
 				t.Fatalf("missing first-use or retry directory syncs: %v", observed)
 			}
 			reopened, err := openRecoveryStore(base, "/state")
-			if err != nil || reopened.state["A"] == "" {
+			if err != nil || reopened.state["A"].Group == "" {
 				t.Fatalf("retry did not preserve intent: store=%+v err=%v", reopened, err)
 			}
 		})
@@ -273,13 +279,13 @@ func TestExplicitResumeDoesNotClearChangedEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 	finish := locks.BeginForceStop([]string{"A"})
-	if err := locks.PersistForceStop([]string{"A"}); err != nil {
+	if err := locks.PersistForceStop([]string{"A"}, "A"); err != nil {
 		t.Fatal(err)
 	}
 	finish(true)
 	epoch := locks.RecoveryState("A").Epoch
 	finish = locks.BeginForceStop([]string{"A"})
-	if err := locks.PersistForceStop([]string{"A"}); err != nil {
+	if err := locks.PersistForceStop([]string{"A"}, "A"); err != nil {
 		t.Fatal(err)
 	}
 	finish(true)
@@ -304,7 +310,7 @@ func TestPersistentRecoveryFailsOnUnreadableState(t *testing.T) {
 func TestRecoveryIntentNormalizesAliasesAndPreservesMemorySemantics(t *testing.T) {
 	locks := NewResumeLocks()
 	finish := locks.BeginForceStop([]string{"A", "B"})
-	if err := locks.PersistForceStop([]string{"B", "A", "B"}); err != nil {
+	if err := locks.PersistForceStop([]string{"B", "A", "B"}, "B"); err != nil {
 		t.Fatal(err)
 	}
 	finish(false)
@@ -318,7 +324,7 @@ func TestRecoveryIntentNormalizesAliasesAndPreservesMemorySemantics(t *testing.T
 		t.Fatal("memory aliases failed to clear")
 	}
 	for _, aliases := range [][]string{nil, {""}, {"../A"}, {" local:A "}} {
-		if err := locks.PersistForceStop(aliases); err == nil {
+		if err := locks.PersistForceStop(aliases, "A"); err == nil {
 			t.Fatalf("invalid authority accepted: %v", aliases)
 		}
 	}
@@ -347,7 +353,7 @@ func TestRecoveryPersistenceUnderTraversalOnlyAncestor(t *testing.T) {
 	}
 	finish := locks.BeginForceStop([]string{"A"})
 	defer finish(false)
-	if err := locks.PersistForceStop([]string{"A"}); err != nil {
+	if err := locks.PersistForceStop([]string{"A"}, "A"); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := NewPersistentResumeLocks(root)
@@ -356,5 +362,52 @@ func TestRecoveryPersistenceUnderTraversalOnlyAncestor(t *testing.T) {
 	}
 	if !reopened.RecoveryState("A").ResumeRequired {
 		t.Fatal("persisted obligation missing")
+	}
+}
+
+func TestRecoveryTargetMustBeVerifiedAlias(t *testing.T) {
+	locks := NewResumeLocks()
+	for _, target := range []string{"", "../A", "other"} {
+		if err := locks.PersistForceStop([]string{"A", "B"}, target); err == nil {
+			t.Fatalf("accepted unverified target %q", target)
+		}
+	}
+}
+
+func TestRecoveryTargetSurvivesPartialGroupOverlap(t *testing.T) {
+	root := t.TempDir()
+	locks, err := NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := locks.BeginForceStop([]string{"A", "B"})
+	if err := locks.PersistForceStop([]string{"A", "B"}, "A"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	finish = locks.BeginForceStop([]string{"A", "C"})
+	if err := locks.PersistForceStop([]string{"A", "C"}, "C"); err != nil {
+		t.Fatal(err)
+	}
+	finish(true)
+	locks, err = NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := locks.RecoveryState("B"); !state.ResumeRequired || state.ResumeSessionID != "A" {
+		t.Fatalf("partial old group lost target: %+v", state)
+	}
+	if state := locks.RecoveryState("A"); !state.ResumeRequired || state.ResumeSessionID != "C" {
+		t.Fatalf("new group lost target: %+v", state)
+	}
+	if err := locks.ExplicitResumeCompleted("B", locks.RecoveryState("B").Epoch); err != nil {
+		t.Fatal(err)
+	}
+	locks, err = NewPersistentResumeLocks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locks.RecoveryState("B").ResumeRequired || locks.RecoveryState("A").ResumeSessionID != "C" || locks.RecoveryState("C").ResumeSessionID != "C" {
+		t.Fatal("old clear changed newer target")
 	}
 }

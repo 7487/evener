@@ -15,9 +15,14 @@ import (
 	"github.com/spf13/afero"
 )
 
+type recoveryAuthority struct {
+	Group     string `json:"group"`
+	SessionID string `json:"session_id"`
+}
+
 type recoveryRecord struct {
 	Alias string `json:"alias"`
-	Group string `json:"group"`
+	recoveryAuthority
 }
 
 type recoverySnapshot struct {
@@ -36,7 +41,7 @@ type recoveryStore struct {
 	fs            afero.Fs
 	root          string
 	directoryBase string
-	state         map[string]string
+	state         map[string]recoveryAuthority
 	faults        recoveryStoreFaults
 }
 
@@ -49,7 +54,7 @@ func openRecoveryStore(fs afero.Fs, root string) (*recoveryStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	store := &recoveryStore{fs: fs, root: root, directoryBase: base, state: map[string]string{}}
+	store := &recoveryStore{fs: fs, root: root, directoryBase: base, state: map[string]recoveryAuthority{}}
 	data, err := afero.ReadFile(fs, filepath.Join(root, "recovery", "state.json"))
 	if os.IsNotExist(err) {
 		return store, nil
@@ -67,17 +72,22 @@ func openRecoveryStore(fs afero.Fs, root string) (*recoveryStore, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, errors.New("decode recovery state: trailing data")
 	}
-	if snapshot.Version != 1 {
+	if snapshot.Version != 2 {
 		return nil, fmt.Errorf("unsupported recovery state version %d", snapshot.Version)
 	}
+	targets := make(map[string]string)
 	for _, record := range snapshot.Records {
-		if !validRecoveryAlias(record.Alias) || strings.TrimSpace(record.Group) == "" {
+		if !validRecoveryAlias(record.Alias) || strings.TrimSpace(record.Group) == "" || !validRecoveryAlias(record.SessionID) {
 			return nil, errors.New("invalid recovery alias or group")
 		}
 		if _, exists := store.state[record.Alias]; exists {
 			return nil, fmt.Errorf("duplicate recovery alias %q", record.Alias)
 		}
-		store.state[record.Alias] = record.Group
+		if target, ok := targets[record.Group]; ok && target != record.SessionID {
+			return nil, errors.New("recovery group has conflicting session identities")
+		}
+		targets[record.Group] = record.SessionID
+		store.state[record.Alias] = record.recoveryAuthority
 	}
 	return store, nil
 }
@@ -86,10 +96,10 @@ func validRecoveryAlias(alias string) bool {
 	return alias != "" && alias != "." && alias != ".." && strings.TrimSpace(alias) == alias && !strings.ContainsAny(alias, "/\\:\x00")
 }
 
-func (s *recoveryStore) commit(next map[string]string) (bool, error) {
-	snapshot := recoverySnapshot{Version: 1, Records: []recoveryRecord{}}
+func (s *recoveryStore) commit(next map[string]recoveryAuthority) (bool, error) {
+	snapshot := recoverySnapshot{Version: 2, Records: []recoveryRecord{}}
 	for _, alias := range slices.Sorted(maps.Keys(next)) {
-		snapshot.Records = append(snapshot.Records, recoveryRecord{Alias: alias, Group: next[alias]})
+		snapshot.Records = append(snapshot.Records, recoveryRecord{Alias: alias, recoveryAuthority: next[alias]})
 	}
 	data, err := json.Marshal(snapshot)
 	if err != nil {

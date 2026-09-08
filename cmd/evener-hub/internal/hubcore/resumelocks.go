@@ -40,21 +40,22 @@ func NewPersistentResumeLocks(stateRoot string) (*ResumeLocks, error) {
 	r.store = store
 	r.recovery = make(map[string]SessionRecoveryState)
 	groups := make(map[string]*sessionRecoveryGroup)
-	for alias, id := range store.state {
+	for alias, authority := range store.state {
+		id := authority.Group
 		group := groups[id]
 		if group == nil {
 			group = &sessionRecoveryGroup{}
 			groups[id] = group
 		}
 		group.aliases = append(group.aliases, alias)
-		r.recovery[alias] = SessionRecoveryState{ResumeRequired: true, group: group, durableGroup: id}
+		r.recovery[alias] = SessionRecoveryState{ResumeRequired: true, group: group, durableGroup: id, ResumeSessionID: authority.SessionID}
 	}
 	return r, nil
 }
 
-// PersistForceStop records verified aliases under their ownership locks before
-// signaling. A committed intent remains required even if signaling later fails.
-func (r *ResumeLocks) PersistForceStop(aliases []string) error {
+// PersistForceStop records verified aliases and their current transcript under
+// ownership locks before signaling. Committed intent survives signaling failure.
+func (r *ResumeLocks) PersistForceStop(aliases []string, sessionID string) error {
 	if len(aliases) == 0 {
 		return errors.New("recovery alias set is empty")
 	}
@@ -64,6 +65,9 @@ func (r *ResumeLocks) PersistForceStop(aliases []string) error {
 			return errors.New("invalid recovery alias")
 		}
 	}
+	if !validRecoveryAlias(sessionID) || !slices.Contains(aliases, sessionID) {
+		return errors.New("recovery target must be a verified ownership alias")
+	}
 	r.persistenceMu.Lock()
 	defer r.persistenceMu.Unlock()
 	id := rand.Text()
@@ -72,7 +76,7 @@ func (r *ResumeLocks) PersistForceStop(aliases []string) error {
 	if r.store != nil {
 		next := maps.Clone(r.store.state)
 		for _, alias := range aliases {
-			next[alias] = id
+			next[alias] = recoveryAuthority{Group: id, SessionID: sessionID}
 		}
 		committed, err = r.store.commit(next)
 	}
@@ -85,6 +89,7 @@ func (r *ResumeLocks) PersistForceStop(aliases []string) error {
 			state := r.recovery[alias]
 			state.ResumeRequired = true
 			state.durableGroup = id
+			state.ResumeSessionID = sessionID
 			r.recovery[alias] = state
 		}
 		r.mu.Unlock()
@@ -113,6 +118,7 @@ type SessionRecoveryState struct {
 	LastRecoverySequence uint64
 	Stopping             int
 	ResumeRequired       bool
+	ResumeSessionID      string
 	group                *sessionRecoveryGroup
 	durableGroup         string
 }
@@ -199,7 +205,7 @@ func (r *ResumeLocks) ExplicitResumeCompleted(sessionID string, epoch uint64) er
 	if r.store != nil {
 		next := maps.Clone(r.store.state)
 		for id, alias := range eligible {
-			if next[id] == alias.durableGroup {
+			if next[id].Group == alias.durableGroup {
 				delete(next, id)
 			}
 		}
@@ -218,6 +224,7 @@ func (r *ResumeLocks) ExplicitResumeCompleted(sessionID string, epoch uint64) er
 		}
 		alias.ResumeRequired = false
 		alias.durableGroup = ""
+		alias.ResumeSessionID = ""
 		r.recovery[id] = alias
 	}
 	return nil

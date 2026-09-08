@@ -62,7 +62,7 @@ func TestHubRecoveryRequirementSurvivesRecreation(t *testing.T) {
 					// A separately constructed registry must already fence recovery before
 					// the external process signal can take effect.
 					recreated := NewWebServer(cfg)
-					if state := recreated.cfg.ResumeLocks.RecoveryState(sessionID); !state.ResumeRequired {
+					if state := recreated.cfg.ResumeLocks.RecoveryState(sessionID); !state.ResumeRequired || state.ResumeSessionID != sessionID {
 						return errors.New("recreated hub lost recovery requirement before Kill")
 					}
 					killObserved.Store(true)
